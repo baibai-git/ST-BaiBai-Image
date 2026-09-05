@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   containsTagMarkup,
   ensureImageTagRegexRegistered,
+  formatPromptText,
   hasImageTagTrace,
   IMAGE_TAG_HIDE_REGEX_ID,
   IMAGE_TAG_SLOT_REGEX_ID,
@@ -30,7 +31,7 @@ describe('display-side slot script (markdownOnly)', () => {
     const script = imageTagSlotScript();
     expect(script.markdownOnly).toBe(true);
     expect(script.promptOnly).toBe(false);
-    expect(script.placement).toEqual([1, 2]);
+    expect(script.placement).toEqual([1, 2, 3]);
     expect(script.id).toBe(IMAGE_TAG_SLOT_REGEX_ID);
 
     const regex = regexFromLiteral(script.findRegex);
@@ -56,7 +57,7 @@ describe('prompt-side hide script (promptOnly)', () => {
     const script = imageTagHideScript();
     expect(script.markdownOnly).toBe(false);
     expect(script.promptOnly).toBe(true);
-    expect(script.placement).toEqual([1, 2]);
+    expect(script.placement).toEqual([1, 2, 3]);
     expect(script.id).toBe(IMAGE_TAG_HIDE_REGEX_ID);
 
     const regex = regexFromLiteral(script.findRegex);
@@ -67,6 +68,39 @@ describe('prompt-side hide script (promptOnly)', () => {
 
   it('shares the same find pattern as the slot script', () => {
     expect(imageTagSlotScript().findRegex).toBe(imageTagHideScript().findRegex);
+  });
+});
+
+describe('placement covers narrator floors (regression lock)', () => {
+  /**
+   * 为什么这条锁得写清楚缘由:旁白楼(`/narrator`、`/sys`)是 `is_system:false` +
+   * `extra.type:'narrator'`,st/context.ts 的 isAiStoryMessage **认它是剧情楼**、
+   * 自动 tag 会往里写 tag;而 script.js 的 getRegexPlacement 给这种楼派的是
+   * SLASH_COMMAND(3),不是 AI_OUTPUT(2)。少这个 3,锚点正则整条不命中——
+   * tag 原文当正文显示出来,还没有锚点可挂卡片。
+   *
+   * 只断言 `[1,2,3]` 的话,后人「精简掉用不上的 placement」时看不到代价;
+   * 这条测试要说的是 3 对应哪一类楼。
+   */
+  const PLACEMENT_BY_MESSAGE_KIND = {
+    user: 1,
+    ai: 2,
+    narrator: 3,
+  } as const;
+
+  it('both scripts cover user, ai and narrator display placements', () => {
+    for (const script of [imageTagSlotScript(), imageTagHideScript()]) {
+      for (const [kind, placement] of Object.entries(PLACEMENT_BY_MESSAGE_KIND)) {
+        expect(script.placement, `${script.id} 漏了 ${kind} 楼`).toContain(placement);
+      }
+    }
+  });
+
+  it('never covers the deprecated MD_DISPLAY placement', () => {
+    // 0 已被 ST 弃用,且 regex/index.js 会把带 0 的规则改写成「全部 placement」,
+    // 那会让占位规则跑到世界书(5)/思维链(6)上去。
+    expect(imageTagSlotScript().placement).not.toContain(0);
+    expect(imageTagHideScript().placement).not.toContain(0);
   });
 });
 
@@ -291,6 +325,40 @@ describe('serializeImageTag', () => {
   });
 });
 
+describe('formatPromptText', () => {
+  it('joins the parts with blank lines in card order', () => {
+    expect(
+      formatPromptText({
+        tag: '1girl, moonlight',
+        nl: 'She stands on the roof.',
+        negative: 'lowres',
+        characters: [{ name: '顾晚', tag: 'black hair', nl: 'looking away' }],
+      }),
+    ).toBe(
+      '1girl, moonlight\n\nShe stands on the roof.\n\n角色: 顾晚\nblack hair\nlooking away\n\nNegative: lowres',
+    );
+  });
+
+  it('drops empty parts instead of leaving blank gaps', () => {
+    expect(formatPromptText({ tag: '1girl', nl: '', negative: '', characters: [] })).toBe('1girl');
+    expect(formatPromptText({ tag: '', nl: '', negative: '', characters: [] })).toBe('');
+  });
+
+  it('renders what parseImageTagContent produces (gallery reads tags this way)', () => {
+    // 图库拿到的只有 tag 原文,要靠这条链路还原成与卡片一致的展示
+    const raw = serializeImageTag({
+      tag: '1girl',
+      nl: 'night',
+      negative: 'blurry',
+      characters: [{ name: '顾晚', tag: 'black hair', nl: '' }],
+      size: 'portrait',
+    });
+    expect(formatPromptText(parseImageTagContent(raw))).toBe(
+      '1girl\n\nnight\n\n角色: 顾晚\nblack hair\n\nNegative: blurry',
+    );
+  });
+});
+
 describe('replaceImageTagAt', () => {
   const text = '一\n<bbi_image>first</bbi_image>\n二\n<bbi_image>second</bbi_image>\n三\n<bbi_image>third</bbi_image>\n四';
   const next = '<bbi_image>edited<size>portrait</size></bbi_image>';
@@ -384,7 +452,7 @@ describe('managed bbi image-tag regex registration', () => {  it('registers both
       scriptName: '柏宝绘 · 隐藏生图标签',
       markdownOnly: false,
       promptOnly: true,
-      placement: [1, 2],
+      placement: [1, 2, 3],
       customField: 'preserved',
     });
 
@@ -395,7 +463,7 @@ describe('managed bbi image-tag regex registration', () => {  it('registers both
       scriptName: '柏宝绘 · 生图标签占位',
       markdownOnly: true,
       promptOnly: false,
-      placement: [1, 2],
+      placement: [1, 2, 3],
       replaceString: SLOT_DIV,
     });
     expect(saveSettingsDebounced).toHaveBeenCalledTimes(2);

@@ -472,7 +472,12 @@ describe('auto tag prompt', () => {
 
       // 取而代之的是 Base 块 + 每角色块。
       expect(text).toContain('■ P<编号>｜Base');
-      expect(text).toContain('■ P<编号>｜<角色名>');
+      expect(text).toContain('■ P<编号>｜<角色名或正文指称>');
+      // 角色块按取景框、不按档案:块名允许正文指称,固定外貌槽给【一次性】留了合法填法。
+      // 旧口径「照抄库中/刚建档的字段」是唯一来源,无名角色在这个槽位上无路可走——
+      // 于是模型宁可放弃画面(见「无名角色入画」问题文档),这条钉死不再回流。
+      expect(text).toContain('【一次性】角色用正文的指称原词作块名');
+      expect(text).toContain('【一次性】按世界观一次性补全');
       expect(text).toContain('不要用邻接绑定');
       expect(text).toContain('Base 块与角色块的分工是硬边界');
       expect(text).toContain('落 JSON 时进他自己的 characters[].tag');
@@ -492,6 +497,127 @@ describe('auto tag prompt', () => {
       settings.nai.model = oldModel;
     }
   });
+
+  // 建档资格 ≠ 入画资格。实跑里模型把「一次性无名路人不建档」读成「无名者不能入画」,
+  // 于是放弃了全文最强的戏剧瞬间(核心互动的另一方是个无名对手),转而挑了个能把他
+  // 裁出镜头的景别。根因是造名单的谓词写错了:第一层 B 只清点「有名有姓」,那人从未
+  // 上册,下游规则根本看不见他。三处必须同时成立,缺一处他就会在某一环被判死刑。
+  it('lets unprofiled characters enter the frame on the NAI V5 path', async () => {
+    const options: AutoTagSettings = {
+      enabled: true,
+      contextMessages: 2,
+      minImages: 0,
+      maxImages: 2,
+      retryCount: 1,
+      autoGenerate: true,
+      prompts: prompts(),
+    };
+    const oldBackend = settings.defaultBackend;
+    const oldModel = settings.nai.model;
+    try {
+      settings.defaultBackend = 'nai';
+      settings.nai.model = 'nai-diffusion-5-full';
+      const messages = await buildAutoTagMessages(context(), 1, options, null);
+      const text = messages.map(m => m.content).join('\n');
+
+      // ① 第一层 B 清点「谁在场」而不是「谁有档案」,并逐人标出三类身份。
+      expect(text).toContain('逐个列出实际在场的**全部**角色');
+      expect(text).toContain('清点的是「谁在场」，不是「谁有档案」');
+      expect(text).toContain('【一次性】');
+      expect(text).not.toContain('逐个列出实际在场且有名有姓的角色');
+
+      // ② 二选一 → 三选一。只改名单不改自查,那人会以合法身份上册、却在最后一关被
+      // 自己判死刑(「每个在场正式角色必须二选一」他两条都占不上)。
+      expect(text).toContain('每个在场角色都能三选一');
+      expect(text).not.toContain('每个在场正式角色都能二选一');
+
+      // 缺档不能否决核心互动;排除无关在场者仍是合法取景。
+      expect(text).toContain('建档资格与入画资格是两回事');
+      expect(text).toContain('不得仅因缺档案放弃画面、改选瞬间或裁掉他');
+
+      // 个体/人群只决定入画后的落位,不决定是否值得入画。
+      expect(text).toContain('拿不准是个体还是一团时按一团处理');
+      expect(text).toContain('People the story treats as a mass rather than as individuals');
+      expect(text).toContain('leave them in Base');
+
+      // 编人名是有毒的:name 会随 <characters> 落进正文,而 cleanHistoryText 保留
+      // bbi_image,下一楼原样读回——一个假人名与真档案无法区分,会被误建档。
+      expect(text).toContain('绝不为他编造人名');
+      expect(text).toContain('Never invent a personal name for them');
+
+      // Name consistency 原本是普世律,模型把「没有真名」读成「没有合法名」。
+      // 它的全部目的是保护逐字匹配,而一次性角色不参与任何匹配,故必须限定作用域。
+      expect(text).toContain('these rules govern characters who have a library entry');
+      expect(text).toContain('participates in no matching at all');
+
+      // 人数按取景框算;缺档不能成为裁掉核心互动参与者的理由。
+      expect(text).toContain('number of people visible inside this frame');
+      expect(text).toContain('a missing profile is never a reason to reject a moment or crop that participant out');
+
+      // C 段连坐:名单放宽后,不排除【一次性】会让模型给一次性对手维护服装时间线——
+      // 白烧 token,更糟的是强化「他是正经角色」的暗示,反过来诱发建档。
+      expect(text).toContain('【一次性】角色不在本段占行');
+
+      // 示例本身曾是反面教材:Base 写 2girls 却只给一条 Character Prompt,
+      // 正好演示了「另一个人没有落位」。示例必须演示要求的行为。
+      expect(text).toContain('三年级队长');
+      expect(text).not.toContain('"tag":"2girls, classroom, sunset, medium shot"');
+    } finally {
+      settings.defaultBackend = oldBackend;
+      settings.nai.model = oldModel;
+    }
+  });
+
+  // 只验证规则装配;实际取景是否突出主要角色仍需用剧情实跑。
+  it.each(['nai-diffusion-4-5-full', 'nai-diffusion-5-full'] as const)(
+    'prioritizes principal characters without requiring every present person in frame (%s)',
+    async model => {
+      const options: AutoTagSettings = {
+        enabled: true,
+        contextMessages: 2,
+        minImages: 0,
+        maxImages: 2,
+        retryCount: 1,
+        autoGenerate: true,
+        prompts: prompts(),
+      };
+      const oldBackend = settings.defaultBackend;
+      const oldModel = settings.nai.model;
+      try {
+        settings.defaultBackend = 'nai';
+        settings.nai.model = model;
+        const messages = await buildAutoTagMessages(context(), 1, options, null);
+        const contract = messages.find(m => m.content.startsWith('你是严谨的剧情画面规划'))!.content;
+        const thinking = messages.find(m => m.content.startsWith('【输出前思考清单】'))!.content;
+        const spec = messages.find(m => m.content.startsWith('[NovelAI'))!.content;
+        const selection = thinking.split('E. 选段\n')[1].split('第二层｜')[0];
+
+        expect(contract).toContain('优先表现正文中玩家主角和主要角色的表情、状态、行动及关系');
+        expect(contract).toContain('主要角色单独出镜同样成立');
+        expect(contract).toContain('不得把不在场者加入画面');
+        expect(contract).toContain('主要角色依据设定与剧情判断，不等同于所有已建档角色');
+        expect(contract).toContain('仅仅在场不构成入画理由');
+        expect(contract).toContain('Anonymous crowds visible in the frame remain in Base');
+        expect(selection).toContain('优先选择突出玩家主角或主要角色的画面');
+        expect(selection).toContain('不以有无档案或是否有名字给候选加减分');
+        expect(selection).toContain('先确定本图要突出的主体与核心互动，再决定谁入镜');
+        expect(selection).toContain('若人群本身承载核心互动则保留');
+        expect(thinking).toContain('清点名单不是入画名单');
+        expect(thinking).toContain('每个本图可见的个体角色各写一块');
+        expect(thinking).toContain('入画时才在他自己的角色块里补外貌');
+        expect(thinking).toContain('没有为了减人数破坏核心互动，也没有把无关在场者补进画面');
+        expect(thinking).not.toContain('每个在场角色各');
+        expect(thinking).not.toContain('入画资格只看正文是否写他在场');
+        expect(spec).toContain('Only include them when the chosen frame needs the crowd');
+        expect(spec).toContain('Other people or crowds may remain off-screen');
+        expect(spec).toContain('Keep an unnamed participant when needed to show the core interaction');
+        expect(spec).not.toContain('an extra body in Base costs a little rendering polish');
+      } finally {
+        settings.defaultBackend = oldBackend;
+        settings.nai.model = oldModel;
+      }
+    },
+  );
 
   // 思维链要求填景别/环境光/size,V5 规范里原本没有任何判据——模型只能瞎猜。
   it('teaches NAI V5 the visual-completion doctrine its slots depend on', async () => {

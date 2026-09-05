@@ -1,3 +1,4 @@
+import { utf8ToBase64 } from '@/base64';
 import { deleteUploadedFile, uploadBase64File } from '@/floor/upload';
 import type { NaiVibe, NaiVibeData, NaiVibeEncodings } from '@/state/settings';
 import { randomUuid } from '@/randomUuid';
@@ -57,19 +58,6 @@ async function deleteLocalData(path: string): Promise<void> {
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error ?? new Error('删除 Vibe 本地数据失败'));
   });
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
-}
-
-function utf8ToBase64(text: string): string {
-  return bytesToBase64(new TextEncoder().encode(text));
 }
 
 function safeFileKey(key: string): string {

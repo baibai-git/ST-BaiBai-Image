@@ -1,25 +1,32 @@
 import type { ComfyImageResult } from '@/backends/comfyui';
-import { deleteImageFile, uploadImageFile } from '@/floor/upload';
+import { utf8ToBase64 } from '@/base64';
+import { deleteUploadedFile, uploadBase64File } from '@/floor/upload';
 import { getContext, type STContext, type STMessage } from '@/st/context';
+import { deleteUserImage, uploadUserImage } from '@/st/images';
 import { settings } from '@/state/settings';
 
 /**
  * 楼层卡片结果存储层（DESIGN-FLOOR-UI.md §7）。
  *
  * 两层分离：
- * - 图片二进制 → ST 文件系统（user/files/bbi_...png），extra 只存指针 path。
+ * - 新图片二进制 → ST 文件系统（user/images/柏宝绘_<角色名>/），extra 只存指针 path。
+ *   旧 user/files 图片保留原位，不迁移、不删除。
  * - 元数据 → message.extra.bbiImage = { [swipeId]: { [promptHash]: BbiImageEntry[] } }
  *   按 swipeId 分桶（滑动互不污染）；promptHash 键下是历史列表（时间正序，
  *   最新在末尾，卡片翻页浏览）；水合时用当前 tag 原文重算 hash 做 stale 检测。
  *
- * 命名平铺（实测修正：validateAssetFileName 只允许 [a-zA-Z0-9_.-]，拒绝斜杠子目录）：
+ * 文件夹名由 ST 上传接口清洗，目录内保留原有文件命名：
  *   bbi_<characterNameHash>_<swipeId>_<promptHash>-<generationId>.<ext>
+ *
+ * 另有第三层「侧写」（sidecar，见 sidecarFileName）：与图片同名的 .json，落在 user/files。
+ * 只为图库服务——图库跨全部聊天按目录列图，而提示词只存在某一个聊天的 extra 里，
+ * 扫全库 JSONL 反查不可行（实测单个角色目录就有 GB 级、且 /api/chats/get 无分页）。
  */
 
 export interface BbiImageEntry {
   /** 本次生成唯一 id。 */
   generationId: string;
-  /** ST 静态路径 /user/files/...（<img src> 直接引用）。 */
+  /** ST 静态路径 /user/images/... 或旧 /user/files/...（<img src> 直接引用）。 */
   path: string;
   /** 生成时使用的完整 tag 原文（含 <bbi_image> 壳），与 promptHash 输入一致。 */
   prompt: string;
@@ -67,6 +74,43 @@ export function imageFileName(
 ): string {
   const characterHash = promptHash(characterName.trim() || 'unknown');
   return `bbi_${characterHash}_${swipeId}_${hash}-${genId}.${ext}`;
+}
+
+/* —— 侧写元数据（sidecar） —— */
+
+/** 侧写 json 的内容。v 是版本号：日后想加 backend/model 时靠它分辨老文件。 */
+export interface BbiImageSidecar {
+  v: 1;
+  /** 可读角色名（图片文件名里那个是哈希，还原不回来）。 */
+  character: string;
+  /** 生成时使用的完整 tag 原文（含 <bbi_image> 壳），与 entry.prompt 同源。 */
+  prompt: string;
+  seed: number | null;
+  createdAt: number;
+}
+
+/**
+ * 由图片文件名推出侧写文件名（换掉扩展名而已）。**读写两侧唯一口径**。
+ *
+ * 之所以能这么算、不用维护索引：/api/files/upload 是 `path.join(dir, body.name)` 原样落盘
+ * （files.js，只校验不清洗），故上传时给什么名字、事后就能凭同一个纯函数算回来。
+ * 而图片名 bbi_<hash>_<swipe>_<promptHash>-<genId> 恰好全在
+ * validateAssetFileName 的白名单 /^[a-zA-Z0-9_\-.]+$/ 内，天然合规。
+ *
+ * 侧写只能放 user/files:/api/images/upload 的 format 必须是媒体扩展名，json 不在其列，
+ * 塞不进图片自己的目录。
+ */
+export function sidecarFileName(imageFile: string): string {
+  const base = imageFile.replace(/\.[^./]*$/, '');
+  return `${base}.json`;
+}
+
+/** 由图片路径（/user/images/…）推出侧写的可访问路径；不是本插件的图片则返回空串。 */
+export function sidecarPathFor(imagePath: string): string {
+  const file = imagePath.split('/').pop() ?? '';
+  // 只认自家命名的图:外来文件算出来的名字必然 404，白刷一轮请求
+  if (!/^bbi_[a-zA-Z0-9_]+-[a-zA-Z0-9]+\.[a-z0-9]+$/i.test(file)) return '';
+  return `/user/files/${sidecarFileName(file)}`;
 }
 
 /* —— extra 读写（纯函数） —— */
@@ -303,10 +347,11 @@ export async function saveImageResult(
 
   const hash = promptHash(tag);
   const genId = generationId();
+  const characterName = ctx.chat[messageId]?.name?.trim() || ctx.name2?.trim() || '未命名角色';
   // 先按设置决定落盘格式(开关开启时重编码为 JPG)，文件名后缀跟随实际格式
   const { base64, format } = await prepareImageForStorage(result);
-  const name = imageFileName(ctx.name2?.trim() || chatId, swipeId, hash, genId, format);
-  const path = await uploadImageFile(name, base64);
+  const name = imageFileName(characterName, swipeId, hash, genId, format);
+  const path = await uploadUserImage(`柏宝绘_${characterName}`, name, base64, format);
 
   const entry: BbiImageEntry = {
     generationId: genId,
@@ -318,6 +363,23 @@ export async function saveImageResult(
     createdAt: Date.now(),
     slotSeq: seq,
   };
+
+  // 侧写:图库跨聊天浏览时，提示词只能从这里拿。
+  // **失败只警告不抛** —— 图已经存好了，绝不能因为一个附属 json 让整次存图失败;
+  // 用户宁可少看一段提示词，也不能丢图。
+  const sidecar: BbiImageSidecar = {
+    v: 1,
+    character: characterName,
+    prompt: tag,
+    seed,
+    createdAt: entry.createdAt,
+  };
+  try {
+    await uploadBase64File(sidecarFileName(name), utf8ToBase64(JSON.stringify(sidecar)));
+  } catch (error) {
+    console.warn('[柏宝绘] 侧写元数据写入失败（不影响图片）', error);
+  }
+
   const saved = await mutateStore(ctx, messageId, store => appendEntry(store, swipeId, hash, entry));
   if (!saved) {
     console.warn('[柏宝绘] 图片已上传但 extra 写入失败，文件留作孤儿', path);
@@ -329,6 +391,8 @@ export async function saveImageResult(
 /**
  * 删除一条结果：先 extra 删指针并落盘，成功后再删文件（顺序相反会留下
  * 指向已删文件的破指针；文件删除失败则留作孤儿由清理兜底）。
+ * 仅删除 user/images 下的文件（连同它的侧写 json），
+ * 旧 user/files 图片只移除记录，保留原文件。
  */
 export async function deleteImageResult(
   messageId: number,
@@ -357,11 +421,20 @@ export async function deleteImageResult(
     return next;
   });
   if (!removed) return false;
-  if (pathToDelete) {
+  if (/^\/?user\/images\//.test(pathToDelete)) {
     try {
-      await deleteImageFile(pathToDelete);
+      await deleteUserImage(pathToDelete);
     } catch (error) {
       console.warn('[柏宝绘] 删除图片文件失败（留作孤儿）', error);
+    }
+    // 侧写跟着走。deleteUploadedFile 对 404 返回 false 不抛（老图本就没有侧写，属正常）
+    const sidecar = sidecarPathFor(pathToDelete);
+    if (sidecar) {
+      try {
+        await deleteUploadedFile(sidecar);
+      } catch (error) {
+        console.warn('[柏宝绘] 删除侧写元数据失败（留作孤儿）', error);
+      }
     }
   }
   return true;

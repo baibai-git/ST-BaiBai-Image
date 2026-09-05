@@ -26,9 +26,32 @@ export const IMAGE_TAG_HIDE_REGEX_ID = 'bbi-image-tag-hide';
 
 // regex_placement：0=MD_DISPLAY(已弃用) / 1=USER_INPUT / 2=AI_OUTPUT / 3=SLASH_COMMAND。
 // 显示路径的 placement 随消息类型变化（script.js getRegexPlacement）：
-// 用户消息→1，AI 楼层→2；提示词路径 sendMessageAsUser→1、AI 生成→2。
+// 用户消息→1,AI 楼层→2,而 **extra.type === 'narrator' 的楼层→3**；
+// 提示词路径(script.js Generate)只按 is_user 二选一,只会是 1 或 2。
 const PLACEMENT_USER_INPUT = 1;
 const PLACEMENT_AI_OUTPUT = 2;
+/**
+ * 旁白楼(/narrator、/sys 等 extra.type='narrator')的显示 placement。
+ *
+ * 必须带上它:`/narrator` 造出的楼是 `is_system:false` + `extra.type:'narrator'`,
+ * 于是 st/context.ts 的 isAiStoryMessage **认它是剧情楼**——自动 tag 会往里写 tag。
+ * 而显示侧 getRegexPlacement 给这种楼派的是 3,只写 [1,2] 的话锚点正则整条不命中:
+ * tag 原文不被替换,DOMPurify 剥掉不认识的 `<bbi_image>` 壳、把里面的提示词当正文留下,
+ * 用户直接看到一串 danbooru tag,且没有锚点 = 没有卡片。
+ * 「tag 永不进 DOM」这条不变式在这一类楼上是破的。
+ *
+ * 提示词侧那条(hide)同样带上:它是 promptOnly,只在 isPrompt 时生效,而 ST 自己
+ * 从不用 (SLASH_COMMAND, isPrompt) 这个组合,故对现有路径是无操作;带上它是为了
+ * 「tag 永不进提示词」在第三方也调 getRegexedString 时依然成立——replaceString 是空串,
+ * 多覆盖一个 placement 不会有副作用。两条规则 placement 保持一致也更好推理。
+ */
+const PLACEMENT_SLASH_COMMAND = 3;
+
+const DISPLAY_AND_PROMPT_PLACEMENTS = [
+  PLACEMENT_USER_INPUT,
+  PLACEMENT_AI_OUTPUT,
+  PLACEMENT_SLASH_COMMAND,
+];
 
 export interface ManagedRegexScript extends Record<string, unknown> {
   id: string;
@@ -50,7 +73,7 @@ export function imageTagSlotScript(): ManagedRegexScript {
     findRegex: IMAGE_TAG_FIND_REGEX_LITERAL,
     replaceString: '<div data-bbi-slot=""></div>',
     trimStrings: [],
-    placement: [PLACEMENT_USER_INPUT, PLACEMENT_AI_OUTPUT],
+    placement: [...DISPLAY_AND_PROMPT_PLACEMENTS],
     disabled: false,
     markdownOnly: true,
     promptOnly: false,
@@ -69,7 +92,7 @@ export function imageTagHideScript(): ManagedRegexScript {
     findRegex: IMAGE_TAG_FIND_REGEX_LITERAL,
     replaceString: '',
     trimStrings: [],
-    placement: [PLACEMENT_USER_INPUT, PLACEMENT_AI_OUTPUT],
+    placement: [...DISPLAY_AND_PROMPT_PLACEMENTS],
     disabled: false,
     markdownOnly: false,
     promptOnly: true,
@@ -234,6 +257,30 @@ export function serializeImageTag(content: ImageTagContent): string {
     ? `<characters>${JSON.stringify(content.characters)}</characters>`
     : '';
   return `<bbi_image>${content.tag}${nl}${negative}${characters}<size>${content.size}</size></bbi_image>`;
+}
+
+/**
+ * 提示词全文的**唯一展示口径**：楼层卡片（复制 / 灯箱 / 展开区）与图库共用。
+ *
+ * 与 serializeImageTag 的分工:那个产出机器读的正文原文（会被 promptHash 吃），
+ * 这个产出人读的纯文本（段间空行、角色分段）。两者都不许各自照抄第二份——
+ * 图库要显示的必须与卡片上一字不差，否则同一张图在两处看到两种样子。
+ *
+ * size 刻意不出现:它是画幅方向，不是提示词内容，卡片上也从来不显示。
+ */
+export function formatPromptText(
+  content: Pick<ImageTagContent, 'tag' | 'nl' | 'negative' | 'characters'>,
+): string {
+  return [
+    content.tag,
+    content.nl,
+    ...content.characters.map(character =>
+      [`角色: ${character.name}`, character.tag, character.nl].filter(Boolean).join('\n'),
+    ),
+    content.negative ? `Negative: ${content.negative}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 /**

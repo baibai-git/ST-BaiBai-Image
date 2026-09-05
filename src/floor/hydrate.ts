@@ -3,9 +3,11 @@ import { h, render, watch, type VNode } from 'vue';
 import Card from '@/floor/Card.vue';
 import { clearAutoGenerateFlags } from '@/floor/autoGenerate';
 import { cardStyleSheet, cardStyleTextFallback } from '@/floor/cardStyles';
+import { onChatMutation } from '@/floor/chatObserver';
 import { setNaiConcurrency } from '@/floor/genQueue';
 import { clearAllGen, pruneGenSlots } from '@/floor/genState';
 import { SlotRegistry } from '@/floor/registry';
+import { checkSlotHealth, floorIdOf } from '@/floor/slotHealth';
 import { historyEntries, latestStaleEntry, promptHash, readStore } from '@/floor/storage';
 import { getContext, type STContext } from '@/st/context';
 import { BBI_SLOT_SELECTOR, parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
@@ -21,11 +23,27 @@ import { settings } from '@/state/settings';
  * 卡片渲进锚点自己的 **shadow root**（不是锚点本身）：楼层在 ST 的 light DOM 里，
  * ST 全局样式与用户装的美化主题会直接改到卡片上。shadow 边界双向隔离，
  * 与 index.ts 主窗口同构，只是从「一个大 host」变成「每槽位一个小 host」。
+ *
+ * 【两层触发,缺一不可】
+ * 1. 事件层(bindFloorHydration):ST 的渲染事件,覆盖正常路径,便宜且及时;
+ * 2. 自愈层(bindSlotSelfHealing):MutationObserver 兜住**不发事件**的路径。
+ *
+ * 第 2 层不是防御第三方插件,首先是防御 ST 自己:updateMessageBlock 直接
+ * `.mes_text.html(...)` 且不发任何事件,messageEditCancel/Done 用 `.empty()`,
+ * 右滑生成写 `.mes_text.html('...')`。锚点活在 .mes_text **里面**,这些路径一律
+ * 把它连同 shadow root 一起删掉,而事件层对此完全无感。用户报的
+ * 「图在生成、楼层里看不到界面」就是它——genState 是模块级的,卡片死了生成照样跑完。
+ *
+ * 相邻的柏宝书没这个毛病,不是因为它更结实,是因为它的宿主挂在 .mes_text **外面**
+ * 当兄弟节点,`.html()`/`.empty()` 只清 innerHTML,碰不到兄弟。而本插件的卡片必须
+ * 落在 tag 的行内位置(多 tag 楼层要按位置分别成图),搬不出去——同一条约束下
+ * 当初也否掉了官方 extra.media 方案(architecture.md §6)。故自愈是位置约束下的唯一解。
  */
 
 export const slotRegistry = new SlotRegistry();
 
 let bound = false;
+let healingBound = false;
 
 /**
  * 可继承的排版属性——shadow DOM 不隔离继承，这些会透过 host 从 ST 漏进来。
@@ -207,6 +225,88 @@ export function hydrateAll(ctx: STContext): void {
 const LATE_HYDRATION_DELAY = 100;
 
 /**
+ * 自愈:体检已挂载的槽位,把死掉的重挂;被宿主整段藏掉的只留痕(见 warnHiddenByHost)。
+ *
+ * 便宜是硬要求——它挂在 rAF 节流的 `#chat` observer 上,流式渲染期间每帧都可能跑。
+ * 成本上限是 O(已挂载卡片数)(实测量级 <20),每张只做 `isConnected` 属性读 +
+ * 一次 `closest()`;**只有真发现异常**才碰 DOM。绝不在这里调 hydrateVisible:
+ * 那会对每条消息跑 parseImageTags + readStore + promptHash,那才是真卡顿。
+ *
+ * 重挂按楼去重:一楼多卡时,`.mes_text` 被整体换掉意味着该楼所有槽位一起死,
+ * 逐个 hydrateMessage 会把同一楼重水合 N 次。
+ *
+ * 不必担心自激循环:hydrateMessage 写 DOM 会再唤醒一次本回调,但那一轮体检里
+ * 这些槽位已是 ok(锚点在文档内),不再产生写操作,循环到此为止。而 observer 只订阅
+ * childList、不订阅 attributes,写 data-theme/内联样式压根不会唤醒它。
+ */
+export function healSlots(): void {
+  let floorsToRehydrate: Set<number> | null = null;
+
+  for (const record of slotRegistry.all()) {
+    const host = record.container.host;
+    const health = checkSlotHealth(host);
+    if (health === 'ok') continue;
+
+    if (health === 'hidden-by-host') {
+      // 锚点还在、shadow root 也在,重挂多少次都没用:是祖先 .mes_text 整段被
+      // ST 的 inline_media 规则藏了(本楼有 extra.media 且 inline_image === false,
+      // 原生出图/打标扩展会写这个组合)。**刻意不去强改它**,只留痕,见 warnHiddenByHost。
+      warnHiddenByHost(host);
+      continue;
+    }
+
+    const floor = floorIdOf(host);
+    // 找不到楼层号:该楼整个不在文档里(切聊天/懒渲染卸载),等渲染事件即可。
+    // 记录留着不动——hydrateMessage 会在楼层回来时按 desired 集合正常对账。
+    if (floor === null) continue;
+    (floorsToRehydrate ??= new Set()).add(floor);
+  }
+
+  if (!floorsToRehydrate) return;
+  const ctx = getContext();
+  if (!ctx) return;
+  for (const floor of floorsToRehydrate) hydrateMessage(floor, ctx);
+}
+
+/** 已提示过的楼层(同一楼别每帧刷一行日志)。 */
+const hiddenWarned = new Set<number>();
+
+/**
+ * 「卡片被宿主整段隐藏」只留痕,不强改。
+ *
+ * 为什么不顺手钉一条 `display:block !important` 把它拉回来:那条 `display:none`
+ * 是 ST 有意为之——`extra.inline_image === false` 的语义正是「这一楼只看图、不看正文」,
+ * 由用户或别的扩展设定。强行解除会把人家特意藏起来的正文一并翻出来,对**现在没毛病**
+ * 的人是可见的倒退;而且行内样式一旦钉上就撤不掉了(ST 之后按 extra 重算 class,
+ * 却管不到我们写的 style),正是那种「改不了又一直在生效」的暗格。
+ *
+ * 卡片必须落在 tag 的行内位置(多 tag 楼层按位置分别成图),搬不出 .mes_text——
+ * 同一条约束当初也否掉了官方 extra.media 方案。故这一类只能如实报告:
+ * 日志给出楼层号与原因,便于用户反馈时一句话定位,不假装修好了。
+ */
+function warnHiddenByHost(host: Element): void {
+  const floor = floorIdOf(host);
+  const id = floor ?? -1;
+  if (hiddenWarned.has(id)) return;
+  hiddenWarned.add(id);
+  console.warn(
+    `[柏宝绘] 楼层 #${floor ?? '?'} 的卡片已挂载但不可见:该楼 .mes_text 被 ST 的 ` +
+      'inline_media 规则整段隐藏(本楼有附件图且 extra.inline_image 为 false)。' +
+      '这是宿主的有意行为,插件不强行解除;如需看到卡片,请让该楼恢复显示正文。',
+  );
+}
+
+/** 绑定自愈(幂等)。返回 false = `#chat` 不在文档里,宿主环境异常。 */
+export function bindSlotSelfHealing(): boolean {
+  if (healingBound) return true;
+  const chat = document.getElementById('chat');
+  if (!chat) return false;
+  healingBound = true;
+  onChatMutation(healSlots);
+  return true;
+}
+
+/**
  * Other ST listeners may still replace .mes_text after an event. Hydrate at the end of the
  * event loop, then check once more; an unchanged anchor only receives a cheap Vue props patch.
  */
@@ -254,6 +354,8 @@ export function bindFloorHydration(): boolean {
     clearAutoGenerateFlags();
     // A deleted/switched chat no longer owns in-flight generation work.
     clearAllGen();
+    // 楼层号在新聊天里指向别的楼,已提示过的记录一并作废,否则新聊天里同号楼永久静默
+    hiddenWarned.clear();
     scheduleHydration(hydrateAll, hydrateVisible);
   };
 
@@ -269,6 +371,9 @@ export function bindFloorHydration(): boolean {
   eventSource.on(eventTypes.CHAT_CHANGED, onFullReload);
 
   scheduleHydration(hydrateAll, hydrateVisible);
+
+  // 自愈层:兜住 ST 与第三方那些「重写 .mes_text 但不发事件」的路径(见文件头注释)
+  bindSlotSelfHealing();
 
   // 卡片主题改了 → 就地改各卡片 host 的 data-theme(不必重水合,令牌是 CSS 变量,自动生效)
   watch(

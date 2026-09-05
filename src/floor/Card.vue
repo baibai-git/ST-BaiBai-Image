@@ -38,6 +38,7 @@ import { activeComfyPreset, effectiveComfyConn, settings } from '@/state/setting
 import { beginImage, failImage, finishImage, safeHistory } from '@/state/history';
 import { copyText } from '@/st/clipboard';
 import { getContext } from '@/st/context';
+import { formatPromptText } from '@/st/imageTagRegex';
 
 /**
  * 楼层生图卡片(DESIGN-FLOOR-UI.md §8)。
@@ -136,16 +137,14 @@ const configured = computed(() => {
 });
 
 const current = computed(() => props.history[index.value] ?? null);
-/** 提示词全文:复制、灯箱、展开区共用。 */
+/** 提示词全文:复制、灯箱、展开区共用。口径与图库同源(st/imageTagRegex.ts)。 */
 const promptText = computed(() =>
-  [
-    props.prompt,
-    props.nl,
-    ...props.characters.map(character =>
-      [`\u89d2\u8272: ${character.name}`, character.tag, character.nl].filter(Boolean).join('\n'),
-    ),
-    props.negative ? `Negative: ${props.negative}` : '',
-  ].filter(Boolean).join('\n\n'),
+  formatPromptText({
+    tag: props.prompt,
+    nl: props.nl,
+    negative: props.negative,
+    characters: props.characters,
+  }),
 );
 /**
  * 当前展示的结果。**刻意不看运行态**:生成失败/重绘中都该继续显示上一张图,
@@ -359,7 +358,7 @@ async function removeEntry(
 ): Promise<void> {
   const ok = await confirmDialog({
     title: '删除这张图',
-    text: '图片文件与聊天记录里的指针都会删除,无法恢复。同一提示词的其它历史结果不受影响。',
+    text: '将删除这张图的聊天记录，无法恢复；images 中的文件会一并删除，files 中的旧图保留。同一提示词的其它历史结果不受影响。',
     confirmText: '删除',
     tone: 'danger',
   });

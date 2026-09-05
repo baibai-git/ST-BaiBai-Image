@@ -1,5 +1,6 @@
 import { requestFloorTags } from '@/autoTag/runner';
 import { confirmDialog } from '@/components/confirm';
+import { ensureChatObserver, onChatMutation } from '@/floor/chatObserver';
 import { isCurrentChatExcluded, settings } from '@/state/settings';
 import { getContext, isAiStoryMessage } from '@/st/context';
 import { hasImageTagTrace } from '@/st/imageTagRegex';
@@ -20,15 +21,15 @@ import { hasImageTagTrace } from '@/st/imageTagRegex';
  * 于是「隐藏前渲染过的楼留着按钮、隐藏后重渲染的楼没有按钮」同一条聊天两种样子。
  *
  * 按钮是纯 DOM(fa 图标与 ST 原生扩展按钮同款观感),不进 Vue 树。
- * ST 重渲染会重建楼层 DOM,MutationObserver 负责幂等对账(该有的补、该撤的撤)。
+ * ST 重渲染会重建楼层 DOM,共用的 #chat 观察器(floor/chatObserver.ts)负责幂等对账
+ * (该有的补、该撤的撤)。
  */
 
 const BUTTON_CLASS = 'bbi-tag-action';
 // 与扩展菜单入口同款调色板图标
 const ICON_CLASS = 'fa-palette';
 
-let observer: MutationObserver | null = null;
-let syncScheduled = false;
+let bound = false;
 
 function setRunning(button: HTMLElement, running: boolean): void {
   button.dataset.running = running ? '1' : '';
@@ -119,20 +120,12 @@ function syncButtons(): void {
 
 /** 绑定楼层按钮注入(幂等)。#chat 在 ST 静态模板里,绑定时不存在则说明环境异常,直接放弃。 */
 export function bindTagActionButtons(): boolean {
-  if (observer) return true;
-  const chat = document.getElementById('chat');
-  if (!chat) return false;
-
-  observer = new MutationObserver(() => {
-    if (syncScheduled) return;
-    syncScheduled = true;
-    // 合并同一帧内的连续变更(流式渲染期间 Mutation 很密)
-    requestAnimationFrame(() => {
-      syncScheduled = false;
-      syncButtons();
-    });
-  });
-  observer.observe(chat, { childList: true, subtree: true });
+  if (bound) return true;
+  // 观察器与卡片自愈共用一个(floor/chatObserver.ts):同一棵树别观察两遍,
+  // 开销在浏览器收集 MutationRecord 那一侧,不在回调侧。
+  if (!ensureChatObserver()) return false;
+  bound = true;
+  onChatMutation(syncButtons);
   syncButtons();
   return true;
 }

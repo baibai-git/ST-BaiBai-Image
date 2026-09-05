@@ -29,7 +29,7 @@ src/
 │   ├── messageEdit.ts # 写回消息正文(applyMessageText):身份 CAS + 正文落盘时现算,竞态保护
 │   ├── keyboard.ts    # shadow 内编辑控件方向键不冒泡到 ST 全局快捷键
 │   ├── clipboard.ts   # 复制到剪贴板统一入口(失败 toast;卡片/灯箱/历史页共用)
-│   ├── images.ts      # /api/images/* 上传/删除封装(user/images 子目录归类;画师串预览图、图库)
+│   ├── images.ts      # /api/images/* 上传/删除/列举封装(user/images 子目录归类;画师串预览图、图库)
 │   ├── imageFile.ts   # 图片读取与 canvas 缩放(File→dataURL、makeJpegThumbnail;与网络层分开)
 │   └── iconFallback.ts# 注入按钮的字体图标兜底(防美化主题清空图标)
 ├── state/             # 全局状态与持久化
@@ -77,10 +77,12 @@ src/
 │   ├── PromptEditor.vue # 手动改提示词的弹窗(结构化字段,非展示串;自带 Esc 捕获)
 │   ├── promptEditor.ts# 命令式打开编辑弹窗 + 写回正文(applyMessageText → 重水合)
 │   ├── download.ts    # 另存图片(卡片右上角 ⋯ 菜单与灯箱共用,同源文件走 <a download>)
-│   ├── storage.ts     # 结果存储:extra 元数据(swipeId→promptHash→历史)+ 文件命名
+│   ├── storage.ts     # 结果存储:extra 元数据(swipeId→promptHash→历史)+ 文件命名 + 侧写 json(图库提示词)
 │   ├── upload.ts      # ST /api/files/upload|delete 封装(不用未公开的 uploadFileAttachment)
 │   ├── autoGenerate.ts# 「写 tag 后自动出图」标记握手(runner ↔ Card onMounted)
-│   ├── actionButton.ts# 楼层「生成生图 tag」按钮注入(MutationObserver 幂等)
+│   ├── actionButton.ts# 楼层「生成生图 tag」按钮注入(共用 #chat 观察器,幂等对账)
+│   ├── chatObserver.ts# ★ `#chat` 的**唯一** MutationObserver(多订阅者 + rAF 节流)
+│   ├── slotHealth.ts  # ★ 卡片体检判据(纯函数):detached / hidden-by-host,顺序不可换
 │   ├── registry.ts    # 槽位挂载记录表(chatId|mesid|swipeId|seq → shadow root/vnode)
 │   ├── cardStyles.ts  # 构造共享 CSSStyleSheet(theme.css 选择器改写到 :host + card.css)
 │   └── card.css       # 卡片样式(取 --bbi-* 令牌,与设置窗口同一套设计语言)
@@ -88,7 +90,7 @@ src/
 │   ├── backend/index.vue      # 「渠道」页:页签(webui 已隐藏)+ 各后端面板
 │   │   └── panels/            # ComfyUIPanel / NaiPanel / WebUIPanel(隐藏,代码保留)/ NaiArtistManager
 │   ├── characters/index.vue   # 「角色管理」页:全局/本聊天两区卡片式外貌库 CRUD + 历史回滚
-│   ├── gallery/index.vue      # 「图库」页:占位(制作中)。定为依赖柏宝库的可选增强页,接口成型后落地
+│   ├── gallery/index.vue      # 「图库」页:按角色名分组浏览 user/images/柏宝绘_<角色名>/(只读:放大+看提示词+另存,删图仍走卡片)
 │   ├── history/index.vue      # 「请求历史」页:调试辅助(LLM 提示词/响应/生图元信息)
 │   └── settings/index.vue     # 「设置」页:渠道管理/自动 tag/提示词编辑/界面偏好(最大页)
 ├── components/       # 通用组件:BbiSelect/BbiCombo/BbiTextarea/Collapsible/ConfirmDialog/FloatingOrb/Icon/ModalMask/NavBar
@@ -224,12 +226,48 @@ runForFloor(floor, opts)
 `<bbi_image>…</bbi_image>` 在显示路径替换成空锚点 `<div data-bbi-slot=""></div>`;
 `bbi-image-tag-hide`(promptOnly)在提示词路径替换成空串 —— tag 永不进 DOM、永不进提示词。
 
+**placement 必须含 3(SLASH_COMMAND)**:显示侧 placement 由 `script.js` 的 `getRegexPlacement`
+按消息类型派发 —— 用户楼 1、AI 楼 2,而 **`extra.type==='narrator'` 的旁白楼是 3**。
+`/narrator`、`/sys` 造出的楼是 `is_system:false` + `extra.type:'narrator'`,于是
+`isAiStoryMessage` **认它是剧情楼**、自动 tag 会往里写 tag;只写 `[1,2]` 时锚点正则整条不命中,
+tag 原文被 DOMPurify 剥壳后当正文显示出来(用户直接看见一串 danbooru tag),且没有锚点 = 没有卡片
+—— 「tag 永不进 DOM」在这一类楼上是破的。提示词侧 ST 只用 1/2,hide 规则带上 3 是无操作,
+但两条规则 placement 保持一致更好推理(replaceString 是空串,多覆盖一个 placement 无副作用)。
+
 **水合(hydrate.ts)**:渲染事件(CHARACTER/USER_MESSAGE_RENDERED、MESSAGE_UPDATED、MESSAGE_SWIPED)→
 定位 `.mes[mesid] .mes_text` → `parseImageTags(message.mes)` 与 DOM 锚点**按序配对** →
 每个锚点 `attachShadow` 后 `render(h(Card,...), shadowRoot)`,记录进 `SlotRegistry`(key = chatId|mesid|swipeId|seq)。
 重水合前先 `render(null, container)` 显式卸载,全程幂等。MESSAGE_DELETED / CHAT_CHANGED 全量重建。
 事件后的水合走 `scheduleHydration`:setTimeout 0 先水合一次、~100ms 后再查一次——其他 ST 监听器
 可能在事件后替换 `.mes_text`(晚班时锚点未变只走 props patch,零重建);换聊天则作废。
+
+**自愈层(hydrate.ts 的 healSlots + floor/chatObserver.ts)—— 事件驱动兜不住的那一半**:
+锚点活在 `.mes_text` **里面**,而 ST 自己有好几条重写 `.mes_text` 的路径**不发任何事件**:
+`updateMessageBlock` 的 `.mes_text.html(...)`(script.js:1988)、`messageEditCancel/Done` 的
+`.empty()`、右滑生成时的 `.mes_text.html('...')`;第三方(提示词模板类)也会在自己的渲染钩子里
+`container.html(newContent)`。这些路径把锚点连同 shadow root 一起删掉,纯事件驱动的水合完全无感
+—— 而 genState 是模块级的,在途生成照样跑完。用户报的**「图在生成,楼层里看不到界面」**就是它。
+相邻的柏宝书没这毛病不是因为更结实,是它的宿主挂在 `.mes_text` **外面**当兄弟节点,
+`.html()`/`.empty()` 只清 innerHTML;而本插件的卡片必须落在 tag 的行内位置(多 tag 楼层按位置
+分别成图),搬不出去 —— 同一条约束当初也否掉了官方 `extra.media` 方案(见 §6)。故自愈是
+位置约束下的唯一解。判据抽在 `floor/slotHealth.ts`(纯函数,仓里没 jsdom,靠鸭子类型假节点单测):
+- `detached`(锚点脱离文档)→ 只重水合**受影响的那一楼**(按楼去重);
+- `hidden-by-host`(锚点在、但祖先 `.mes_text` 带 `inline_media` = ST 的 `display:none`)
+  → **只 console.warn,不强改**。那条隐藏是 ST 有意为之(`extra.inline_image===false` 的语义
+  就是「这楼只看图不看正文」),强行解除会把人家特意藏起来的正文一并翻出来;且行内样式钉上就
+  撤不掉(ST 之后按 extra 重算 class,管不到我们写的 style),正是「改不了又一直在生效」的暗格。
+- 顺序不可换:脱离文档的元素 `closest()` 仍会沿**已断开的子树**往上走、可能真找到带
+  `inline_media` 的那份 `.mes_text`;先判 hidden 就会把「已被删掉的楼」误诊成「只是被藏了」,
+  于是不重挂、只去改一个不在文档里的节点,卡片永远回不来(slotHealth.test.ts 锁了这条)。
+
+**`#chat` 观察器只有一个(floor/chatObserver.ts)**:楼层按钮对账与卡片自愈盯的是同一棵树、
+同样的 `childList+subtree`,故合成一个多订阅者的观察器。**这也是「加自愈会不会常驻卡顿」的答案**:
+不会 —— 开销在浏览器收集 MutationRecord 那一侧,而这笔钱从楼层按钮上线那天起就在付了,
+新增订阅者的边际成本只是回调里多跑一个函数。约束:订阅者回调必须是**便宜的对账**
+(healSlots 是 O(已挂载卡片数),每张只做 `isConnected` 属性读 + 一次 `closest()`,
+只有真发现异常才碰 DOM);**绝不在回调里跑 `hydrateVisible`** —— 那会对每条消息跑
+`parseImageTags`+`readStore`+`promptHash`,那才是真卡顿。**只订阅 childList,不订阅 attributes**:
+否则自愈/主题写属性的动作会反过来唤醒自己,变成自激循环。
 
 **卡片为什么在 shadow DOM 里**:楼层活在 ST 的 light DOM,ST 全局样式与用户装的美化主题
 会直接改到卡片上。每个锚点各自 `attachShadow` → 样式双向隔离(与 index.ts 主窗口同构,
@@ -347,12 +385,20 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 `body{touch-action:none}`(css/mobile-styles.css:251)。灯箱挂**插件** shadow root 并 Teleport
 到 `modalHost`(需要 `--bbi-*` 变量),不能挂卡片自己的 shadow——会被 `.mes_text` 的层叠上下文裁掉。
 
-**存储(floor/storage.ts)**,两层分离:
-- 图片二进制 → ST 文件系统 `user/files/bbi_<角色名哈希>_<swipeId>_<promptHash>-<genId>.<ext>`
-  (角色名经 promptHash 稳定哈希,避免中文/空格被替换成连串下划线;同角色跨聊天落同一前缀);
+**存储(floor/storage.ts)**,三层:
+- 新图片二进制 → ST 文件系统 `user/images/柏宝绘_<角色名>/bbi_<角色名哈希>_<swipeId>_<promptHash>-<genId>.<ext>`
+  (角色名优先取消息发言者,其次取当前聊天角色名,空值回退「未命名角色」;
+  `st/images.ts` 上传时由服务端清洗目录名,文件名保留 promptHash 稳定哈希);
 - 元数据 → `message.extra.bbiImage = { [swipeId]: { [promptHash]: BbiImageEntry[] } }`
   (历史时间正序,卡片翻页;`slotSeq` 隔离同楼多 tag)。
+- 侧写(sidecar)→ `user/files/<与图片同名>.json`,存 tag 原文 + seed,**只为图库服务**:
+  图库跨全部聊天按目录列图,而提示词只在某一个聊天的 extra 里,扫全库 JSONL 反查不可行
+  (单角色 chats 目录可达 GB 级、`/api/chats/get` 整文件返回无分页)。
+  文件名由 `sidecarFileName` 纯函数从图片名推出,不维护索引(`/api/files/upload` 原样落盘只校验不清洗)。
+  json 进不了 `user/images`(上传接口的 format 必须是媒体扩展名),故落 `user/files`。
+  **写失败只 warn 不抛** —— 图已存好,不能因附属 json 丢图;老图没有侧写属正常。
 - 写回用 CAS 循环(`mutateStore`,引用比对 + `saveChat`);保存顺序:先文件后指针 / 删时先指针后文件。
+- 旧 `user/files` 图片不迁移、不删除,按原路径显示;删除旧记录仅移除指针,只对 `user/images` 图片调用文件删除接口(连同它的侧写)。
 
 **出图后端(backends/)**:
 - `comfyui.ts`:两种互斥模式在 `generateComfyImage` 里分叉,汇合点是「拿到可提交 JSON」:
@@ -518,6 +564,11 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   共享存储创建时播种默认条目名规则 `\[mvu[\s\S]*?\]`(只发一次,删了不补回)。
 - **ui(本机 + 同步)**:窗口开关/当前页(activePage 存 localStorage)是纯本机态;
   主题/导航/悬浮球/楼层图片默认折叠(autoCollapseImages)属真设置,写入 `settings.ui` 走跨设备同步。
+  图库分组默认折叠,仅将手动展开的目录名存入本机 `bbi.ui.galleryExpanded.v1`;
+  旧 `galleryCollapsed.v1` 不反推展开态,未记录的新目录默认收起。`v-if` + Transition
+  使图片仅在展开时挂载、收起动画结束后卸载,保留原生 `loading="lazy"`。
+  每组首次显示 24 张,之后每次最多追加 24 张;追加数量仅本页面内保留,刷新页面后重置,
+  同页面内收起再展开保留进度。目录/文件名仍全量读取,不影响角色搜索和总数统计。
 - **charTags(三层真源:全局库 + 本聊天手动基线 + AI 楼层增量)**:
   - **全局库**:存 `extensionSettings['baibai_image_char_global']`(globalCharTags.ts,
     协议同共享渠道:revision + 指纹 + 广播事件),跨聊天/跨设备。定位是**冻结模板**:
@@ -556,8 +607,37 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
     送进生图。同一角色的固定外貌一张图里只写一遍,再次提到用简短指代承接。
     名字一致性写进提示词:首次建档的 name = 角色卡/世界书/柏宝书/正文里的原名(中文名写
     中文);已建档角色的引用(含 nl 里的名字) = 档案名,逐字相同,禁止音译/变体——
-    插件所有锚定与替换都按名字精确匹配,名字不一致即断链。
+    插件所有锚定与替换都按名字精确匹配,名字不一致即断链。**作用域限定在有档案(或本次
+    建档)的角色**:这套规则的全部目的是保护逐字匹配,一次性角色不参与任何匹配,不受此约束。
     页面提供历史查看与逐条回滚(建档记录回滚 = 删条目)。
+  - **建档资格 ≠ 入画资格(0.2.3,仅 4.5/V5 路径)**:两者挂**互相正交**的谓词——
+    进不进库看「有名 + 有设定/持续参与」(规则未变);占不占 `characters[]` 看**本图取景框内
+    是否可见**,与档案无关。故一次性无名角色照常入画,拿一条**仅本图有效**的 Character
+    Prompt(name = 正文指称原词,外貌一次性补全),不建档、不写 changes、不进库。
+    起因:实跑中模型把「一次性无名路人不建」读成「无名者不能入画」,连续放弃了核心互动
+    另一方是无名对手的全部瞬间,改挑能把他裁出镜头的景别。根因不是「规范少一种状态」,
+    而是**造名单的谓词写错了**——思维链第一层 B 只清点「有名有姓」,那人从未上册,下游
+    规则根本看不见他。修法是统一谓词(清点「谁在场」)+ 逐人标注三类身份
+    (【已建档】/【本次建档】/【一次性】),第三种状态由三条正交定义自然推出,不作为例外授权。
+    配套必须同批改,缺一处那人就在某一环被判死刑:第一层 B 名单与身份标注、第二层槽位块
+    (块名允许正文指称、**固定外貌槽给【一次性】留合法填法**——旧口径「照抄库中/刚建档的
+    字段」是唯一来源,无名者在这个槽位上无路可走)、第三层自查「二选一 → 三选一」、
+    C 段服装时间线排除【一次性】(否则给一次性对手维护跨图服装账本,反过来诱发建档)。
+    **选图与描述分开**:任务协议要求优先表现玩家主角和主要角色的表情、状态、行动及关系,
+    主要角色不等于所有已建档角色,也不要求玩家每张出现。NAI 的 E 段先定主体与核心互动,
+    再取景;不损失画面内容时优先排除无关在场者,必要的无名互动对象或人群照常保留,
+    不以有无名字/档案给候选加减分。B 段清点名单不是入画名单,槽位与自查按本图可见
+    范围书写,不能把镜头外的人补进 Base。
+    **入画后的落位才看可数性**:正文当作个体的(对手、店主)给角色块,当作一团的(人群、
+    士兵们)留 Base,拿不准按一团。此规则只管已选入镜头的人,不是鼓励加入路人或人群。
+    **禁止为一次性角色编人名**:`name` 虽不发给 NAI(见 §6 characterCaption),却会随
+    `<characters>` 序列化进正文,而 cleanHistoryText 保留 bbi_image → 下一楼原样读回;
+    一个假人名与真档案在回灌文本里无法区分,会被下一楼误判为正式角色而建档。
+    同批修掉的还有**人数口径**:Base 人数 = 取景框内可见人数(不是场景在场人数),不得
+    因缺档裁掉核心互动参与者,但允许排除无关在场者。旧口径只说「必须与正文一致」,模型于是自创
+    「镜头外存在合理」的旁注来自我说服。规范示例也一并改掉:旧例 Base 写 `2girls` 却只给
+    一条 Character Prompt,恰好演示了「另一个人没有落位」这一反面行为。
+    ⚠ 这是纯提示词改动,`prompt.test.ts` 锁的是**措辞**不是行为,能否真的修好只能实跑验证。
 
 ## 8. 贯穿全项目的约定
 
@@ -572,6 +652,9 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 - **渠道二选一**:`getTagGenChannel()` 有指派 → 副 API(服务端代理);否则跟随主 API(generateRaw)。
 - **随机段一律走 `randomUuid()`**(src/randomUuid.ts):ST 常在非安全上下文(http)下运行,
   那里 `crypto.randomUUID` 直接抛错;vibe 缓存键/文件名随机段只是防撞,不需要密码学强度。
+- **文本转 base64 一律走 `utf8ToBase64()`**(src/base64.ts):`btoa` 的入参是 latin1 二进制串,
+  码点 > 255 直接抛 InvalidCharacterError —— 提示词、角色名全是中文,直接 btoa 会当场炸。
+  必须先 `TextEncoder` 编码成字节再逐字节转(且分块拼接防栈溢出)。
 
 ## 9. 任务定位索引(改需求先查这里)
 
@@ -600,6 +683,8 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 | NAI 画师串库(多套保存/切换/拼在最前) | src/state/settings.ts 的 `NaiArtistPreset` + `activeNaiArtist`(拼装在 backends/nai.ts 的 `naiArtistPrompt` / `fullPositivePrompt`,UI 在 NaiPanel.vue) |
 | 画师串库管理器(搜索/预览图/批量删除) | src/pages/backend/panels/NaiArtistManager.vue(纯逻辑在 backends/naiArtistLib.ts;内置只读库在 backends/nai.ts 的 `BUILTIN_NAI_ARTISTS`) |
 | 画师串预览图(user/images 上传/删除) | src/st/images.ts + imageFile.ts(文件夹常量 `ARTIST_PREVIEW_FOLDER`) |
+| 图库页(按角色名分组列图) | src/pages/gallery/index.vue(目录/文件列举在 st/images.ts 的 `listUserImageFolders` / `listUserImages`) |
+| 图库点图看提示词 | src/floor/storage.ts 的 `sidecarFileName` / `sidecarPathFor`(存图时写侧写)+ gallery/index.vue(当前聊天读 extra、其余取侧写;展示口径 `formatPromptText`) |
 | 画幅方向 / 尺寸解析 | src/backends/size.ts(刻意不依赖 settings) |
 | 楼层卡片显示 / 水合 / 状态机 | src/floor/hydrate.ts + Card.vue |
 | 手动编辑生图提示词(卡片 ⋯ 铅笔) | src/floor/PromptEditor.vue + promptEditor.ts(序列化在 st/imageTagRegex.ts) |
@@ -609,8 +694,8 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 | NAI 429 / 重试 / 退避 / 全局冷却 | src/backends/naiRateLimit.ts(策略与节奏状态唯一口径;genQueue 取槽后等待,nai.ts 包住请求) |
 | 图片放大 / 长按保存 / 保存删除按钮 | src/floor/Lightbox.vue + lightbox.ts(另存走 download.ts) |
 | 卡片版面 / 按钮尺寸基线 / 卡片主题 | src/floor/card.css + cardStyles.ts(令牌来自 styles/theme.css) |
-| 结果存储 / 文件命名 / CAS | src/floor/storage.ts + upload.ts |
-| 显示/提示词两侧的正则 | src/st/imageTagRegex.ts |
+| 结果存储 / 文件命名 / CAS | src/floor/storage.ts + src/st/images.ts |
+| 显示/提示词两侧的正则 | src/st/imageTagRegex.ts(提示词展示全文口径 `formatPromptText`,卡片与图库共用) |
 | 楼层按钮 / 顶栏按钮 / 魔杖入口 | src/floor/actionButton.ts / src/topbar.ts / src/menu.ts |
 | 正文写回(含竞态) | src/st/messageEdit.ts |
 | 请求历史(LLM/生图,内存不持久化) | src/state/history.ts(store)+ src/pages/history/index.vue(页面)+ src/api/client.ts 埋点 |
