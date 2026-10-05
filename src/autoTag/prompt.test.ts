@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildAutoTagMessages } from '@/autoTag/prompt';
+import { importLlmPresets } from '@/autoTag/llmPresets';
 import {
   activeComfyPreset,
   settings,
@@ -57,6 +58,33 @@ function context(): STContext {
 }
 
 describe('auto tag prompt', () => {
+  it('uses the selected preset in both full-floor and one-image requests while retaining the insertion contract', async () => {
+    const [preset] = importLlmPresets(JSON.stringify({ 夜景: { entries: [
+      { role: 'system', content: '自定义摄影规范', enabled: true },
+      { role: 'assistant', content: '预设助手消息', enabled: true },
+      { role: 'user', content: '{{正文}}|{@getvar::生图数量@}', enabled: true },
+    ] } }));
+    const options: AutoTagSettings = {
+      enabled: true, contextMessages: 2, minImages: 0, maxImages: 3, retryCount: 1,
+      autoGenerate: true, prompts: prompts({ jailbreak: '内置破限', comfySpec: '内置规范', comfyThinking: '内置思考', prefill: '内置预填充' }),
+      llmPresets: [preset], llmPresetId: preset.id,
+    };
+    const messages = await buildAutoTagMessages(context(), 1, options, null);
+    expect(messages.slice(0, 3).map(m => m.role)).toEqual(['system', 'assistant', 'user']);
+    expect(messages[0].content).toBe('自定义摄影规范');
+    expect(messages[2].content).toContain('目标第一行');
+    expect(messages[2].content).toContain('|3');
+    expect(messages.map(m => m.content).join('\n')).not.toMatch(/内置破限|内置规范|内置思考|内置预填充/);
+    expect(messages.some(m => m.content.includes('position 必须是'))).toBe(true);
+    expect(messages.at(-1)?.role).toBe('user');
+    const slot = await buildAutoTagMessages(context(), 1, { ...options, minImages: 1, maxImages: 1 }, null, undefined, null, '只重写第一张');
+    expect(slot[2].content).toContain('|1');
+    expect(slot.at(-1)?.content).toContain('只重写第一张');
+    const builtin = await buildAutoTagMessages(context(), 1, { ...options, llmPresetId: '' }, null);
+    expect(builtin[0].content).toBe('内置破限');
+    expect(builtin.at(-1)?.content).toBe('内置预填充');
+  });
+
   it('marks only clean target paragraphs without pulling user messages before the earliest selected AI floor', async () => {
     const options: AutoTagSettings = {
       enabled: true,

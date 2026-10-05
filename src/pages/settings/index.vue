@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import LlmPresetSettings from './LlmPresetSettings.vue';
 import BbiSelect from '@/components/BbiSelect.vue';
 import BbiTextarea from '@/components/BbiTextarea.vue';
 import Collapsible from '@/components/Collapsible.vue';
@@ -824,6 +825,8 @@ async function confirmUpdate() {
         </ul>
         <p v-else class="bbi-field-hint">暂无自定义标签。仅内置清洗(思维链、注释、物品旁注等)生效。</p>
       </Collapsible>
+
+      <LlmPresetSettings />
 
       <!-- 自定义提示词(与柏宝书同款入口,独立成区) -->
       <Collapsible title="自定义提示词" :open="false">

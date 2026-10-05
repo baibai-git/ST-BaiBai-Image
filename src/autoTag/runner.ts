@@ -1,3 +1,4 @@
+import { parsePresetImagePlan } from '@/autoTag/presetProtocol';
 import { requestCompletion, requestViaMainApi } from '@/api/client';
 import { naiSupportsCharacterPrompts } from '@/backends/nai';
 import { readBookMemory } from '@/autoTag/bookMemory';
@@ -310,6 +311,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const promptOptions = slot
       ? { ...settings.autoTag, minImages: 1, maxImages: 1 }
       : settings.autoTag;
+    const usingPreset = !!promptOptions.llmPresets?.some(p => p.id === promptOptions.llmPresetId);
+    const characterPrompts = settings.defaultBackend === 'nai' && naiSupportsCharacterPrompts(settings.nai.model);
     const messages = await buildAutoTagMessages(
       context,
       floor,
@@ -337,7 +340,13 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         // (直接 let 会被 TS 收窄成 null:闭包内的赋值控制流分析看不见。)
         const parsed: { plan: ImagePlan | null } = { plan: null };
         const validate = (raw: string) => {
-          const candidate = parseImagePlan(
+          const candidate = usingPreset ? parsePresetImagePlan(
+            raw,
+            preparedTarget.segments,
+            promptOptions.minImages,
+            promptOptions.maxImages,
+            characterPrompts,
+          ) : parseImagePlan(
             raw,
             preparedTarget.segments,
             promptOptions.minImages,

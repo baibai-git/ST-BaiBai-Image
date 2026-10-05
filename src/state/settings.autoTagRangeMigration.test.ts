@@ -40,6 +40,19 @@ describe('自动 tag 图片数量范围迁移', () => {
     const autoTag = await hydrateWithAutoTag(undefined);
     expect(autoTag.minImages).toBe(0);
     expect(autoTag.maxImages).toBe(2);
+    expect(autoTag.llmPresets).toEqual([]);
+    expect(autoTag.llmPresetId).toBe('');
+  });
+
+  it('restores imported presets and selection without losing disabled entries or variables', async () => {
+    const preset = { id: 'preset-a', name: '摄影', variables: { 年龄: '25' }, entries: [
+      { id: 'entry-a', name: '提示', role: 'system', content: '夜景', enabled: false, triggerMode: 'trigger', triggerWords: '夜', andTriggerWords: '窗' },
+    ] };
+    const autoTag = await hydrateWithAutoTag({ llmPresets: [preset, { id: 'bad' }], llmPresetId: 'preset-a' });
+    expect(autoTag.llmPresets).toEqual([preset]);
+    expect(autoTag.llmPresetId).toBe('preset-a');
+    vi.resetModules();
+    expect((await hydrateWithAutoTag({ llmPresets: [preset], llmPresetId: 'missing' })).llmPresetId).toBe('');
   });
 
   it('把下限夹进 0～上限,并保证上限至少为 1', async () => {

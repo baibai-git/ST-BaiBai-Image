@@ -13,6 +13,7 @@ import {
   vibeMetaFromData,
 } from '@/backends/vibeStore';
 import { getContext } from '@/st/context';
+import { hydrateLlmPresets, type LlmPreset } from '@/autoTag/llmPresets';
 import { reactive, watch } from 'vue';
 
 /**
@@ -393,6 +394,9 @@ export const DEFAULT_JAILBREAK_PROMPT = `<sanctuary_override_directive>
 </sanctuary_override_directive>`;
 
 export interface AutoTagSettings {
+  /** 留空使用内置提示词；可选字段兼容旧调用方。 */
+  llmPresetId?: string;
+  llmPresets?: LlmPreset[];
   /** 新 AI 正文落地后自动请求模型。 */
   enabled: boolean;
   /** 发送最近多少个 AI 故事楼及其间 user 楼的清洗后正文；目标楼计入数量。 */
@@ -1127,6 +1131,8 @@ function defaults(): ImageSettings {
     channels: [],
     assignments: { tagGen: '' },
     autoTag: {
+      llmPresetId: '',
+      llmPresets: [],
       enabled: true,
       contextMessages: 2,
       minImages: 0,
@@ -1695,6 +1701,8 @@ function normalize(raw: unknown): ImageSettings {
       ? Math.min(maxImages, Math.max(0, Math.floor(rt.minImages)))
       : d.autoTag.minImages;
   merged.autoTag = {
+    llmPresets: hydrateLlmPresets(rt.llmPresets),
+    llmPresetId: typeof rt.llmPresetId === 'string' ? rt.llmPresetId : '',
     enabled: typeof rt.enabled === 'boolean' ? rt.enabled : d.autoTag.enabled,
     contextMessages:
       typeof rt.contextMessages === 'number' && Number.isFinite(rt.contextMessages)
@@ -1732,6 +1740,9 @@ function normalize(raw: unknown): ImageSettings {
       };
     })(),
   };
+  if (!merged.autoTag.llmPresets?.some(p => p.id === merged.autoTag.llmPresetId)) {
+    merged.autoTag.llmPresetId = '';
+  }
   merged.excludes = normalizeExcludes(r.excludes);
   // 存储行为:嵌套对象逐字段兜底(老数据无 storage 键 → 默认关)
   const rs = (r.storage ?? {}) as Partial<StoragePrefs>;
