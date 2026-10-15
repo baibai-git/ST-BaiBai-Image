@@ -34,6 +34,8 @@ import {
   vibeMetaFromData,
 } from '@/backends/vibeStore';
 import NaiArtistManager from '@/pages/backend/panels/NaiArtistManager.vue';
+import NaiFullPresetPanel from '@/pages/backend/panels/NaiFullPresetPanel.vue';
+import { refreshNaiFullVibeReferences } from '@/state/naiFullPresets';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import { makeJpegThumbnail } from '@/st/imageFile';
 import { deleteUserImage } from '@/st/images';
@@ -550,7 +552,9 @@ async function reencodeVibe(vibe: NaiVibe) {
     vibe.dataPath = paths.dataPath;
     vibe.thumbnailPath = paths.thumbnailPath;
     vibe.modelKeys = Object.keys(data.encodings);
+    const oldFingerprint = vibe.fingerprint;
     vibe.fingerprint = vibeFingerprint(data.encodings);
+    refreshNaiFullVibeReferences(settings.nai.fullPresets, vibe.id, oldFingerprint, vibe.fingerprint);
     toastr.success(`「${vibe.name}」已补 ${settings.nai.model} 编码`, 'Vibe');
   } catch (error) {
     toastr.error(errorMessage(error), 'Vibe 编码失败');
@@ -940,6 +944,7 @@ async function removeVibe(vibe: NaiVibe) {
         </div>
       </Collapsible>
 
+      <NaiFullPresetPanel>
       <Collapsible title="提示词" :open="false">
         <!-- 画师串库:形制与 ComfyUI 工作流库一致,多一个「不使用」选项 -->
         <div class="art-row">
@@ -1527,6 +1532,7 @@ async function removeVibe(vibe: NaiVibe) {
           </button>
         </div>
       </Collapsible>
+      </NaiFullPresetPanel>
     </div>
 
     <ModalMask :open="migrateConfirmOpen" @close="migrateConfirmOpen = false">
