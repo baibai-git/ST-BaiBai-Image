@@ -1,3 +1,4 @@
+import { captureNaiFullSnapshot, normalizeNaiFullPresets, type NaiFullPreset } from './naiFullPresets';
 import {
   normalizeSimpleConfig,
   simpleDefaults,
@@ -242,6 +243,9 @@ export interface NaiEndpoint {
 
 /** NAI 连接与出图参数。接入点(地址+密钥)可存多条,见 endpoints。 */
 export interface NaiSettings extends BackendConn {
+  /** 完整生图预设库；当前工作参数保持独立草稿，显式保存才更新预设。 */
+  fullPresets: NaiFullPreset[];
+  activeFullPresetId: string;
   /**
    * 接入点列表。**不变式:恒非空,且必含内置官方那条**(normalize 缺则补回列表首位)。
    * 官方条不可删,故 UI 不必处理「删空了怎么办」——与 ComfyUI 工作流库的恒非空同构,
@@ -1133,8 +1137,10 @@ export function newNaiEndpoint(name = '新接入点'): NaiEndpoint {
 }
 
 function naiDefaults(): NaiSettings {
-  return {
+  const nai: NaiSettings = {
     ...backendDefaults(NAI_OFFICIAL_URL),
+    fullPresets: [],
+    activeFullPresetId: 'nfp_current',
     resolution: '832×1216',
     // 新装即带内置官方那条并选中它:地址是必需品,空列表会让「测试连接」无处可点
     endpoints: [officialNaiEndpoint()],
@@ -1162,6 +1168,8 @@ function naiDefaults(): NaiSettings {
     naturalLanguage: true,
     orientationLock: 'auto',
   };
+  nai.fullPresets = normalizeNaiFullPresets(undefined, captureNaiFullSnapshot(nai, BUILTIN_NAI_ARTISTS.find(a => a.id === nai.activeArtistId) ?? null));
+  return nai;
 }
 
 function defaults(): ImageSettings {
@@ -1643,8 +1651,10 @@ function normalizeNai(raw: unknown, def: NaiSettings): NaiSettings {
       ? o.activeArtistId
       : '';
 
-  return {
+  const nai: NaiSettings = {
     ...conn,
+    fullPresets: [],
+    activeFullPresetId: '',
     // 「附加负面」已并入 undesiredContent 一个框,存量值折进去(见 foldLegacyNegative)
     negativePrompt: '',
     // 接入点:存量 url/key 收成第一条;恒非空且必含官方条(见 migrateNaiEndpoints)。
@@ -1679,6 +1689,10 @@ function normalizeNai(raw: unknown, def: NaiSettings): NaiSettings {
     naturalLanguage: typeof o.naturalLanguage === 'boolean' ? o.naturalLanguage : def.naturalLanguage,
     orientationLock: normalizeOrientationLock(o.orientationLock),
   };
+  const artist = artistPresets.find(a => a.id === activeArtistId) ?? BUILTIN_NAI_ARTISTS.find(a => a.id === activeArtistId) ?? null;
+  nai.fullPresets = normalizeNaiFullPresets(o.fullPresets, captureNaiFullSnapshot(nai, artist));
+  nai.activeFullPresetId = nai.fullPresets.some(p => p.id === o.activeFullPresetId) ? String(o.activeFullPresetId) : nai.fullPresets[0]?.id ?? '';
+  return nai;
 }
 
 /**
