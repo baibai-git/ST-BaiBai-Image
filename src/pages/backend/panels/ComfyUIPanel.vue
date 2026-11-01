@@ -192,6 +192,13 @@ const modelOptions = computed(() => {
 const vaeOptions = computed(() => lists.value?.vaes ?? []);
 const clipOptions = computed(() => lists.value?.clips ?? []);
 const loraOptions = computed(() => lists.value?.loras ?? []);
+const loraEmptyText = computed(() => fetching.value ? '正在读取 LoRA 清单…'
+  : fetchError.value ? `读取失败：${fetchError.value}；可手动输入文件名`
+  : lists.value?.mode === 'server' ? '后端转发未提供 LoRA 清单；启用 ComfyUI 跨域直连后重试，或手动输入'
+  : '未找到 LoRA 文件，可手动输入文件名');
+function openLoraOptions() {
+  if (!loraOptions.value.length) void onFetchModels(true);
+}
 const samplerOptions = computed(() =>
   lists.value?.samplers.length ? lists.value.samplers : FALLBACK_SAMPLERS,
 );
@@ -638,6 +645,9 @@ function applyAssist() {
                 :options="loraOptions"
                 placeholder="lora 文件名"
                 aria-label="LoRA 文件"
+                always-dropdown
+                :empty-text="loraEmptyText"
+                @open="openLoraOptions"
               />
               <input
                 class="bbi-input wf-lora-str"

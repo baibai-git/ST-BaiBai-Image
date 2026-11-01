@@ -3,7 +3,7 @@
   "loading_order": 100,
   "requires": [],
   "optional": [],
-  "js": "dist/index.js?ver=0.3.2-comfy-ordered-submit-20261031",
+  "js": "dist/index.js?ver=0.3.2-lora-picker-20261101",
   "author": "柏柏",
   "version": "0.3.2",
   "homePage": "https://github.com/baibai-git/ST-BaiBai-Image",
