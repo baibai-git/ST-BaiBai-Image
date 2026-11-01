@@ -206,7 +206,7 @@ export async function buildAutoTagMessages(
   // 动态负面词门槛:custom 模式看工作流是否含 %negative_prompt%;
   // simple 模式由模板决定(Flux 无真实负面输入,请求了也没地方写)。
   let negativeOn = false;
-  if (comfyPreset) {
+  if (comfyPreset?.generateNegative === true) {
     if (comfyPreset.mode === 'simple') {
       negativeOn = templateSupportsNegative(comfyPreset.simple.template);
     } else if (comfyPreset.workflow.trim()) {
@@ -282,7 +282,7 @@ export async function buildAutoTagMessages(
     : '4. tag 只能是该画面的正面内容提示词；不得包含质量词、负面词、JSON 以外的说明或 <bbi_image> 标签。';
   const negativeRule = negativeOn
     ? '\n   negative 是本画面专用的 danbooru 负面短 tag：只排除与正文冲突或本构图特别容易误生成的内容，可为空；禁止输出通用质量、画质、审美或技术性负面词，包括但不限于 worst quality、low quality、blurry、lowres、bad anatomy、bad hands、jpeg artifacts；不要写希望出现的内容，不得使用 @角色占位符。\n   negative 里绝不能出现正文已明确成立的事实，也不能否定你自己刚写进本图 tag/nl 的任何东西：正文写了在下雨、或你自己的 nl 写了 drizzle，就绝不许在 negative 写 rain；写了角色戴眼镜就不许写 glasses——那是在抹掉画面本该有的东西。写完 negative 逐词回看本图的 tag 与 nl，凡是能在里面找到对应内容的词一律删掉。拿不准时留空，空的 negative 永远比抵消正文的 negative 安全。'
-    : '';
+    : comfyOn ? '\n   本次不生成动态负面提示词，不输出 negative 或 negative_prompt 字段；固定负面词由工作流提供。' : '';
 
   // 设置层已维护 0 ≤ min ≤ max；这里仍做一次局部归一,让直接调用/测试传入脏对象也不会
   // 生成自相矛盾的数量协议。上限至少 1,下限 0 表示保留「本楼无需插图」的质量优先口径。

@@ -502,6 +502,12 @@ function applyAssist() {
         </label>
         <p class="bbi-field-hint wf-switch-hint">{{ nlHint }}</p>
 
+        <label class="bbi-switch-row">
+          <span class="bbi-field-label">AI 生成负面提示词</span>
+          <input v-model="active.generateNegative" type="checkbox" class="bbi-checkbox" aria-label="AI 生成负面提示词" />
+        </label>
+        <p class="bbi-field-hint wf-switch-hint">关闭时仅使用工作流固定负面词，AI 返回及旧卡片中的动态负面词均不参与生成；开启后还需模板或工作流支持负面输入。</p>
+
         <div class="bbi-num-row">
           <span class="bbi-field-label">竖屏尺寸(宽×高)</span>
           <input
@@ -722,7 +728,7 @@ function applyAssist() {
                 v-model="active.simple.negative"
                 :rows="2"
                 :max-rows="6"
-                placeholder="固定负面:通用负面词;AI 生成的动态负面追加在后"
+                :placeholder="active.generateNegative ? '固定负面:通用负面词;AI 生成的动态负面追加在后' : '固定负面:仅使用这里填写的负面词'"
               />
             </div>
           </section>
@@ -811,7 +817,7 @@ function applyAssist() {
           自然语言：{{ assistResult.nlMode === 'combined' ? '与正向 tag 共用输入' : '使用独立输入' }}
         </p>
         <p v-if="assistResult.hasNegative" class="workflow-detection">
-          已配置动态负面词；生成 tag 时会按画面输出补充负面 tag。
+          已配置负面输入；是否生成动态负面词由当前工作流的“AI 生成负面提示词”开关决定。
         </p>
 
         <footer class="bbi-modal-foot">

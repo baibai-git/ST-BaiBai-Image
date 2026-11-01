@@ -176,6 +176,7 @@ export function parseImagePlan(
   segments: TargetSegment[],
   minImages: number,
   maxImages: number,
+  allowNegative = true,
 ): ImagePlan {
   const parsed = parseObject(raw);
   if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
@@ -202,7 +203,7 @@ export function parseImagePlan(
     const tag = sanitizeContent(entry.tag ?? entry.prompt, 'tag', index);
     if (!tag) throw new Error(`images[${index}].tag 不能为空`);
     const nl = sanitizeContent(entry.nl, 'nl', index);
-    const negative = sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index);
+    const negative = allowNegative ? sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index) : '';
     const characters = sanitizeCharacters(entry.characters, index);
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);

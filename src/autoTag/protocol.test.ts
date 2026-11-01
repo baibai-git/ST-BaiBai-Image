@@ -362,3 +362,11 @@ describe('changes parsing', () => {
     });
   });
 });
+
+
+it('关闭动态负面词时丢弃AI误返回的negative及别名，包括其中的无效子标签', () => {
+  const segments = [{ id: 'P1', sourceLine: 0, text: '正文' }];
+  const raw = JSON.stringify({ images: [{ position: 'P1', tag: 'a quiet room', negative_prompt: 'bad</negative>' }] });
+  const plan = parseImagePlanWithRange(raw, segments, 0, 1, false);
+  expect(plan.images[0].negative).toBe('');
+});

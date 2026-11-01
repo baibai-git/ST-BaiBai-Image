@@ -71,12 +71,11 @@ describe('prompt body cleaning', () => {
 </bbs_items>
 尾部状态`;
 
-  it('cleans historical floors like BaiBai Book while preserving image tags', () => {
+  it('cleans historical floors without resending image prompts', () => {
     expect(cleanHistoryText(source, ['snow', 'bbi_image'])).toBe(
       `(起始时间:2026/8/16 10:00)
 第一段正文
 
-<bbi_image>1girl, silver hair<size>portrait</size></bbi_image>
 第二段正文
 (结束时间:2026/8/16 10:05)`,
     );
@@ -86,8 +85,6 @@ describe('prompt body cleaning', () => {
     expect(cleanTargetText(source, ['snow'])).toBe(
       `第一段正文
 
-<bbi_image>1girl, silver hair<size>portrait</size></bbi_image>
-
 第二段正文`,
     );
   });
@@ -96,19 +93,34 @@ describe('prompt body cleaning', () => {
     expect(prepareTargetText(source, ['snow'])).toEqual({
       promptText: `第一段正文 ⟦P1⟧
 
-<bbi_image>1girl, silver hair<size>portrait</size></bbi_image> ⟦P2⟧
-
-第二段正文 ⟦P3⟧`,
+第二段正文 ⟦P2⟧`,
       segments: [
         { id: 'P1', sourceLine: 3, text: '第一段正文' },
-        {
-          id: 'P2',
-          sourceLine: 5,
-          text: '<bbi_image>1girl, silver hair<size>portrait</size></bbi_image>',
-        },
-        { id: 'P3', sourceLine: 6, text: '第二段正文' },
+        { id: 'P2', sourceLine: 6, text: '第二段正文' },
       ],
     });
+  });
+
+  it('removes multiline Layout payloads while preserving narrative lines and their original positions', () => {
+    const raw = '😀前文\r\n<bbi_image><tag>{\r\n"layout":"9", "caption":"PRIVATE_LAYOUT"\r\n}</tag></bbi_image>\r\n后文';
+    expect(cleanHistoryText(raw, [])).toBe('😀前文\r\n后文');
+    expect(prepareTargetText(raw, [])).toEqual({
+      promptText: '😀前文 ⟦P1⟧\n\n后文 ⟦P2⟧',
+      segments: [
+        { id: 'P1', sourceLine: 0, text: '😀前文' },
+        { id: 'P2', sourceLine: 4, text: '后文' },
+      ],
+    });
+    expect(raw).toContain('PRIVATE_LAYOUT');
+  });
+
+  it('shares orphan/nested tag handling without swallowing surrounding narrative', () => {
+    const raw = '<BBI_IMAGE>\n前文<BBI_IMAGE>hidden</BBI_IMAGE>后文\n</bbi_image>\n结尾';
+    expect(cleanHistoryText(raw, [])).toBe('结尾'); // nested paired block
+    const orphan = '<bbi_image>\n前文<bbi_image>hidden</bbi_image>后文\n结尾</bbi_image_extra>';
+    expect(cleanHistoryText(orphan, [])).toContain('前文后文');
+    expect(prepareTargetText(orphan, ['bbi_image']).segments.map(s => s.text)).toEqual(['前文 后文', '结尾</bbi_image_extra>']);
+    expect(cleanTargetText('前<bbi_image></bbi_image>后', [])).toBe('前 后');
   });
 
   it('keeps inline prose on one mapped source line after removing a block', () => {

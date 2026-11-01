@@ -210,6 +210,7 @@ export async function generateImage(
       meta = { backend: 'nai', model: status.model, ...output.usage };
     } else {
       const conn = effectiveComfyConn();
+      const dynamicNegative = activeComfyPreset().generateNegative === true ? input.negative ?? '' : '';
       // 漫画 Layout:模型只写 panel/slot,这里按当前画布查表换成整数框;关闭漫画模式时原样返回。
       const mangaPrompt = applyMangaFrames(input.prompt, settings.manga, parseSize(pickSize(conn, size)));
       const mangaNl = mangaPrompt !== input.prompt ? '' : input.nl ?? '';
@@ -218,7 +219,7 @@ export async function generateImage(
         {
           prompt: mangaPrompt,
           nl: mangaNl,
-          negative_prompt: input.negative ?? '',
+          negative_prompt: dynamicNegative,
           seed: input.seed,
           size,
         },
@@ -233,7 +234,7 @@ export async function generateImage(
       const simpleValues: SimpleGenValues = {
         prompt: mangaPrompt,
         nl: mangaNl,
-        negative: input.negative,
+        negative: dynamicNegative,
         seed: input.seed,
         width,
         height,

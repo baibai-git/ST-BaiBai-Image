@@ -1,5 +1,5 @@
 import type { STContext, STMessage, WorldInfoEntry } from '@/st/context';
-import { getCheckWorldInfo, getContext, getEjsTemplate } from '@/st/context';
+import { getCheckWorldInfo, getCheckWorldInfoForBooks, getContext, getEjsTemplate } from '@/st/context';
 import { isWorldInfoEntryExcluded, sortWorldInfoEntriesLikeST } from '@/autoTag/excludes';
 import { stripCustomTags } from '@/autoTag/clean';
 import { settings } from '@/state/settings';
@@ -180,10 +180,18 @@ export async function fetchWorldInfo(
   // 变量时点代表楼:取本批**最后一个 target 楼**。EJS 里 getvar 据此读该楼的历史变量快照。
   const refFloor = targets.length ? targets[targets.length - 1] : undefined;
   try {
-    const check = await getCheckWorldInfo();
-    if (!check) return fetchWorldInfoViaPrompt(scanText, refFloor);
-
-    const res = await check(scanText, HUGE_WI_CONTEXT, true);
+    const dedicated = settings.worldBooks;
+    let res;
+    if (dedicated.enabled) {
+      if (!dedicated.names.length) return '';
+      const check = await getCheckWorldInfoForBooks();
+      if (!check) throw new Error('专用世界书扫描接口不可用，请安装配套兼容补丁并刷新酒馆。');
+      res = await check(scanText, HUGE_WI_CONTEXT, true, [...dedicated.names]);
+    } else {
+      const check = await getCheckWorldInfo();
+      if (!check) return fetchWorldInfoViaPrompt(scanText, refFloor);
+      res = await check(scanText, HUGE_WI_CONTEXT, true);
+    }
     const activated = res?.allActivatedEntries;
     if (!activated) return '';
     // allActivatedEntries 可能是 Set<entry> 或 Map<key,entry>,统一取 values;
@@ -199,6 +207,8 @@ export async function fetchWorldInfo(
     );
     return joinWorldInfoChunks(chunks);
   } catch (e) {
+    // 独立模式不能偷偷回落到酒馆书单或无书生成，让调用方报告失败。
+    if (settings.worldBooks.enabled) throw e;
     console.log('[柏宝绘] 世界书激活失败(降级为不带设定):', e);
     return '';
   }

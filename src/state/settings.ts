@@ -79,6 +79,8 @@ export interface ComfyWorkflowPreset extends SizePair {
   simple: ComfySimpleConfig;
   /** 生成自然语言:开=自动 tag 以连贯短句写正向提示词(Flux/SD3.5 等);关=逗号分隔 tag。 */
   naturalLanguage: boolean;
+  /** AI 生成动态负面词；未设置或关闭时只使用工作流固定负面。 */
+  generateNegative?: boolean;
   /** 画幅锁:auto = 由自动 tag 判定横竖;portrait/landscape = 这套工作流一律出该方向(见 size.ts)。 */
   orientationLock: OrientationLock;
 }
@@ -688,7 +690,7 @@ export const DEFAULT_COMFY_THINKING = `【输出前思考清单】
 第一层｜全局判断（整楼各做一次）
 
 A. 事实与状态账本
-   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文；历史 <bbi_image> 只作连续性线索，不能覆盖正文。
+   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文与角色资料；历史生图标签由插件在发送前移除。
    - 区分三类状态：角色库中的永久事实；连续场景中应继承的临时状态（衣物穿脱程度、湿身/污渍、伤势、饰品、手持物等）；只属于单帧的表情、视线和具体姿势。
    - 没有明确穿回、整理、换装、解除状态、时间跳跃或场景切换时，不得把临时状态恢复成角色默认值。
 
@@ -767,7 +769,7 @@ export const DEFAULT_NAI_THINKING = `【输出前思考清单】
 第一层｜全局判断（整楼各做一次）
 
 A. 事实与状态账本
-   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文；历史 <bbi_image> 只作连续性线索，不能覆盖正文。
+   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文与角色资料；历史生图标签由插件在发送前移除。
    - 区分三类状态：角色库中的永久事实；连续场景中应继承的临时状态（衣物穿脱程度、湿身/污渍、伤势、饰品、手持物等）；只属于单帧的表情、视线和具体姿势。
    - 没有明确穿回、整理、换装、解除状态、时间跳跃或场景切换时，不得把临时状态恢复成角色默认值。
 
@@ -844,7 +846,7 @@ export const DEFAULT_NAI_V5_THINKING = `【输出前思考清单】
 第一层｜全局判断（整楼各做一次）
 
 A. 事实与状态账本
-   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文；历史 <bbi_image> 只作连续性线索，不能覆盖正文。
+   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文与角色资料；历史生图标签由插件在发送前移除。
    - 区分三类状态：角色库中的永久事实；连续场景中应继承的临时状态（衣物穿脱程度、湿身/污渍、伤势、饰品、手持物等）；只属于单帧的表情、视线和具体姿势。
    - 没有明确穿回、整理、换装、解除状态、时间跳跃或场景切换时，不得把临时状态恢复成角色默认值。
 
@@ -1044,6 +1046,8 @@ export interface ImageSettings {
   assignments: { tagGen: string };
   /** 自动判断并向正文插入生图 tag。 */
   autoTag: AutoTagSettings;
+  /** 柏宝绘独立书单，不改变酒馆的世界书选择。 */
+  worldBooks: { enabled: boolean; names: string[] };
   /** 排除设置(镜像共享存储;真身在 extensionSettings['baibai_exclude_settings'])。 */
   excludes: ExcludesSettings;
   /** 落盘存储行为(新图格式)。 */
@@ -1096,6 +1100,7 @@ export function newComfyWorkflow(name = DEFAULT_WORKFLOW_NAME): ComfyWorkflowPre
     workflow: '',
     simple: simpleDefaults(),
     naturalLanguage: false,
+    generateNegative: false,
     portraitSize: DEFAULT_PORTRAIT_SIZE,
     landscapeSize: DEFAULT_LANDSCAPE_SIZE,
     orientationLock: 'auto',
@@ -1197,6 +1202,7 @@ function defaults(): ImageSettings {
     nai: naiDefaults(),
     channels: [],
     assignments: { tagGen: '' },
+    worldBooks: { enabled: false, names: [] },
     autoTag: {
       dshSession: false,
       enabled: true,
@@ -1410,6 +1416,7 @@ function normalizeWorkflowPreset(raw: unknown, seq: number): ComfyWorkflowPreset
     workflow: typeof o.workflow === 'string' ? o.workflow : '',
     simple: normalizeSimpleConfig(o.simple),
     naturalLanguage: typeof o.naturalLanguage === 'boolean' ? o.naturalLanguage : false,
+    generateNegative: o.generateNegative === true,
     portraitSize: size(o.portraitSize, DEFAULT_PORTRAIT_SIZE),
     landscapeSize: size(o.landscapeSize, DEFAULT_LANDSCAPE_SIZE),
     orientationLock: normalizeOrientationLock(o.orientationLock),
@@ -1782,6 +1789,12 @@ function normalize(raw: unknown): ImageSettings {
   // 任务指派:嵌套对象,逐字段兜底(老数据没有 assignments 键时回退空串=跟随主 API)
   const ra = (r.assignments ?? {}) as Partial<{ tagGen: string }>;
   merged.assignments = { tagGen: typeof ra.tagGen === 'string' ? ra.tagGen : '' };
+  merged.worldBooks = {
+    enabled: r.worldBooks?.enabled === true,
+    names: Array.isArray(r.worldBooks?.names)
+      ? [...new Set(r.worldBooks.names.filter((n): n is string => typeof n === 'string').map(n => n.trim()).filter(Boolean))]
+      : [],
+  };
   const rt = (r.autoTag ?? {}) as Partial<AutoTagSettings>;
   // 存量配置只有 maxImages:缺少 minImages 时回落 0,完整保留「没好画面可以不出图」的旧行为。
   // 先归一化上限,再把下限夹进 [0,上限],保证所有后续调用都能直接依赖范围不变式。
@@ -1865,6 +1878,7 @@ function applyInto(target: ImageSettings, src: ImageSettings): void {
   target.channels = src.channels;
   target.assignments = src.assignments;
   target.autoTag = src.autoTag;
+  target.worldBooks = src.worldBooks;
   target.excludes = src.excludes;
   target.storage = src.storage;
   target.manga = src.manga;

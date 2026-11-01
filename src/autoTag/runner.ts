@@ -40,7 +40,7 @@ import {
   serializeImageTag,
   stripImageTags,
 } from '@/st/imageTagRegex';
-import { getTagGenChannel, isCurrentChatExcluded, settings } from '@/state/settings';
+import { activeComfyPreset, getTagGenChannel, isCurrentChatExcluded, settings } from '@/state/settings';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -349,6 +349,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
             preparedTarget.segments,
             promptOptions.minImages,
             promptOptions.maxImages,
+            settings.defaultBackend !== 'comfyui' || activeComfyPreset().generateNegative === true,
           );
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
           // changes 白白消耗重试次数。NAI 关了自然语言时协议不要 nl,也就不验。

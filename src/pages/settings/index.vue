@@ -381,6 +381,7 @@ function toggleExcluded(name: string) {
 /* —— 排除世界书:tag 生成副 API 不带这些整本世界书的条目。复刻排除角色的搜索+勾选弹窗;
    世界书名从 ST 的 getWorldInfoNames()(全部已加载的世界书文件)取。 —— */
 const excludeWorldOpen = ref(false);
+const worldPickerMode = ref<'exclude' | 'dedicated'>('exclude');
 const excludeWorldSearch = ref('');
 
 // 旧版 ST(如 1.13.5)的 getContext() 没有 getWorldInfoNames,退而从主页面世界书
@@ -414,6 +415,7 @@ const filteredWorldNames = computed<string[]>(() => {
 });
 
 function openExcludeWorld() {
+  worldPickerMode.value = 'exclude';
   excludeWorldSearch.value = '';
   excludeWorldOpen.value = true;
 }
@@ -428,6 +430,27 @@ function toggleWorldExcluded(name: string) {
   const idx = list.indexOf(name);
   if (idx >= 0) list.splice(idx, 1);
   else list.push(name);
+}
+
+function openDedicatedWorld() {
+  worldPickerMode.value = 'dedicated';
+  excludeWorldSearch.value = '';
+  excludeWorldOpen.value = true;
+}
+function toggleDedicatedWorld(name: string) {
+  const list = settings.worldBooks.names;
+  const idx = list.indexOf(name);
+  if (idx >= 0) list.splice(idx, 1);
+  else list.push(name);
+}
+function isWorldPicked(name: string): boolean {
+  return worldPickerMode.value === 'dedicated'
+    ? settings.worldBooks.names.includes(name)
+    : isWorldExcluded(name);
+}
+function toggleWorldPicked(name: string) {
+  if (worldPickerMode.value === 'dedicated') toggleDedicatedWorld(name);
+  else toggleWorldExcluded(name);
 }
 
 /* —— 排除世界书条目:按条目名(comment)过滤,复刻清洗标签的输入框+chips。
@@ -850,6 +873,33 @@ async function confirmUpdate() {
         <p v-else class="bbi-field-hint">暂无条目名规则。</p>
       </Collapsible>
 
+      <Collapsible title="专用世界书设置" :open="false">
+        <label class="bbi-exclude-row">
+          <input v-model="settings.worldBooks.enabled" type="checkbox" class="bbi-checkbox" />
+          <span>启用柏宝绘专用世界书</span>
+        </label>
+        <p class="bbi-field-hint">
+          开启后，柏宝绘只扫描下方选中的世界书；常驻、关键词及其他触发规则沿用酒馆。
+          书单独立保存，不改变酒馆对话的启用名单。关闭后跟随酒馆当前世界书。
+          选书不会自动激活全部条目；现有排除名单仍然生效。开启但未选书时不带世界书。
+        </p>
+        <div class="bbi-channel-bar">
+          <span class="bbi-field-label">已选 {{ settings.worldBooks.names.length }} 本</span>
+          <button class="bbi-btn bbi-btn-primary bbi-btn-sm" type="button" @click="openDedicatedWorld">
+            <Icon name="edit" /> 选择世界书
+          </button>
+        </div>
+        <ul v-if="settings.worldBooks.names.length" class="bbi-exclude-chips">
+          <li v-for="name in settings.worldBooks.names" :key="name" class="bbi-exclude-chip">
+            <span class="bbi-exclude-chip-name">{{ name }}</span>
+            <button class="bbi-exclude-chip-x" type="button" title="移出专用书单" @click="toggleDedicatedWorld(name)">
+              <Icon name="close" />
+            </button>
+          </li>
+        </ul>
+        <p v-else class="bbi-field-hint">尚未选择专用世界书。</p>
+      </Collapsible>
+
       <!-- 自定义清洗标签:与柏宝书同名单共享 -->
       <Collapsible title="自定义清洗标签" :open="false">
         <p class="bbi-field-hint">
@@ -934,9 +984,9 @@ async function confirmUpdate() {
 
     <!-- ===== 排除世界书弹窗:搜索 + 勾选列表(复刻排除角色) ===== -->
     <ModalMask :open="excludeWorldOpen" @close="closeExcludeWorld">
-      <div class="bbi-modal" role="dialog" aria-modal="true" aria-label="编辑排除世界书名单">
+      <div class="bbi-modal" role="dialog" aria-modal="true" :aria-label="worldPickerMode === 'dedicated' ? '选择专用世界书' : '编辑排除世界书名单'">
         <header class="bbi-modal-head">
-          <span class="bbi-modal-title">整本排除世界书</span>
+          <span class="bbi-modal-title">{{ worldPickerMode === 'dedicated' ? '选择专用世界书' : '整本排除世界书' }}</span>
           <button class="bbi-icon-mini" type="button" title="关闭" @click="closeExcludeWorld"><Icon name="close" /></button>
         </header>
 
@@ -953,8 +1003,8 @@ async function confirmUpdate() {
             <input
               type="checkbox"
               class="bbi-checkbox"
-              :checked="isWorldExcluded(name)"
-              @change="toggleWorldExcluded(name)"
+              :checked="isWorldPicked(name)"
+              @change="toggleWorldPicked(name)"
             />
             <span class="bbi-exclude-row-name">{{ name }}</span>
           </label>
@@ -963,7 +1013,7 @@ async function confirmUpdate() {
         </div>
 
         <footer class="bbi-modal-foot">
-          <span class="bbi-exclude-count">共 {{ worldNames.length }} 本 · 已排除 {{ settings.excludes.excludedWorldNames.length }}</span>
+          <span class="bbi-exclude-count">共 {{ worldNames.length }} 本 · {{ worldPickerMode === 'dedicated' ? '已选' : '已排除' }} {{ worldPickerMode === 'dedicated' ? settings.worldBooks.names.length : settings.excludes.excludedWorldNames.length }}</span>
           <span class="bbi-modal-foot-spacer"></span>
           <button class="bbi-btn bbi-btn-primary" type="button" @click="closeExcludeWorld">完成</button>
         </footer>

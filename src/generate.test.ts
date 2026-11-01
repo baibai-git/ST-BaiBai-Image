@@ -60,6 +60,7 @@ function comfyReady(): void {
   preset.mode = 'custom';
   preset.workflow = '{"1":{}}';
   preset.orientationLock = 'auto';
+  preset.generateNegative = true;
 }
 
 describe('backendStatus', () => {
@@ -370,4 +371,22 @@ describe('generateImage', () => {
     expect(out.meta.negative).toBe('bad');
     expect(out.meta.positive).toBe('1girl');
   });
+});
+
+
+it('关闭AI负面词时旧卡片动态词不提交，简易模式固定负面与记录一致保留', async () => {
+  comfyReady();
+  const preset = settings.comfyui.workflows[0];
+  const saved = { mode: preset.mode, generateNegative: preset.generateNegative, negative: preset.simple.negative };
+  try {
+    preset.generateNegative = false;
+    await generateImage({ prompt: 'x', negative: 'OLD_DYNAMIC', seed: 1 });
+    expect(vi.mocked(generateComfyImage).mock.calls[0][1].negative_prompt).toBe('');
+    preset.mode = 'simple';
+    preset.simple.model = 'test.safetensors';
+    preset.simple.negative = 'FIXED_ONLY';
+    const output = await generateImage({ prompt: 'x', negative: 'OLD_DYNAMIC', seed: 2 });
+    expect(vi.mocked(generateComfyImage).mock.calls[1][1].negative_prompt).toBe('');
+    expect(output.meta.negative).toBe('FIXED_ONLY');
+  } finally { preset.mode = saved.mode; preset.generateNegative = saved.generateNegative; preset.simple.negative = saved.negative; }
 });

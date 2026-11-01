@@ -15,6 +15,12 @@
 
 原有渠道参数、温度、输出 token 上限和思考强度继续传递。DSH 模式需要明确指派副 API；不会静默退回主 API。
 
+自动 tag 请求会从历史楼层及目标正文的发送副本中去掉 `<bbi_image>…</bbi_image>`，
+包括其中的旧 Layout JSON、自然语言和尺寸信息。此清洗对普通副 API 与 DSH 共用，
+不修改酒馆保存的正文、图片元数据或显示锚点；目标段落的位置映射仍使用原始行号。
+当前任务的角色库、状态资料和单张重写所需的任务备注仍按原流程提供。
+DSH 会话中已经存下的旧助手回答不由此清理，不能将后续发送量减少视为已压缩持久历史。
+
 ## HTTP 路由
 
 `POST /v1/chat/completions`，`Content-Type: application/json`，可选 `Authorization: Bearer <key>`。

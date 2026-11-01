@@ -132,7 +132,7 @@ export function hasImageTagTrace(mes: string): boolean {
  * 开/闭标签只删自己。残骸必须清干净——留着它,ST 显示侧那条同样非贪婪的锚点正则
  * 会把正文吞进锚点(破图)。
  */
-export function stripImageTags(mes: string): string {
+export function imageTagRemovalRanges(mes: string): Array<{ start: number; end: number }> {
   const source = String(mes ?? '');
   // 就地新建:模块级带 /g 的正则实例 lastIndex 有状态,exec 循环不能共用(同 replaceImageTagAt)
   const tokens = /<\/?bbi_image\b[^>]*>/gi;
@@ -149,9 +149,15 @@ export function stripImageTags(mes: string): string {
     }
   }
   for (const open of openStack) ranges.push(open);
-  if (!ranges.length) return source;
-
   ranges.sort((left, right) => left.start - right.start);
+  return ranges;
+}
+
+/** 清理原文或发送副本；区间扫描亦供请求清洗使用，避免改动原始行号。 */
+export function stripImageTags(mes: string): string {
+  const source = String(mes ?? '');
+  const ranges = imageTagRemovalRanges(source);
+  if (!ranges.length) return source;
   let out = '';
   let cursor = 0;
   for (const range of ranges) {

@@ -291,7 +291,7 @@ describe('auto tag prompt', () => {
     expect(user.content).not.toContain('目标第一行 ⟦P1⟧');
   });
 
-  it('counts context by AI floors, keeps interleaved user floors, and preserves prior image tags', async () => {
+  it('counts context by AI floors and removes prior image payloads only from outgoing content', async () => {
     const ctx = context();
     ctx.chat = [
       { name: 'User', is_user: true, is_system: false, mes: '更早用户楼' },
@@ -308,7 +308,7 @@ describe('auto tag prompt', () => {
 尾部状态`,
       },
       { name: 'User', is_user: true, is_system: false, mes: '中间用户楼' },
-      { name: 'Char', is_user: false, is_system: false, mes: '当前目标楼' },
+      { name: 'Char', is_user: false, is_system: false, mes: '当前目标楼\n<bbi_image><tag>{"layout":"4","summary":{"caption":"OLD_TARGET_LAYOUT"}}</tag></bbi_image>', extra: { bbiImage: { retained: true } } },
     ];
     const options: AutoTagSettings = {
       enabled: true,
@@ -320,6 +320,7 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
 
+    const originalChat = JSON.stringify(ctx.chat);
     const oldTags = [...settings.excludes.customStripTags];
     const messages = await (async () => {
       settings.excludes.customStripTags = ['snow'];
@@ -332,7 +333,10 @@ describe('auto tag prompt', () => {
     const user = messages[messages.length - 1];
     expect(user.content).not.toContain('更早用户楼');
     expect(user.content).toContain('上一个 AI 楼');
-    expect(user.content).toContain('<bbi_image>1girl, long silver hair, red eyes<size>portrait</size></bbi_image>');
+    expect(user.content).not.toContain('<bbi_image>');
+    expect(user.content).not.toContain('1girl, long silver hair, red eyes');
+    expect(user.content).not.toContain('OLD_TARGET_LAYOUT');
+    expect(JSON.stringify(ctx.chat)).toBe(originalChat);
     expect(user.content).toContain('中间用户楼');
     expect(user.content).not.toContain('隐藏思维');
     expect(user.content).not.toContain('状态栏');
@@ -1073,8 +1077,10 @@ describe('auto tag prompt', () => {
     // 工作流改由「当前预设」承载(见 settings.ts 工作流库);默认值恒有一条,直接改它
     const preset = activeComfyPreset();
     const oldWorkflow = preset.workflow;
+    const oldNegative = preset.generateNegative;
     try {
       settings.defaultBackend = 'comfyui';
+      preset.generateNegative = true;
       preset.workflow = JSON.stringify({
         '6': {
           class_type: 'CLIPTextEncode',
@@ -1098,6 +1104,7 @@ describe('auto tag prompt', () => {
     } finally {
       settings.defaultBackend = oldBackend;
       preset.workflow = oldWorkflow;
+      preset.generateNegative = oldNegative;
     }
   });
 
@@ -1115,8 +1122,10 @@ describe('auto tag prompt', () => {
     const preset = activeComfyPreset();
     const oldMode = preset.mode;
     const oldTemplate = preset.simple.template;
+    const oldNegative = preset.generateNegative;
     try {
       settings.defaultBackend = 'comfyui';
+      preset.generateNegative = true;
       preset.mode = 'simple';
       preset.simple.template = 'checkpoint';
       const messages = await buildAutoTagMessages(context(), 1, options, null);
@@ -1129,6 +1138,7 @@ describe('auto tag prompt', () => {
       settings.defaultBackend = oldBackend;
       preset.mode = oldMode;
       preset.simple.template = oldTemplate;
+      preset.generateNegative = oldNegative;
     }
   });
 });
@@ -1365,5 +1375,25 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     } finally {
       state.restore();
     }
+  });
+});
+
+
+describe('ComfyUI AI负面提示词开关', () => {
+  it('工作流有负面占位符但关闭时，协议不要求负面字段且明确禁止AI补写', async () => {
+    const backend = settings.defaultBackend;
+    const preset = activeComfyPreset();
+    const saved = { mode: preset.mode, workflow: preset.workflow, generateNegative: preset.generateNegative };
+    try {
+      settings.defaultBackend = 'comfyui';
+      preset.mode = 'custom';
+      preset.workflow = JSON.stringify({ '6': { class_type: 'CLIPTextEncode', inputs: { text: '%prompt%', negative: '%negative_prompt%' } } });
+      preset.generateNegative = false;
+      const messages = await buildAutoTagMessages(context(), 1, { enabled: true, contextMessages: 2, minImages: 0, maxImages: 2, retryCount: 0, autoGenerate: false, prompts: prompts() }, null);
+      const contract = messages.find(message => message.purpose === 'contract')!.content;
+      expect(contract).not.toContain('"negative":"extra people');
+      expect(contract).not.toContain('negative 是本画面专用');
+      expect(contract).toContain('本次不生成动态负面提示词');
+    } finally { settings.defaultBackend = backend; Object.assign(preset, saved); }
   });
 });
