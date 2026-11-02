@@ -354,6 +354,20 @@ describe('resolveLayouts', () => {
 });
 
 describe('buildMangaSpec', () => {
+  it('标题使用启用版式的实际画布尺寸，兼容混合尺寸', () => {
+    const landscape = resolveLayouts(settingsWith(), 'landscape');
+    const custom = resolveLayouts(settingsWith(), 'portrait').map(layout => ({
+      id: layout.id, canvas: { width: 1152, height: 1728 }, portrait: layout.panels,
+      landscape: landscape.find(other => other.id === layout.id)!.panels,
+    }));
+    const spec = buildMangaSpec(settingsWith({ custom }));
+    expect(spec).toContain('portrait(1152×1728):');
+    expect(spec).toContain('landscape(1728×1152):');
+    expect(spec).not.toContain('portrait(1088×1920)');
+    const mixed = buildMangaSpec(settingsWith({ custom: [custom[0]] }));
+    expect(mixed).toContain('portrait(1152×1728 / 1088×1920):');
+  });
+
   it('清单里带每个版式的格数与槽位,且不含数字坐标', () => {
     const spec = buildMangaSpec(settingsWith());
     expect(spec).toContain('balanced_1');

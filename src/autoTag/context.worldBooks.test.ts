@@ -14,7 +14,7 @@ vi.mock('@/st/context', () => ({
   getCheckWorldInfoForBooks: async () => mocks.available ? mocks.dedicated : null,
   getEjsTemplate: () => null,
 }));
-import { fetchWorldInfo } from './context';
+import { buildWorldInfoSystem, fetchWorldInfo } from './context';
 
 const chat = [{ name: 'Alice', is_user: false, is_system: false, mes: 'A lighthouse.' }];
 const activated = () => ({ allActivatedEntries: new Map([
@@ -58,5 +58,31 @@ describe('专用书单请求隔离', () => {
     mocks.dedicated.mockRejectedValueOnce(new Error('load failed'));
     await expect(fetchWorldInfo(chat, [0], 'User', 'Alice')).rejects.toThrow('load failed');
     expect(mocks.standard).not.toHaveBeenCalled();
+  });
+  it('已激活的画风开关有明确标识，普通画风资料不被提升为开关', async () => {
+    mocks.standard.mockResolvedValue({ allActivatedEntries: new Set([
+      { world: 'Style', comment: '004 · 画风-真人（开关） 🔵', content: 'Photographic portrait.' },
+      { world: 'Reference', comment: '画风-材质参考', content: 'Material reference.' },
+    ]) });
+    const text = await fetchWorldInfo(chat, [0], 'User', 'Alice');
+    expect(text).toContain('【本轮已激活画风开关：004 · 画风-真人（开关） 🔵】\nPhotographic portrait.');
+    expect(text).not.toContain('【本轮已激活画风开关：画风-材质参考');
+    const message = buildWorldInfoSystem(text);
+    expect(message).toContain('已激活画风开关替换默认媒介');
+    expect(message).toContain('不在宿主 JSON 外追加文本');
+  });
+  it('多开画风明确报错，排除或空内容的条目不制造冲突', async () => {
+    const entries = [
+      { world: 'Photo', comment: '画风-真人（开关）', content: 'Photographic portrait.' },
+      { world: 'Anime', comment: '画风-动漫（开关）', content: 'Anime illustration.' },
+      { world: 'Empty', comment: '画风-3D（开关）', content: '  ' },
+    ];
+    mocks.standard.mockResolvedValue({ allActivatedEntries: new Set(entries) });
+    await expect(fetchWorldInfo(chat, [0], 'User', 'Alice')).rejects.toThrow('多个画风开关同时激活');
+    mocks.settings.excludes.excludedWorldNames = ['Anime'];
+    const text = await fetchWorldInfo(chat, [0], 'User', 'Alice');
+    expect(text).toContain('Photographic portrait.');
+    expect(text).not.toContain('Anime illustration.');
+    expect(text).not.toContain('画风-3D');
   });
 });

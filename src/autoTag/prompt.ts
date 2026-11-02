@@ -2,7 +2,8 @@ import type { ChatMsg } from '@/api/client';
 import { templateSupportsNegative } from '@/backends/comfyTemplates';
 import { getWorkflowPlaceholders } from '@/backends/comfyui';
 import { naiSupportsCharacterPrompts } from '@/backends/nai';
-import type { Orientation } from '@/backends/size';
+import { parseSize, pickSize, type Orientation } from '@/backends/size';
+import { createLayoutSelection, setLayoutSelectionMessage, type LayoutSelection } from '@/autoTag/layoutCooldown';
 import {
   cleanHistoryText,
   prepareTargetText,
@@ -22,6 +23,7 @@ import type { AutoTagSettings } from '@/state/settings';
 import {
   activeComfyPreset,
   activeOrientationLock,
+  effectiveComfyConn,
   DEFAULT_COMFY_NL_SPEC,
   DEFAULT_COMFY_SPEC,
   DEFAULT_COMFY_THINKING,
@@ -63,6 +65,15 @@ export function autoTagProfile(): AutoTagProfile {
       : naiCharPrompts && settings.nai.naturalLanguage);
   const lock = activeOrientationLock();
   return { naiCharPrompts, nl, ...(layout ? { layout: true } : {}), lockedSize: lock === 'auto' ? null : lock };
+}
+
+export function autoTagLayoutSelection(context: STContext, profile: AutoTagProfile): LayoutSelection | undefined {
+  if (settings.defaultBackend !== 'comfyui' || !settings.manga.enabled) return;
+  const conn = effectiveComfyConn();
+  return createLayoutSelection(context, settings.manga, {
+    portrait: parseSize(pickSize(conn, 'portrait')),
+    landscape: parseSize(pickSize(conn, 'landscape')),
+  }, profile.lockedSize);
 }
 
 const MOSS_LAYOUT_MARKER = '[BBI_FORMAT:MOSS_LAYOUT]';
@@ -169,6 +180,7 @@ export async function buildAutoTagMessages(
   taskNote?: string,
   /** 协议形态;runner 开跑时快照一份传进来,验收与收尾用同一份(缺省即时现算)。 */
   profile: AutoTagProfile = autoTagProfile(),
+  layoutSelection?: LayoutSelection,
 ): Promise<ChatMsg[]> {
   const target = context.chat[targetFloor];
   const preparedTarget =
@@ -245,7 +257,7 @@ export async function buildAutoTagMessages(
   if (nlOn && !naiCharPromptsOn) sampleImage.nl = sampleNl;
   if (layoutOn) {
     sampleImage.tag = JSON.stringify({
-      summary: { canvas: 'single', caption: 'Japanese 2D manga. One adult traveler holding a closed book in a quiet interior, with soft ambient light.' },
+      summary: { canvas: 'single', caption: 'One adult traveler holding a closed book in a quiet interior, with soft ambient light.' },
       items: [{ label: 'character', caption: 'An adult traveler with short black hair and a blue coat, holding one closed book in both hands.', bbox: [-120, -120, 120, 120] }],
       bbox_coord_space: 'abs_centralized', bbox_format: 'yxyx',
     });
@@ -257,7 +269,7 @@ export async function buildAutoTagMessages(
       if (!example) throw new Error('漫画 Layout:当前方向没有启用的版式，请先启用至少一个版式。');
       inner.layout = example.layout.id;
       inner.summary.canvas = example.layout.panels.length>1 ? 'multi_panel' : 'single';
-      inner.summary.caption = `Japanese 2D manga page with ${example.layout.panels.length} panels following the selected layout.`;
+      inner.summary.caption = `A page with ${example.layout.panels.length} panels following the selected layout.`;
       delete inner.items[0].bbox;
       const slots = example.layout.panels[0].slots;
       Object.assign(inner.items[0], { panel: 1, slot: ['C','S','F'].find(key=>slots[key]) ?? Object.keys(slots)[0] });
@@ -389,6 +401,8 @@ ${characterRule}
       ? '内部核对事实与状态、人物归属、镜头与接触、光影与细节、文字与读序、JSON与坐标；只给一个简短英文检查摘要及宿主最终 JSON。tag 为完整 Layout JSON 字符串，nl 留空，不输出逐格推理或提示词草稿。'
       : backendThinkingPrompt(options, nlOn, naiCharPromptsOn));
   if (thinking) messages.push({ role: 'system', content: thinking, purpose: 'check' });
+  const selection = layoutSelection ?? autoTagLayoutSelection(context, profile);
+  if (selection) setLayoutSelectionMessage(messages, selection);
   if (charCard) messages.push({ role: 'system', content: buildCharCardSystem(charCard) });
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });

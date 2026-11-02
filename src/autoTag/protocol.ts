@@ -31,6 +31,8 @@ export interface ImageInsertion {
 
 export interface ImagePlan {
   images: ImageInsertion[];
+  /** Internal control response: request the next oldest layout cooldown tier. Never persisted as an image. */
+  layoutFallback?: string;
   /** AI 报告的角色库变更(建档/字段更新);调用方负责落库。 */
   changes: CharChange[];
 }
@@ -177,9 +179,16 @@ export function parseImagePlan(
   minImages: number,
   maxImages: number,
   allowNegative = true,
+  allowLayoutFallback = false,
 ): ImagePlan {
   const parsed = parseObject(raw);
   if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
+  if (parsed.layout_fallback !== undefined) {
+    if (!allowLayoutFallback || typeof parsed.layout_fallback !== 'string' || !parsed.layout_fallback.trim() || parsed.images.length) {
+      throw new Error('layout_fallback 仅可在允许放宽冷却时以非空原因和空 images 请求');
+    }
+    return { images: [], changes: [], layoutFallback: parsed.layout_fallback.trim() };
+  }
   const normalizedMax = Math.max(1, Math.floor(Number(maxImages)) || 1);
   const normalizedMin = Math.min(
     normalizedMax,

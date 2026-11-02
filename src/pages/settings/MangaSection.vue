@@ -4,6 +4,7 @@ import { settings } from '@/state/settings';
 import MangaLayoutEditor from '@/pages/settings/MangaLayoutEditor.vue';
 import {
   parseCustomLayout,
+  normalizeCooldownRounds,
   builtinIds,
   type MangaSettings,
   resolveLayouts,
@@ -259,6 +260,13 @@ function resetBuiltin(id: string): void {
       不再带坐标表——新版式加进这里，下一次请求就会出现在清单里，不需要改提示词。
     </p>
     <p class="bbi-manga-hint">当前可用版式 {{ activeCount }} / {{ rows.length }}。</p>
+    <label class="bbi-manga-row">
+      <span>版式冷却轮数</span>
+      <input v-model.number="settings.manga.cooldownRounds" type="number" min="0" max="30" step="1" class="bbi-input"
+        aria-label="版式冷却轮数" style="width: 88px"
+        @change="settings.manga.cooldownRounds = normalizeCooldownRounds(settings.manga.cooldownRounds)" />
+    </label>
+    <p class="bbi-manga-hint">默认 3，范围 0～30。按同一聊天成功采纳的自动 tag 请求次数计数，0 关闭跨轮冷却；同轮多页仍不重复。修改后下一次请求生效，无需重发固定规范。</p>
     <button v-if="settings.manga.deleted.length" type="button" class="bbi-manga-btn" @click="restoreDeleted">恢复已删除的默认版式（{{ settings.manga.deleted.length }}）</button>
 
     <div class="bbi-manga-editor">

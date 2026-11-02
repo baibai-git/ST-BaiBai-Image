@@ -34,6 +34,8 @@ function crossingSubjects(panel: MangaPanel): string[] {
 export interface MangaSettings {
   /** 漫画模式总开关。关闭后不注入坐标、不追加漫画协议。 */
   enabled: boolean;
+  /** 最近多少次成功采纳的自动 tag 请求不得重复选版；0 关闭跨轮冷却。 */
+  cooldownRounds: number;
   /** 版式选择说明:整段拼入提示词末尾，用来补充想要选择的版式。 */
   selectionNotes: string;
   /** 出框基准像素:按格数分档,2 格 ×1.25、3 格 ×1、4 格 ×0.8、5 格以上 ×0.6。 */
@@ -71,7 +73,11 @@ export interface ResolvedLayout extends MangaLayoutDef {
 }
 
 export function mangaDefaults(): MangaSettings {
-  return { enabled: false, disabled: [], deleted: [], selectionNotes: '', bleed: 72, spec: '', thinking: '', custom: [], textSlotsVersion:1 };
+  return { enabled: false, cooldownRounds: 3, disabled: [], deleted: [], selectionNotes: '', bleed: 72, spec: '', thinking: '', custom: [], textSlotsVersion:1 };
+}
+
+export function normalizeCooldownRounds(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(30, Math.floor(value))) : 3;
 }
 
 /** Split only an existing bottom text region; never recreate other deleted slots. */
@@ -444,11 +450,12 @@ export function buildMangaSpec(manga: MangaSettings): string {
   lines.push('- tag 内层 JSON 顶层增加 layout（从对应方向的启用清单选 id）；每个 items 项填写 panel（从 1 起的格号或位置代号）与 slot，不写 bbox。插件发送前删除 layout/panel/slot 并填入原生坐标。示例版式若已停用，必须替换成清单中的启用版式。');
   lines.push('- 每套版式的画布以该行标注尺寸为准，只选择与实际生成尺寸一致的版式。自定义画布不会自动改变 ComfyUI 工作流或预设尺寸。');
   lines.push('- 读取格式:版式 id｜格数｜用途｜读序｜1(位置代号):可用槽位 2(…):可用槽位 …');
-  lines.push('- 挑法:先按「用途」筛掉不合节拍的版式,再比格数;依据不足就选更简单、更少格的。分配事件与对白严格沿该行给出的读序。');
+  lines.push('- 挑法:先按所选事件的时序、信息量、互动关系与文字容量比较版式,再确定格数;不默认选择最少格。内容适合多格推进时选足够的独立格,内容简单时允许少格,不为凑格补编剧情。分配事件与对白严格沿该行给出的读序。');
   lines.push('- 槽位:F 格框 C 完整内区 S 实际主体区域 L/R 左右人物 O 道具音效 T/TL/TR 顶部字区 B 底部字区 BL/BR 左下/右下字区 ML/MR 侧边字区 E 允许小部分越线进格间留白。清单里没列出的槽位在该格不存在,填了会让这次生成失败。');
   lines.push('- 同类内框可有编号，如 S、S_2、O、O_2、TL、TL_2；每个完整键对应独立区域，编号不表示读序、人物数量或自动新增人物。仅使用该格清单中已有的完整键。');
   lines.push('- 连续人物以一个主体框统领；复杂姿势可用已有辅助框定位手、脚、袖口等局部，局部描述写明所属角色、部位与连接方向，保留覆盖该部位的服装，避免在局部框重复完整外貌或生成另一个人。');
   lines.push('- 同一角色若有有意安排的巨大脸部特写与小比例身体等多尺度展示，分别绑定已有区域并写明同一身份的两处独立呈现，不将两处画成一具连体身体；普通局部辅助则保持与主体连续。');
+  lines.push('- 用途与框内说明中的具体人物、地点、道具和动作属于参考示范,不是必须匹配的剧情条件。选版主要比较格形、时序、主次关系与容量,示范内容按原文替换;仍须遵守独立格与同刻嵌入格的区别。');
   lines.push('- 框用途是用户提供的内容分配说明：F 描述整格用途，其余键只作用于对应内框。结合原文与该说明选择内容，不把说明当作台词、旁白或可见印字，不新增槽位、坐标、剧情事件或参与者。空说明沿用槽位默认用途。');
   lines.push('- 字区按实际发言、说话人位置与读序选择 T/TL/TR/B/BL/BR/ML/MR；只有左侧人物说话时仅用左侧所需字区，右侧同理，不为沉默者、空位或配额创建 text 项与空气泡。字区可覆盖次要身体或衣物，不遮脸、关键手势、接触点或重要道具。');
   lines.push('- 每一格只能引用其清单中实际存在的槽位，删除的槽位不可使用。没有 T 时应从现有 TL/TR 选择上方字区，不要假定每格都有 T；没有任何字区时不要生成 text 项。');
@@ -460,8 +467,8 @@ export function buildMangaSpec(manga: MangaSettings): string {
   for (const orientation of ['portrait', 'landscape'] as MangaOrientation[]) {
     const layouts = resolveLayouts(manga, orientation);
     if (!layouts.length) continue;
-    const canvas = canvasOf(orientation);
-    lines.push(`${orientation}(${canvas.width}×${canvas.height}):`);
+    const sizes = [...new Set(layouts.map(layout => `${layout.canvas.width}×${layout.canvas.height}`))];
+    lines.push(`${orientation}(${sizes.join(' / ')}):`);
     for (const layout of layouts) {
       const parts = [layout.id, `${layout.panels.length} 格`, `画布 ${layout.canvas.width}×${layout.canvas.height}`];
       if (layout.usage) parts.push(layout.usage);
@@ -647,6 +654,7 @@ export function normalizeManga(raw: unknown): MangaSettings {
   }
   return {
     enabled: stored.enabled === true,
+    cooldownRounds: normalizeCooldownRounds(stored.cooldownRounds),
     disabled,
     deleted: Array.isArray(stored.deleted) ? [...new Set(stored.deleted.filter((v): v is string => typeof v === 'string').map(v => v.trim()).filter(id => builtinIds('portrait').includes(id) || builtinIds('landscape').includes(id)))] : [],
     selectionNotes: typeof stored.selectionNotes === 'string' ? stored.selectionNotes : '',
