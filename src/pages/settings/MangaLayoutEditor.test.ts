@@ -29,6 +29,15 @@ function editor(props: Record<string,unknown> = {}) {
 }
 
 describe('版式编辑器 Ctrl 角点交互',()=>{
+  it('编辑时允许改为新 ID，并阻止覆盖已有 ID',()=>{
+    const {state,events,close}=editor({editingId:'original',existingIds:['original','occupied']});
+    state.doc.value.id='occupied'; state.save();
+    expect(events.filter(event=>event[0]==='save')).toHaveLength(0);
+    expect(state.error.value).toContain('未使用');
+    state.doc.value.id='renamed'; state.save();
+    expect(events.find(event=>event[0]==='save')?.[1].id).toBe('renamed');
+    close();
+  });
   it('按类型添加编号内框，保留原框，独立编辑、撤销、保存，未知类型不改动版式',()=>{
     const {state,events,close}=editor();state.add();
     expect(state.doc.value.panels[1].slots).toEqual({});

@@ -316,7 +316,7 @@ function save(): void {
       const sourceStandard = canvasOf(sourceOrientation);
       return source.id === props.editingId && sourceOrientation !== orientation && (doc.value.width !== standard.width || doc.value.height !== standard.height || source.canvas.width !== sourceStandard.width || source.canvas.height !== sourceStandard.height);
     })) {
-      error.value = '此版式含另一画布方向。使用非标准尺寸时请填写新的版式 ID，另存后可保留原版式的两个方向。'; return;
+      error.value = '此版式含另一画布方向。请保持标准画布尺寸，或从“快捷自定义”新建独立版式后再调整非标准尺寸。'; return;
     }
     const layout = parseCustomLayout(JSON.stringify({ id: doc.value.id.trim(), label: doc.value.label.trim() || doc.value.id.trim(), usage: doc.value.usage.trim(), canvas: canvas.value, readingOrder: positions.value.join(' → '), [orientation]: doc.value.panels.map((r, i) => saveEditedPanel(r, canvas.value, positions.value[i])) }));
     emit('save', layout);
@@ -336,7 +336,7 @@ onMounted(() => {
         <strong>{{ editingId ? '可视化编辑版式' : '快捷自定义版式' }}</strong>
         <div class="inline editor-actions">
           <button type="button" @click="requestClose">取消</button>
-          <button type="button" class="primary" @click="save">{{ editingId && doc.id.trim() === editingId ? '保存版式修改' : '保存为自定义版式' }}</button>
+          <button type="button" class="primary" @click="save">{{ editingId ? '保存版式修改' : '保存为自定义版式' }}</button>
           <button type="button" aria-label="关闭编辑器" @click="requestClose">✕</button>
         </div>
       </header>

@@ -13,6 +13,7 @@ import {
 } from '@/state/settings';
 import type { STContext } from '@/st/context';
 import { applyMangaFrames, mangaDefaults } from '@/manga/layouts';
+import { createLayoutSelection } from '@/autoTag/layoutCooldown';
 
 /**
  * 提示词集:全部留空(= 回落内置默认),只把本用例关心的那几项覆盖掉。
@@ -61,6 +62,31 @@ function context(): STContext {
 }
 
 describe('auto tag prompt', () => {
+  it('keeps stable rules fixed and sends the current compatible layout geometry only in the dynamic catalog',async()=> {
+    const oldBackend=settings.defaultBackend,oldManga=settings.manga;
+    try {
+      settings.defaultBackend='comfyui';
+      settings.manga={...mangaDefaults(),enabled:true,spec:'MANGA_RULES',thinking:'MANGA_CHECK',selectionNotes:'LIVE_NOTES',custom:[
+        {id:'geometry-current',canvas:{width:1000,height:2000},portrait:[{position:'panel-2',slots:{F:[-1000,-500,1000,0]}}]},
+        {id:'wrong-size',canvas:{width:800,height:1200},portrait:[{position:'one',slots:{F:[-600,-400,600,400]}}]},
+      ]};
+      const ctx=context();
+      const selection=createLayoutSelection(ctx,settings.manga,{portrait:{width:1000,height:2000},landscape:null},'portrait');
+      const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
+      const messages=await buildAutoTagMessages(ctx,1,options,null,undefined,undefined,undefined,{layout:true,nl:false,naiCharPrompts:false,lockedSize:'portrait'},selection);
+      const fixed=messages.find(m=>m.purpose==='spec')!.content;
+      const dynamic=messages.find(m=>m.content.startsWith('【本轮版式冷却白名单】'))!;
+      expect(fixed).toContain('MANGA_RULES');
+      expect(fixed).not.toContain('【本轮候选版式空间目录】');
+      expect(fixed).not.toContain('LIVE_NOTES');
+      expect(dynamic.purpose).toBeUndefined();
+      expect(dynamic.content).toContain('- geometry-current｜1 格｜画布 1000×2000');
+      expect(dynamic.content).toContain('位置[0,0,50,100]');
+      expect(dynamic.content).toContain('LIVE_NOTES');
+      expect(dynamic.content).not.toContain('- wrong-size｜');
+      expect(messages.filter(m=>m.content.includes('【本轮候选版式空间目录】'))).toHaveLength(1);
+    } finally {settings.defaultBackend=oldBackend;settings.manga=oldManga;}
+  });
   it('协议示例只选启用版式，不引用已删除的 balanced_1，空清单时阻止请求',async()=>{
     const oldBackend=settings.defaultBackend, oldManga=settings.manga;
     const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts({jailbreak:'TEST_PREFIX'})};

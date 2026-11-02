@@ -54,25 +54,49 @@ function openQuick(id?: string): void {
   quickSource.value = id ? quickSources.value.find(source => source.id === id)?.key ?? '' : '';
   quickOpen.value = true;
 }
+/** Editing identity is the original ID; changing the field renames that entry. */
+function storeLayout(layout: MangaCustomLayout, originalId = ''): boolean {
+  if (layout.id !== originalId && existingIds.value.includes(layout.id)) {
+    error.value = `版式 ID「${layout.id}」已存在，请使用其他 ID。`;
+    return false;
+  }
+  if (originalId && !existingIds.value.includes(originalId)) {
+    error.value = '原版式已不存在，请重新打开编辑器。';
+    return false;
+  }
+  const index = settings.manga.custom.findIndex(entry => entry.id === (originalId || layout.id));
+  const disabled = originalId && settings.manga.disabled.includes(originalId);
+  if (index >= 0) settings.manga.custom.splice(index, 1, layout);
+  else settings.manga.custom.push(layout);
+  settings.manga.disabled = settings.manga.disabled.filter(id => id !== originalId && id !== layout.id);
+  if (disabled) settings.manga.disabled.push(layout.id);
+  settings.manga.deleted = settings.manga.deleted.filter(id => id !== layout.id);
+  if (originalId && originalId !== layout.id && builtins.has(originalId) && !settings.manga.deleted.includes(originalId)) {
+    settings.manga.deleted.push(originalId); // Do not reveal the built-in again under the old ID.
+  }
+  note.value = originalId && originalId !== layout.id ? `已将 ${originalId} 改名为 ${layout.id}` : `已保存 ${layout.label ?? layout.id}`;
+  return true;
+}
 function saveQuick(layout: MangaCustomLayout): void {
-  if (existingIds.value.includes(layout.id) && layout.id !== quickEditingId.value) return;
-  const index = settings.manga.custom.findIndex(entry => entry.id === layout.id);
-  if (layout.id === quickEditingId.value) {
+  const originalId = quickEditingId.value;
+  const index = settings.manga.custom.findIndex(entry => entry.id === originalId);
+  if (originalId) {
     const orientation = orientationOf(layout.canvas?.width, layout.canvas?.height);
     const standard = canvasOf(orientation);
     const other = orientation === 'portrait' ? 'landscape' : 'portrait';
-    const previous = index >= 0 && settings.manga.custom[index][other]?.length
-      ? resolveLayouts({ ...settings.manga, disabled: [] }, other).find(entry => entry.id === layout.id) : undefined;
+    const renaming = layout.id !== originalId;
+    const previous = renaming || index >= 0 && settings.manga.custom[index][other]?.length
+      ? resolveLayouts({ ...settings.manga, disabled: [] }, other).find(entry => entry.id === originalId) : undefined;
     const size = layout.canvas ?? standard;
     // Standard sizes need no global canvas override; retain the other orientation.
     const standardSize = layout.canvas?.width === standard.width && layout.canvas.height === standard.height;
-    layout = { ...(index >= 0 ? settings.manga.custom[index] : {}), ...layout };
+    const original = index >= 0 ? settings.manga.custom[index]
+      : renaming ? parseCustomLayout(layoutJson(originalId)) : {};
+    layout = { ...original, ...layout };
     if (previous) layout[other] = resizeMangaPanels(previous.panels, previous.canvas, { width: size.height, height: size.width });
     if (standardSize) delete layout.canvas;
   }
-  if (index >= 0) settings.manga.custom.splice(index, 1, layout);
-  else settings.manga.custom.push(layout);
-  note.value = `已保存 ${layout.label ?? layout.id}`;
+  if (!storeLayout(layout, originalId)) return;
   quickOpen.value = false;
 }
 
@@ -210,14 +234,7 @@ function save(): void {
     error.value = issue instanceof Error ? issue.message : String(issue);
     return;
   }
-  const index = settings.manga.custom.findIndex(entry => entry.id === parsed.id);
-  if (index >= 0) settings.manga.custom.splice(index, 1, parsed);
-  else settings.manga.custom.push(parsed);
-  const enabled = settings.manga.disabled.indexOf(parsed.id);
-  if (enabled >= 0) settings.manga.disabled.splice(enabled, 1);
-  const deleted = settings.manga.deleted.indexOf(parsed.id);
-  if (deleted >= 0) settings.manga.deleted.splice(deleted, 1);
-  note.value = `已保存 ${parsed.id}`;
+  if (!storeLayout(parsed, editing.value === '__new__' ? '' : editing.value)) return;
   editing.value = '';
   draft.value = '';
 }

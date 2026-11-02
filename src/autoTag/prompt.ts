@@ -368,9 +368,8 @@ ${characterRule}
       ? expandNlSections(settings.manga.spec.replaceAll(MOSS_LAYOUT_MARKER, ''), false).replaceAll('{{nl}}', '').replace(/\n{3,}/g, '\n\n').trim()
       : '';
   const baseSpec = mangaSpec || backendPromptSpec(options, nlOn, naiCharPromptsOn);
-  // 漫画模式:版式清单与挑选规则整节由插件现算,接在规范之后——规范本身不含这一节,
-  // 于是启用/停用版式、改自定义说明,下一次请求立刻生效。
-  const mangaSection = layoutOn && settings.manga.enabled ? buildMangaSpec(settings.manga) : '';
+  // Stable rules stay cached; compatible, uncooled geometry and notes travel in the dynamic selection.
+  const mangaSection = layoutOn && settings.manga.enabled ? buildMangaSpec(settings.manga,false) : '';
   const spec = mangaSection ? `${baseSpec}${baseSpec ? "\n\n" : ""}${mangaSection}` : baseSpec;
 
   // 稳定规则前置，角色/世界资料后置，避免动态世界书打断后端规范的可缓存前缀。

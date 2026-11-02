@@ -697,7 +697,7 @@ async function confirmUpdate() {
           <input v-model="settings.autoTag.dshSession" type="checkbox" class="bbi-checkbox" aria-label="DSH 持久 Agent 会话" />
         </label>
         <template v-if="settings.autoTag.dshSession">
-          <p class="bbi-field-hint">使用上方指派的 DSH 副 API 渠道。固定四项仅在首次发送；世界书、角色资料和正文每次发送。修改规范或版式后，请手动发送固定规范。每个酒馆聊天独立绑定会话，普通 API 模式不受影响。</p>
+          <p class="bbi-field-hint">使用上方指派的 DSH 副 API 渠道。固定四项仅在首次发送；当前候选版式的空间与槽位、世界书、角色资料和正文每次发送。版式修改在下一次请求生效；修改规范后，请手动发送固定规范。每个酒馆聊天独立绑定会话，普通 API 模式不受影响。</p>
           <div class="bbi-channel-bar">
             <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('sync_rules')">重新发送固定规范</button>
             <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('reset')">重建 DSH 会话</button>

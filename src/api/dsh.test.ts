@@ -3,6 +3,8 @@ import { ApiError, requestCompletion, type ChatMsg } from './client';
 import { dshChatId, requestDshCompletion, splitDshMessages, type DshOperation } from './dsh';
 import type { ApiChannel } from '@/state/settings';
 import type { STContext } from '@/st/context';
+import { buildMangaSpec, mangaDefaults } from '@/manga/layouts';
+import { createLayoutSelection, setLayoutSelectionMessage } from '@/autoTag/layoutCooldown';
 
 const h=vi.hoisted(()=>({context:null as STContext|null,begin:vi.fn((_record:{messages:ChatMsg[]})=>1),finish:vi.fn(),fail:vi.fn()}));
 vi.mock('@/st/context',()=>({getContext:()=>h.context}));
@@ -25,6 +27,30 @@ function server(run:(body:any)=>Response|Promise<Response>=body=>response(body))
 beforeEach(()=>{vi.clearAllMocks();calls=[];h.context=context();server();});
 
 describe('DSH persistent agent routing',()=>{
+  it('carries changed panel geometry, deleted slots and notes on subsequent DSH and ordinary API requests',async()=> {
+    const manga={...mangaDefaults(),enabled:true,selectionNotes:'current notes',custom:[{
+      id:'moving',canvas:{width:1000,height:2000},portrait:[{position:'panel-1',slots:{F:[-1000,-500,1000,0],T:[-1000,-500,-800,0]} as Record<string,number[]>}],
+    }]};
+    const sizes={portrait:{width:1000,height:2000},landscape:null};
+    const batch:ChatMsg[]=[...fixed.map(m=>m.purpose==='spec' ? {...m,content:buildMangaSpec(manga,false)} : m),{role:'user',content:'current target'}];
+    setLayoutSelectionMessage(batch,createLayoutSelection(h.context!,manga,sizes,'portrait'));
+    await requestDshCompletion(channel,batch,h.context!);
+    expect(calls[0].messages.find((m:any)=>m.content.includes('【本轮版式冷却白名单】')).content).toContain('位置[0,0,50,100]');
+    expect(batch.find(m=>m.purpose==='spec')!.content).not.toContain('- moving｜');
+    manga.custom[0].portrait[0].slots.F=[-1000,0,1000,500];
+    delete manga.custom[0].portrait[0].slots.T;
+    manga.selectionNotes='changed notes';
+    setLayoutSelectionMessage(batch,createLayoutSelection(h.context!,manga,sizes,'portrait'));
+    await requestDshCompletion(channel,batch,h.context!);
+    const current=calls[1].messages.find((m:any)=>m.content.includes('【本轮版式冷却白名单】')).content;
+    expect(payload(calls[1]).fixed_message_count).toBe(0);
+    expect(current).toContain('位置[50,0,50,100]');
+    expect(current).toContain('changed notes');
+    expect(current).not.toContain('T[');
+    server(()=>new Response(JSON.stringify({choices:[{message:{content:'ordinary'}}]})));
+    await requestCompletion({...channel,stream:false},batch);
+    expect(calls[2].messages.find((m:any)=>m.content.includes('【本轮版式冷却白名单】')).content).toBe(current);
+  });
   it('first full request, subsequent dynamic-only, reload persistence, ordinary API still full',async()=>{
     const ctx=h.context!;
     const original=JSON.stringify(messages);

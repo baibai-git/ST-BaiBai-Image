@@ -1,6 +1,6 @@
 import type { ChatMsg } from '@/api/client';
 import type { ImagePlan } from '@/autoTag/protocol';
-import { normalizeCooldownRounds, orientationOf, resolveLayouts, type MangaSettings, type ResolvedLayout } from '@/manga/layouts';
+import { buildMangaCatalog, normalizeCooldownRounds, orientationOf, resolveLayouts, type MangaSettings, type ResolvedLayout } from '@/manga/layouts';
 import type { ImageSize, Orientation } from '@/backends/size';
 import type { STContext } from '@/st/context';
 
@@ -21,6 +21,7 @@ export interface LayoutSelection {
   released: number;
   lockedSize: Orientation | null;
   rounds: number;
+  selectionNotes?: string;
 }
 
 export function layoutCandidates(selection: LayoutSelection): Record<Orientation, ResolvedLayout[]> {
@@ -52,7 +53,7 @@ export function createLayoutSelection(
   const rounds = normalizeCooldownRounds(manga.cooldownRounds);
   const selection: LayoutSelection = {
     layouts: { portrait: compatible('portrait'), landscape: compatible('landscape') },
-    recent: rounds ? recentRounds(context).slice(-rounds) : [], released: 0, lockedSize, rounds,
+    recent: rounds ? recentRounds(context).slice(-rounds) : [], released: 0, lockedSize, rounds, selectionNotes:manga.selectionNotes,
   };
   // No compatible uncooled layout: release only as much history as necessary to make a choice.
   if (!Object.values(layoutCandidates(selection)).some(layouts => layouts.length)) relaxLayoutSelection(selection);
@@ -63,12 +64,13 @@ export function setLayoutSelectionMessage(messages: ChatMsg[], selection: Layout
   const candidates = layoutCandidates(selection);
   const canRelax = selection.released < selection.recent.length;
   const content = [HEADER,
-    '固定版式清单仅提供几何与槽位定义；本轮可选范围以此动态白名单为准，协议示例不授予选择权限。',
+    '本轮可选ID、几何、槽位与用途以此动态目录为准，覆盖历史清单；协议示例不授予选择权限。',
     selection.rounds
       ? `同一酒馆聊天最近 ${selection.rounds} 次成功采纳的自动 tag 请求使用过的 layout ID 暂停选择；同轮多页也必须使用不同 ID。失败、重试、放宽请求与固定规范同步不计次。`
       : '跨轮版式冷却已关闭，历史使用过的 ID 可选；同轮多页仍必须使用不同 ID。',
     `当前已从最早记录起解除 ${selection.released} 轮冷却；仍禁用的 ID：${[...new Set(selection.recent.slice(selection.released).flat())].join('、') || '无'}。`,
     ...(['portrait', 'landscape'] as const).map(orientation => `${orientation}: ${candidates[orientation].map(layout => layout.id).join('、') || '无可选版式'}`),
+    buildMangaCatalog(candidates,selection.selectionNotes),
     canRelax
       ? '若有应绘制的事件，但本轮候选均无法满足原文时序、画布、槽位、文字容量或同轮去重，不删改剧情、不强塞内容，也不自行选禁用 ID。返回控制结果 {"images":[],"changes":[],"layout_fallback":"候选不适用的具体原因"}；宿主会从最早记录起逐步解除并重新请求。此结果不受最少图片数限制，不代表本轮最终结果。'
       : '本轮已无更多冷却记录可解除；不要输出 layout_fallback，按宿主图片数量与事实要求输出最终结果。',

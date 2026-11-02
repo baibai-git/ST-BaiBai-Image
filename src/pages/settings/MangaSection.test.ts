@@ -27,6 +27,60 @@ function section() {
 
 describe('可视化编辑保存',()=>{
   beforeEach(()=>{ settings.manga=mangaDefaults(); });
+  it('修改自定义 ID 原地改名，保留另一方向与停用状态',()=>{
+    const portrait=[{position:'old',slots:{F:[-900,-500,900,500]}}];
+    const landscape=[{position:'wide',slots:{F:[-500,-900,500,900]}}];
+    settings.manga.custom=[{id:'original',usage:'保持用途',portrait,landscape}];
+    settings.manga.disabled=['original'];
+    const {state,close}=section();
+    state.openQuick('original');
+    state.saveQuick({id:'renamed',canvas:{width:1088,height:1920},portrait:[{position:'edited',slots:{F:[-800,-400,800,400]}}]});
+    expect(settings.manga.custom.map(item=>item.id)).toEqual(['renamed']);
+    expect(settings.manga.custom[0].landscape).toEqual(landscape);
+    expect(settings.manga.custom[0].usage).toBe('保持用途');
+    expect(settings.manga.disabled).toEqual(['renamed']);
+    expect(state.quickOpen.value).toBe(false);
+    expect(state.note.value).toContain('改名');
+    close();
+  });
+  it('默认版式改名后隐藏旧 ID，保留另一方向，不把旧默认版式重新显示',()=>{
+    const {state,close}=section();
+    const count=state.rows.value.length;
+    const other=resolveLayouts(settings.manga,'landscape').find(item=>item.id==='balanced_1')!.panels;
+    state.openQuick('balanced_1');
+    state.saveQuick({id:'renamed_builtin',canvas:{width:1088,height:1920},portrait:[{position:'edited',slots:{F:[-800,-400,800,400]}}]});
+    expect(state.rows.value).toHaveLength(count);
+    expect(state.rows.value.some((row:any)=>row.id==='balanced_1')).toBe(false);
+    expect(settings.manga.deleted).toContain('balanced_1');
+    expect(resolveLayouts(settings.manga,'landscape').find(item=>item.id==='renamed_builtin')?.panels).toEqual(other);
+    close();
+  });
+  it('改为已存在的 ID 时保留原数据并报告冲突',()=>{
+    settings.manga.custom=['original','occupied'].map(id=>({id,portrait:[{position:id,slots:{F:[-900,-500,900,500]}}]}));
+    const before=JSON.stringify(settings.manga);
+    const {state,close}=section();
+    state.openQuick('original');
+    state.saveQuick({id:'occupied',portrait:[{position:'new',slots:{F:[-800,-400,800,400]}}]});
+    expect(JSON.stringify(settings.manga)).toBe(before);
+    expect(state.quickOpen.value).toBe(true);
+    expect(state.error.value).toContain('已存在');
+    close();
+  });
+  it('JSON 编辑同样按原 ID 改名，不新增副本或覆盖同名版式',()=>{
+    settings.manga.custom=['original','occupied'].map(id=>({id,portrait:[{position:id,slots:{F:[-900,-500,900,500]}}]}));
+    settings.manga.disabled=['original'];
+    const {state,close}=section();
+    state.editing.value='original';
+    const body={...settings.manga.custom[0],id:'occupied'};
+    state.draft.value=JSON.stringify(body); state.save();
+    expect(settings.manga.custom.map(item=>item.id)).toEqual(['original','occupied']);
+    expect(state.error.value).toContain('已存在');
+    state.draft.value=JSON.stringify({...body,id:'renamed'}); state.save();
+    expect(settings.manga.custom.map(item=>item.id)).toEqual(['renamed','occupied']);
+    expect(settings.manga.disabled).toEqual(['renamed']);
+    expect(state.editing.value).toBe('');
+    close();
+  });
   it('更新同 ID 自定义版式并保留另一个方向，不新增副本',()=>{
     const portrait=[{position:'old',slots:{F:[-900,-500,900,500]}}];
     const landscape=[{position:'wide',slots:{F:[-500,-900,500,900]}}];

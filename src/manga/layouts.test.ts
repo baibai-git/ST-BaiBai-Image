@@ -368,7 +368,7 @@ describe('buildMangaSpec', () => {
     expect(mixed).toContain('portrait(1152×1728 / 1088×1920):');
   });
 
-  it('清单里带每个版式的格数与槽位,且不含数字坐标', () => {
+  it('清单带格数、槽位与空间比例，不发送原始像素坐标表', () => {
     const spec = buildMangaSpec(settingsWith());
     expect(spec).toContain('balanced_1');
     expect(spec).toContain('main_inset_then_two');
@@ -378,7 +378,9 @@ describe('buildMangaSpec', () => {
     expect(spec).toMatch(/1\(single\):[^\n]* S/);
     expect(spec).not.toMatch(/1\(single\):[^\n]*\bX\b/);
     expect(spec).toContain('顶层增加 layout');
-    expect(spec).not.toMatch(/-?\d{3},\s?-?\d{3}/);
+    expect(spec).toContain('位置[');
+    expect(spec).toContain('内框 C[');
+    expect(spec).not.toContain('[-924,-504,924,504]');
     // 每行带「用途」引导，读序统一加前缀
     expect(spec).toContain('整页只给一个瞬间；表情或接触点的满页特写');
     expect(spec).toContain('｜读序 上到下，同行左到右');

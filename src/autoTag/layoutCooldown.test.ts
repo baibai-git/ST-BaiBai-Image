@@ -98,10 +98,27 @@ describe('layout cooldown', () => {
     expect(messages[1].purpose).toBeUndefined();
     expect(messages[1].content).toContain('portrait: b、c、d、e');
     expect(messages[1].content).toContain('layout_fallback');
+    expect(messages[1].content).toContain('【本轮候选版式空间目录】');
+    expect(messages[1].content).not.toContain('- a｜');
+    expect(messages[1].content).toContain('- b｜1 格｜画布 1152×1728');
     relaxLayoutSelection(selection); setLayoutSelectionMessage(messages, selection);
     expect(messages).toHaveLength(2);
     expect(messages[1].content).toContain('portrait: a、b、c、d、e');
+    expect(messages[1].content).toContain('- a｜1 格｜画布 1152×1728');
     expect(messages[0].content).toBe('fixed geometry');
+  });
+
+  it('sends geometry only for enabled, size-compatible, uncooled candidates, with current selection notes',()=> {
+    const m=manga();
+    m.disabled=['b']; m.selectionNotes='CURRENT_SELECTION_NOTES';
+    m.custom.push({id:'wrong-canvas',canvas:{width:1000,height:2000},portrait:panels});
+    const messages:ChatMsg[]=[];
+    setLayoutSelectionMessage(messages,createLayoutSelection(context([['a']]),m,sizes,'portrait'));
+    expect(messages[0].content).toContain('- c｜');
+    for (const id of ['a','b','wrong-canvas']) expect(messages[0].content).not.toContain(`- ${id}｜`);
+    expect(messages[0].content).toContain('CURRENT_SELECTION_NOTES');
+    expect(messages[0].content).toContain('landscape: 无可选版式');
+    expect(messages[0].content).not.toContain('landscape(');
   });
 
   it('accepts an explicit fallback control only when permitted, without adopting images or changes', () => {
