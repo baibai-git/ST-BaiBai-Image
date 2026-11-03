@@ -135,7 +135,7 @@ export function roughTokens(text: string): number {
 
 function truncateMessages(messages: ChatMsg[]): ChatMsg[] {
   if (!Array.isArray(messages)) return [];
-  return messages.map(m => ({ role: m.role, content: truncate(m.content) }));
+  return messages.map(m => ({ role: m.role, content: truncate(m.content + (m.images?.length ? `\n[附带 ${m.images.length} 张版式图片；图片数据不写入历史]` : '')) }));
 }
 
 /** 压入一条并维持封顶。新记录进头部,超出时从尾部(最旧)丢弃。 */
@@ -217,9 +217,16 @@ export function cacheHitRate(record: Pick<LlmRecord, 'promptTokens' | 'cacheRead
  * 请求失败或被取消。aborted 与 error 分开:前者是用户主动取消,不是故障,
  * UI 用中性色而非红色。
  */
-export function failLlm(id: number, message: string, aborted = false): void {
+export function failLlm(id: number, message: string, aborted = false, info?: LlmFinish): void {
   const record = find(id);
   if (record?.kind !== 'llm') return;
+  if (info) {
+    record.response = truncate(info.response);
+    record.promptTokens = info.promptTokens;
+    record.completionTokens = info.completionTokens;
+    record.cacheReadTokens = info.cacheReadTokens ?? null;
+    record.tokensEstimated = info.tokensEstimated;
+  }
   record.status = aborted ? 'aborted' : 'error';
   record.durationMs = Date.now() - record.startedAt;
   record.error = aborted ? '' : message;

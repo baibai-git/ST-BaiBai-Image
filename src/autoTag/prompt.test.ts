@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import * as promptContext from '@/autoTag/context';
 
-import { autoTagProfile, buildAutoTagMessages, expandNlSections, usesMossLayout } from '@/autoTag/prompt';
+import { autoTagProfile, buildAutoTagMessages, buildAutoTagFixedMessages, expandNlSections, usesMossLayout } from '@/autoTag/prompt';
 import {
   activeComfyPreset,
   DEFAULT_NAI_V5_SPEC,
@@ -62,6 +62,15 @@ function context(): STContext {
 }
 
 describe('auto tag prompt', () => {
+  it('builds only fixed rules for manual synchronization without any Tavern conversation',()=>{
+    const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
+    const fixed=buildAutoTagFixedMessages(options);
+    expect(fixed.length).toBeGreaterThan(0);
+    expect(fixed.every(message=>message.role==='system'&&!!message.purpose)).toBe(true);
+    expect(fixed.some(message=>message.purpose==='contract')).toBe(true);
+    expect(fixed.some(message=>message.content.includes('目标第一行'))).toBe(false);
+  });
+
   it('keeps stable rules fixed and sends the current compatible layout geometry only in the dynamic catalog',async()=> {
     const oldBackend=settings.defaultBackend,oldManga=settings.manga;
     try {
@@ -75,7 +84,7 @@ describe('auto tag prompt', () => {
       const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
       const messages=await buildAutoTagMessages(ctx,1,options,null,undefined,undefined,undefined,{layout:true,nl:false,naiCharPrompts:false,lockedSize:'portrait'},selection);
       const fixed=messages.find(m=>m.purpose==='spec')!.content;
-      const dynamic=messages.find(m=>m.content.startsWith('【本轮版式冷却白名单】'))!;
+      const dynamic=messages.find(m=>m.content.startsWith('【本轮版式选择范围】'))!;
       expect(fixed).toContain('MANGA_RULES');
       expect(fixed).not.toContain('【本轮候选版式空间目录】');
       expect(fixed).not.toContain('LIVE_NOTES');
@@ -85,6 +94,24 @@ describe('auto tag prompt', () => {
       expect(dynamic.content).toContain('LIVE_NOTES');
       expect(dynamic.content).not.toContain('- wrong-size｜');
       expect(messages.filter(m=>m.content.includes('【本轮候选版式空间目录】'))).toHaveLength(1);
+    } finally {settings.defaultBackend=oldBackend;settings.manga=oldManga;}
+  });
+  it('packs a two-page manga example into one outer images array', async()=> {
+    const oldBackend=settings.defaultBackend,oldManga=settings.manga;
+    try {
+      settings.defaultBackend='comfyui'; settings.manga={...mangaDefaults(),enabled:true};
+      const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
+      const messages=await buildAutoTagMessages(context(),1,options,null);
+      const contract=messages.find(m=>m.purpose==='contract')!.content;
+      const result=JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
+      expect(result.images).toHaveLength(2); expect(result.changes).toEqual([]);
+      const ids=new Set<string>();
+      for(const image of result.images) {
+        expect(image.images).toBeUndefined(); expect(image.changes).toBeUndefined();
+        const inner=JSON.parse(image.tag); ids.add(inner.layout);
+        expect(()=>applyMangaFrames(image.tag,settings.manga,{width:1088,height:1920})).not.toThrow();
+      }
+      expect(ids.size).toBe(2); expect(contract).toContain('changes 只在最外层汇总');
     } finally {settings.defaultBackend=oldBackend;settings.manga=oldManga;}
   });
   it('协议示例只选启用版式，不引用已删除的 balanced_1，空清单时阻止请求',async()=>{

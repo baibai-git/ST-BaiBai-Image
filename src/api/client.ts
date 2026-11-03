@@ -7,6 +7,7 @@ import {
   patchLlmTokens,
   safeHistory,
   FOLLOW_MAIN_API,
+  type LlmFinish,
 } from '@/state/history';
 
 /**
@@ -24,12 +25,25 @@ const DEFAULT_TIMEOUT_SEC = 180;
 export interface ChatMsg {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /** Local attachments; encoded as OpenAI image_url blocks only at the wire boundary. */
+  images?: string[];
+  /** Local atlas labels used to regroup images against bridge capabilities. */
+  atlasLabels?: string[];
+  atlasRevision?: string;
+  atlasCatalog?: string;
   /** Local grouping only; never forwarded as an OpenAI message field. */
   purpose?: 'prefix' | 'spec' | 'contract' | 'check';
 }
 
 export interface DshSessionRequest {
   protocol_version: 1;
+  session_mode?: 'dedicated';
+  client_id?: string;
+  task_id?: string;
+  source_chat_id?: string;
+  /** Optional assertion of the administrator-managed binding; the bridge loads the Skill. */
+  skill_id?: string;
+  layout_atlas?: { hash: string; message_indices: number[] };
   chat_id: string;
   session_id?: string;
   request_id: string;
@@ -39,8 +53,13 @@ export interface DshSessionRequest {
   target?: { floor: number; swipe_id: number | null; revision: string };
 }
 
-export function wireMessages(messages: ChatMsg[]): ChatMsg[] {
-  return messages.map(({role,content})=>({role,content}));
+export type WireMessage = { role: ChatMsg['role']; content: string | ({type:'text';text:string}|{type:'image_url';image_url:{url:string;detail:'high'}})[] };
+export function wireMessages(messages: ChatMsg[]): WireMessage[] {
+  return messages.map(({role,content,images})=>{
+    if (!images?.length) return {role,content};
+    if (role!=='user') throw new ApiError('版式图片只能放在 user 消息中。');
+    return {role,content:[{type:'text' as const,text:content},...images.map(url=>({type:'image_url' as const,image_url:{url,detail:'high' as const}}))]};
+  });
 }
 
 export class ApiError extends Error {
@@ -118,7 +137,8 @@ async function estimateTokens(id: number, messages: ChatMsg[], response: string)
     const count = getContext()?.getTokenCountAsync;
     if (typeof count !== 'function') return;
     const promptText = messages.map(m => m.content).join('\n');
-    const prompt = await count(promptText);
+    // A text tokenizer cannot estimate vision tokens. Keep unknown rather than undercounting.
+    const prompt = messages.some(message=>message.images?.length) ? null : await count(promptText);
     const completion = response ? await count(response) : 0;
     safeHistory(() =>
       patchLlmTokens(
@@ -290,6 +310,7 @@ async function requestCompletionAtUrl(
     }),
   );
 
+  let received: LlmFinish | undefined;
   try {
     const result = await withTimeout(timeoutSec, opts.signal, '副 API 请求', async signal => {
       const resp = await fetch(GENERATE_URL, {
@@ -328,6 +349,8 @@ async function requestCompletionAtUrl(
       return { content: parsed, usage: readUsage(data) };
     });
 
+    received = { response: result.content, promptTokens: result.usage.prompt,
+      completionTokens: result.usage.completion, cacheReadTokens: result.usage.cached, tokensEstimated: false };
     // 验收在记历史之前:验收不过 → 落进 catch 记失败,不给「HTTP 成功」的假象
     opts.validate?.(result.content);
 
@@ -349,7 +372,11 @@ async function requestCompletionAtUrl(
   } catch (e) {
     if (historyId !== null) {
       const aborted = e instanceof DOMException && e.name === 'AbortError';
-      safeHistory(() => failLlm(historyId, e instanceof Error ? e.message : String(e), aborted));
+      safeHistory(() => {
+        const message = e instanceof Error ? e.message : String(e);
+        if (received) failLlm(historyId, message, aborted, received);
+        else failLlm(historyId, message, aborted);
+      });
     }
     throw e;
   }
@@ -459,6 +486,7 @@ export function mainApiAvailable(): boolean {
  * (如 Kemini 防截断脚本)仍可能改写它。生成 tag 尽量指派副 API 渠道,走 buildRequestBody 那条路。
  */
 export async function requestViaMainApi(messages: ChatMsg[], opts: RequestOptions = {}): Promise<string> {
+  if (messages.some(message=>message.images?.length)) throw new ApiError('版式图片模式需要指派支持图片的副 API 渠道；跟随主 API 请使用文字模式。');
   const ctx = getContext();
   if (typeof ctx?.generateRaw !== 'function') {
     throw new ApiError('当前 ST 版本不支持 generateRaw,无法跟随主 API');
@@ -475,9 +503,11 @@ export async function requestViaMainApi(messages: ChatMsg[], opts: RequestOption
     }),
   );
 
+  let received: LlmFinish | undefined;
   try {
-    const content = (await ctx.generateRaw({ prompt: wireMessages(messages), responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
+    const content = (await ctx.generateRaw({ prompt: messages.map(({role,content})=>({role,content})), responseLength: MAIN_API_RESPONSE_LENGTH }))?.trim();
     if (!content) throw new ApiError('主 API 返回空内容');
+    received = { response: content, promptTokens: null, completionTokens: null, tokensEstimated: true };
     // 与副 API 同口径:验收不过记失败,不记「成功」
     opts.validate?.(content);
     if (historyId !== null) {
@@ -495,7 +525,11 @@ export async function requestViaMainApi(messages: ChatMsg[], opts: RequestOption
   } catch (e) {
     if (historyId !== null) {
       const aborted = e instanceof DOMException && e.name === 'AbortError';
-      safeHistory(() => failLlm(historyId, e instanceof Error ? e.message : String(e), aborted));
+      safeHistory(() => {
+        const message = e instanceof Error ? e.message : String(e);
+        if (received) failLlm(historyId, message, aborted, received);
+        else failLlm(historyId, message, aborted);
+      });
     }
     throw e;
   }

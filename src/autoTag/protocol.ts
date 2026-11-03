@@ -86,48 +86,46 @@ function sourceLines(source: string): SourceLine[] {
   return lines;
 }
 
-function jsonObjects(raw: string): string[] {
-  const cleaned = raw.replace(/<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
-  const candidates: string[] = [];
-  for (const match of cleaned.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) candidates.push(match[1].trim());
-  candidates.push(cleaned);
-
-  for (let start = 0; start < cleaned.length; start += 1) {
-    if (cleaned[start] !== '{') continue;
-    let depth = 0;
-    let quoted = false;
-    let escaped = false;
-    for (let index = start; index < cleaned.length; index += 1) {
-      const char = cleaned[index];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') quoted = true;
-      else if (char === '{') depth += 1;
-      else if (char === '}' && --depth === 0) {
-        candidates.push(cleaned.slice(start, index + 1));
-        break;
-      }
-    }
-  }
-  return candidates;
-}
-
 function parseObject(raw: string): Record<string, unknown> {
-  for (const candidate of jsonObjects(raw)) {
-    try {
-      const value: unknown = JSON.parse(candidate);
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        return value as Record<string, unknown>;
-      }
-    } catch {
-      // 尝试下一个候选 JSON 块。
+  const cleaned = raw.replace(/<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
+  const object = (value: unknown): Record<string, unknown> => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('AI 返回的 JSON 最外层必须是对象');
+    }
+    return value as Record<string, unknown>;
+  };
+  let whole: unknown;
+  let parsed = false;
+  try { whole = JSON.parse(cleaned); parsed = true; } catch { /* tolerate prose or fences */ }
+  if (parsed) return object(whole);
+
+  // Scan only outer objects: a broken response must never fall back to a valid child page.
+  const candidates: string[] = [];
+  let start = -1, depth = 0, quoted = false, escaped = false;
+  for (let index = 0; index < cleaned.length; index++) {
+    const char = cleaned[index];
+    if (start < 0) {
+      if (char === '{' || char === '[') { start = index; depth = 1; }
+      continue;
+    }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === '{' || char === '[') depth++;
+    else if ((char === '}' || char === ']') && --depth === 0) {
+      candidates.push(cleaned.slice(start, index + 1));
+      start = -1;
     }
   }
-  throw new Error('AI 没有返回可解析的 JSON 对象');
+  if (start >= 0) throw new Error('AI 返回的外层 JSON 未闭合或不完整；所有页须放在同一个顶层 images 数组中');
+  if (candidates.length > 1) throw new Error('AI 返回了多个外层 JSON 对象；所有页须合并到唯一顶层 images 数组，changes 只放最外层');
+  if (!candidates.length) throw new Error('AI 没有返回可解析的 JSON 对象');
+  let value: unknown;
+  try { value = JSON.parse(candidates[0]); }
+  catch { throw new Error('AI 返回的外层 JSON 语法错误；请检查括号、逗号及字符串转义'); }
+  return object(value);
 }
 
 /** tag / nl / negative 内容里不允许出现的子标签字面量（口径见 st/imageTagRegex.ts）。 */
@@ -203,6 +201,9 @@ export function parseImagePlan(
       throw new Error(`images[${index}] 必须是对象`);
     }
     const entry = item as Record<string, unknown>;
+    if ('images' in entry || 'changes' in entry) {
+      throw new Error(`images[${index}] 嵌套了 images 或 changes；每项只能是一页，所有页平铺在顶层 images，changes 只放最外层`);
+    }
     const position = sanitizePosition(entry.position ?? entry.id, index);
     const sourceLine = positions.get(position);
     if (sourceLine === undefined) {

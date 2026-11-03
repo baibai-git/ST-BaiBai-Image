@@ -49,6 +49,14 @@ describe('自动 tag 图片数量范围迁移', () => {
     expect((await hydrateWithAutoTag({dshSession:'true'})).dshSession).toBe(false);
   });
 
+  it('专属开关默认关闭，显式启用和不含密钥的绑定可在重新载入后保留',async()=>{
+    const state={instanceId:'12345678-1234-1234-1234-123456789abc',bindings:{route:{session_id:'session-dedicated',initialized:true,rulesHash:'hash'}}};
+    const autoTag=await hydrateWithAutoTag({dshSession:true,dshDedicated:true,dshDedicatedState:state});
+    expect(autoTag.dshDedicated).toBe(true);expect(autoTag.dshDedicatedState).toEqual(state);
+    vi.resetModules();expect((await hydrateWithAutoTag(undefined)).dshDedicated).toBe(false);
+    vi.resetModules();expect((await hydrateWithAutoTag({dshDedicated:'true',dshDedicatedState:{instanceId:'invalid'}})).dshDedicatedState).toBeUndefined();
+  });
+
   it('把下限夹进 0～上限,并保证上限至少为 1', async () => {
     const tooHigh = await hydrateWithAutoTag({ minImages: 9, maxImages: 3 });
     expect(tooHigh.minImages).toBe(3);

@@ -2,6 +2,7 @@
 import { computed, nextTick, ref } from 'vue';
 import { settings } from '@/state/settings';
 import MangaLayoutEditor from '@/pages/settings/MangaLayoutEditor.vue';
+import { buildLayoutAtlases, rasterizeLayoutAtlas } from '@/manga/atlas';
 import {
   parseCustomLayout,
   normalizeCooldownRounds,
@@ -27,6 +28,16 @@ const quickSource = ref('');
 const quickEditingId = ref('');
 const batchWidth = ref(1664), batchHeight = ref(2496);
 const batchError = ref('');
+const atlasPreview = ref<{ image: string; ids: string[]; orientation: string }[]>([]);
+const atlasBusy = ref(false), atlasError = ref('');
+async function previewAtlases(): Promise<void> {
+  atlasBusy.value=true; atlasError.value=''; atlasPreview.value=[];
+  try {
+    const atlases=buildLayoutAtlases({portrait:resolveLayouts(settings.manga,'portrait'),landscape:resolveLayouts(settings.manga,'landscape')});
+    for (const atlas of atlases) atlasPreview.value.push({image:await rasterizeLayoutAtlas(atlas.svg),ids:atlas.ids,orientation:atlas.orientation});
+  } catch (issue) { atlasError.value=issue instanceof Error ? issue.message : String(issue); }
+  finally { atlasBusy.value=false; }
+}
 const resizeBackup = ref<{ before: MangaCustomLayout[]; after: string }>();
 const canUndoResize = computed(() => resizeBackup.value?.after === JSON.stringify(settings.manga.custom));
 function resizeAllCanvases(): void {
@@ -277,6 +288,24 @@ function resetBuiltin(id: string): void {
       不再带坐标表——新版式加进这里，下一次请求就会出现在清单里，不需要改提示词。
     </p>
     <p class="bbi-manga-hint">当前可用版式 {{ activeCount }} / {{ rows.length }}。</p>
+      <label class="bbi-manga-row">
+        <span>版式说明方式</span>
+        <select v-model="settings.manga.catalogMode" class="bbi-input" aria-label="版式说明方式">
+          <option value="text">文字空间说明</option>
+          <option value="image">示意图＋精简槽位清单（视觉模型）</option>
+        </select>
+      </label>
+      <p class="bbi-manga-hint">图片模式每图 4 套，保留原比例、格号、槽位及叠放关系；新增、修改或停用版式后，下一次请求自动重新拼接。本轮只发送方向、画布和冷却筛选后的候选。需指派支持图片的副 API；使用 DSH 时桥接也须支持传图。文字模式沿用现有说明。</p>
+      <button type="button" class="bbi-manga-btn" :disabled="atlasBusy" @click="previewAtlases">{{ atlasBusy ? '正在生成拼图…' : '预览版式拼图（每图4套）' }}</button>
+      <p v-if="atlasError" role="alert">{{ atlasError }}</p>
+      <details v-if="atlasPreview.length" open>
+        <summary>版式拼图预览（{{ atlasPreview.length }} 张）</summary>
+        <p class="bbi-manga-hint">预览包含当前全部启用版式；实际请求会进一步排除不适用方向、画布与冷却中的 ID。修改版式后可再次点击更新预览。</p>
+        <figure v-for="(atlas,index) in atlasPreview" :key="index" style="margin:12px 0">
+          <figcaption>{{ atlas.orientation }} · ID {{ atlas.ids.join('、') }} · <a :href="atlas.image" :download="`layout-atlas-${index+1}.png`">下载 PNG</a></figcaption>
+          <img :src="atlas.image" :alt="`版式拼图 ${index+1}：${atlas.ids.join('、')}`" style="display:block;width:100%;height:auto;border-radius:8px" />
+        </figure>
+      </details>
     <label class="bbi-manga-row">
       <span>版式冷却轮数</span>
       <input v-model.number="settings.manga.cooldownRounds" type="number" min="0" max="30" step="1" class="bbi-input"

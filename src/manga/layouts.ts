@@ -36,6 +36,8 @@ export interface MangaSettings {
   enabled: boolean;
   /** 最近多少次成功采纳的自动 tag 请求不得重复选版；0 关闭跨轮冷却。 */
   cooldownRounds: number;
+  /** Planning geometry presentation; image mode requires a vision-capable API. */
+  catalogMode?: 'text' | 'image';
   /** 版式选择说明:整段拼入提示词末尾，用来补充想要选择的版式。 */
   selectionNotes: string;
   /** 出框基准像素:按格数分档,2 格 ×1.25、3 格 ×1、4 格 ×0.8、5 格以上 ×0.6。 */
@@ -73,7 +75,7 @@ export interface ResolvedLayout extends MangaLayoutDef {
 }
 
 export function mangaDefaults(): MangaSettings {
-  return { enabled: false, cooldownRounds: 3, disabled: [], deleted: [], selectionNotes: '', bleed: 72, spec: '', thinking: '', custom: [], textSlotsVersion:1 };
+  return { enabled: false, cooldownRounds: 3, catalogMode: 'text', disabled: [], deleted: [], selectionNotes: '', bleed: 72, spec: '', thinking: '', custom: [], textSlotsVersion:1 };
 }
 
 export function normalizeCooldownRounds(value: unknown): number {
@@ -475,12 +477,39 @@ function frameContains(outer: number[][], inner: number[][]): boolean {
   });
 }
 
+/** Only exceptional regions need geometry in the LLM catalog; all legal keys are listed separately. */
+function compactRegions(panel: MangaPanel, base: FrameBox): string[] {
+  const anchors:Record<string,[number,number]>={T:[0.5,0],B:[0.5,1],TL:[0,0],TR:[1,0],BL:[0,1],BR:[1,1],ML:[0,0.5],MR:[1,0.5],L:[0,0.5],R:[1,0.5],O:[0.5,0.5]};
+  const groups = new Map<string, {keys:string[]; bounds:FrameBox; points:number[][]; shaped:boolean}>();
+  for (const key of Object.keys(panel.slots).filter(key => !['F','X'].includes(slotType(key)))) {
+    const points = regionOutline(panel,key)!, bounds = outlineBox(points), shaped = !!panel.shapes?.[key];
+    const [x,y,w,h] = relativeBox(bounds,base), cx = (x+w/2)/100, cy = (y+h/2)/100;
+    const anchor = anchors[key];
+    // Display-only heuristics: these thresholds never classify panel size or change compiler geometry.
+    const conventional = anchor
+      ? Math.abs(cx-anchor[0]) <= (anchor[0]===0.5 ? 0.16 : 0.34) && Math.abs(cy-anchor[1]) <= (anchor[1]===0.5 ? 0.16 : 0.34)
+      : key==='C' ? w>=85 && h>=85 && Math.abs(cx-0.5)<=0.1 && Math.abs(cy-0.5)<=0.1
+      : key==='S' && w>=60 && h>=50 && Math.abs(cx-0.5)<=0.15 && Math.abs(cy-0.5)<=0.2;
+    const standard = !shaped && !!panel.slots.F && frameContains(regionOutline(panel,'F')!,points) && conventional;
+    if (standard) continue;
+    const identity = JSON.stringify([bounds, shaped ? points : null]);
+    const group = groups.get(identity);
+    if (group) group.keys.push(key);
+    else groups.set(identity,{keys:[key],bounds,points,shaped});
+  }
+  return [...groups.values()].map(({keys,bounds,points,shaped}) =>
+    `${keys.join('/')}[${relativeBox(bounds,base)}]${shaped ? `斜框面积${rounded(outlineArea(points)/((bounds[3]-bounds[1])*(bounds[2]-bounds[0]))*100)}%` : ''}`);
+}
+
 /** Compact planning geometry only; never changes panel order, saved regions or compiled boxes. */
-export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayout[]>, notes=''): string {
-  const lines=[
+export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayout[]>, notes='', visual=false): string {
+  const lines=visual ? [
+    '【本轮候选版式空间目录】几何见本轮示意图；每张图4套，按ID对应；P1等于item.panel=1，槽位标签按本格合法键引用。',
+    '图片只表示已保存的框位和叠放，不是角色、动作或文字内容。各槽位是可选区域，不要求填满；形状不授权新增slot或改动边界。文字清单负责精确代号与用途，实际坐标由插件编译。',
+  ] : [
     '【本轮候选版式空间目录】本轮目录优先于历史清单；位置代号只是标识，不表示读序或大小。',
     'F位置[左,上,宽,高]%相对整页，原点为左上；宽高比按实际尺寸计算，面积按实际轮廓计算且未扣遮挡，面积排名不等于叙事主次，也不设大小格阈值。',
-    '内框[左,上,宽,高]%相对本格F外接框，可因出框小于0或大于100；斜框另列实际面积占其外接框的比例，百分比仅供取景判断，不是输出坐标或文字容量保证。',
+    '槽位只列本格合法键；常规范围省略，不代表无限空间。特殊区域[左,上,宽,高]%相对F外接框：保留编号、偏置或狭窄主体、非标准位置、斜框与出框范围；无F时相对整页。斜框另列实际面积/外接框面积。斜杠连接仅表示范围相同，输出仍选单个合法键。百分比不是输出坐标或文字容量保证。',
   ];
   for (const orientation of ['portrait','landscape'] as const) {
     const entries=layouts[orientation];
@@ -489,8 +518,13 @@ export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayo
     for (const layout of entries) {
       const parts=[layout.id,`${layout.panels.length} 格`,`画布 ${layout.canvas.width}×${layout.canvas.height}`];
       if (layout.usage) parts.push(layout.usage);
-      lines.push(`- ${parts.join('｜')}${layout.readingOrder ? `｜读序 ${layout.readingOrder}` : ''}`);
-      if (layout.panels.some(panel=>panel.layer!==undefined)) {
+      const readingOrder = layout.readingOrder?.replace(/panel-\d+\b/g, name => {
+        const index = layout.panels.findIndex(panel => panel.position === name);
+        return index < 0 ? name : String(index+1);
+      });
+      lines.push(`- ${parts.join('｜')}${readingOrder ? `｜读序 ${readingOrder}` : ''}`);
+      if (!visual) lines.push(`  格位概览：${layout.panels.map((panel,index)=>`${index+1}=${panel.slots.F ? framePosition(outlineBox(regionOutline(panel,'F')!),layout.canvas).replace('nearly full-page','近乎整页').replace('full-height','通高').replace('full-width','通栏').replace('upper','上方').replace('lower','下方').replace('middle','中部').replace('center','居中').replace('left','左侧').replace('right','右侧') : '边界未知'}`).join('，')}`);
+      if (layout.panels.some(panel=>panel.layer!==undefined) && panelLayerGuides(layout.panels).length) {
         const order=layout.panels.map((panel,index)=>({panel,index})).sort((a,b)=>(a.panel.layer ?? a.index)-(b.panel.layer ?? b.index) || a.index-b.index);
         lines.push(`  Panel stacking, back to front: ${order.map(({index})=>`panel ${index+1}`).join(' → ')}; apply occlusion only where frames overlap, preserving reading order.`);
       }
@@ -501,15 +535,12 @@ export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayo
         const outline=outlines[index], box=outline ? outlineBox(outline) : page;
         const [top,left,bottom,right]=box;
         const geometry=outline
-          ? `F ${framePosition(box,layout.canvas)} 位置[${relativeBox(box,page)}]% 宽高比${Math.round((right-left)/(bottom-top)*100)/100} 面积${rounded(areas[index]/(width*height)*100)}% 排名${areas.filter(area=>area>areas[index]).length+1}/${layout.panels.length}${panel.shapes?.F ? `；斜四边形轮廓[${outline.map(([x,y])=>`${rounded((x-left)/(right-left)*100)},${rounded((y-top)/(bottom-top)*100)}`).join(';')}]%相对F外接框` : ''}`
+          ? `F 位置[${relativeBox(box,page)}]% 宽高比${Math.round((right-left)/(bottom-top)*100)/100} 面积${rounded(areas[index]/(width*height)*100)}% 排名${areas.filter(area=>area>areas[index]).length+1}/${layout.panels.length}${panel.shapes?.F ? `；斜四边形轮廓[${outline.map(([x,y])=>`${rounded((x-left)/(right-left)*100)},${rounded((y-top)/(bottom-top)*100)}`).join(';')}]%相对F外接框` : ''}`
           : 'F未配置，整格边界未知；以下内框相对整页';
-        const regions=Object.keys(panel.slots).filter(key=>!['F','X'].includes(slotType(key))).map(key=> {
-          const points=regionOutline(panel,key)!, bounds=outlineBox(points);
-          return `${key}[${relativeBox(bounds,box)}]${panel.shapes?.[key] ? `斜框面积${rounded(outlineArea(points)/((bounds[3]-bounds[1])*(bounds[2]-bounds[0]))*100)}%` : ''}`;
-        });
+        const regions=compactRegions(panel,box);
         const crossing=crossingSubjects(panel);
         const notes=Object.entries(panel.slotNotes ?? {}).filter(([key])=>slotType(key)!=='X');
-        lines.push(`  ${index+1}(${panel.position}):${slotLine(panel)}；${geometry}${regions.length ? `；内框 ${regions.join(' ')}` : ''}${crossing.length ? `；跨格主体 ${crossing.join(' ')}` : ''}${notes.length ? `；框用途 ${JSON.stringify(Object.fromEntries(notes))}` : ''}`);
+        lines.push(`  ${index+1}${/^panel-\d+$/.test(panel.position) ? '' : `(${panel.position})`}:${visual ? '' : `${geometry}；`}槽位 ${slotLine(panel)}${!visual && regions.length ? `；特殊区域 ${regions.join(' ')}` : ''}${crossing.length ? `；跨格主体 ${crossing.join(' ')}` : ''}${notes.length ? `；框用途 ${JSON.stringify(Object.fromEntries(notes))}` : ''}`);
       });
       for (const guide of panelLayerGuides(layout.panels)) lines.push(`  重叠层级：${guide}（仅在轮廓重叠处遮挡，不改变读序）。`);
       outlines.forEach((outer,i)=>outlines.forEach((inner,j)=> {
@@ -533,7 +564,7 @@ export function buildMangaSpec(manga: MangaSettings, includeCatalog=true): strin
   lines.push('【版式清单与挑选】这一节由插件按当前启用的版式生成，未启用的版式不会出现；坐标由插件按画布查表注入，你不用写。');
   lines.push('- tag 内层 JSON 顶层增加 layout（从对应方向的启用清单选 id）；每个 items 项填写 panel（从 1 起的格号或位置代号）与 slot，不写 bbox。插件发送前删除 layout/panel/slot 并填入原生坐标。示例版式若已停用，必须替换成清单中的启用版式。');
   lines.push('- 每套版式的画布以该行标注尺寸为准，只选择与实际生成尺寸一致的版式。自定义画布不会自动改变 ComfyUI 工作流或预设尺寸。');
-  lines.push('- 读取格式:版式 id｜格数｜画布｜用途｜读序；各格另列格号(位置代号)、合法槽位、实际位置与空间比例。以本轮动态候选目录为准，历史清单不授予权限。');
+  lines.push('- 读取格式:版式 id｜格数｜画布｜用途｜读序；各格以整数格号标识；有语义的位置名括注，内框键即合法槽位，并列实际位置与空间比例。以本轮动态候选目录为准，历史清单不授予权限。');
   lines.push('- 挑法:先按所选事件的时序、信息量、互动关系与文字容量比较版式,再确定格数;不默认选择最少格。内容适合多格推进时选足够的独立格,内容简单时允许少格,不为凑格补编剧情。分配事件与对白严格沿该行给出的读序。');
   lines.push('- 槽位:F 格框 C 完整内区 S 实际主体区域 L/R 左右人物 O 道具音效 T/TL/TR 顶部字区 B 底部字区 BL/BR 左下/右下字区 ML/MR 侧边字区 E 允许小部分越线进格间留白。清单里没列出的槽位在该格不存在,填了会让这次生成失败。');
   lines.push('- 同类内框可有编号，如 S、S_2、O、O_2、TL、TL_2；每个完整键对应独立区域，编号不表示读序、人物数量或自动新增人物。仅使用该格清单中已有的完整键。');
@@ -719,6 +750,7 @@ export function normalizeManga(raw: unknown): MangaSettings {
   return {
     enabled: stored.enabled === true,
     cooldownRounds: normalizeCooldownRounds(stored.cooldownRounds),
+    catalogMode: stored.catalogMode === 'image' ? 'image' : 'text',
     disabled,
     deleted: Array.isArray(stored.deleted) ? [...new Set(stored.deleted.filter((v): v is string => typeof v === 'string').map(v => v.trim()).filter(id => builtinIds('portrait').includes(id) || builtinIds('landscape').includes(id)))] : [],
     selectionNotes: typeof stored.selectionNotes === 'string' ? stored.selectionNotes : '',

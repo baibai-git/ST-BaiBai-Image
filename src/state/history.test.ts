@@ -243,3 +243,12 @@ describe('safeHistory', () => {
     expect(safeHistory(() => 42)).toBe(42);
   });
 });
+
+ it('retains a validation failure response and upstream usage using the existing history limit',()=> {
+  const id=llm();
+  failLlm(id,'bad JSON',false,{response:'x'.repeat(MAX_CONTENT+100),promptTokens:100,completionTokens:20,cacheReadTokens:80,tokensEstimated:false});
+  const record=records[0] as LlmRecord;
+  expect(record.status).toBe('error'); expect(record.error).toBe('bad JSON');
+  expect(record.response).toBe(truncate('x'.repeat(MAX_CONTENT+100)));
+  expect(record.promptTokens).toBe(100); expect(record.completionTokens).toBe(20); expect(record.cacheReadTokens).toBe(80);
+ });

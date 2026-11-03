@@ -3,7 +3,7 @@ import { templateSupportsNegative } from '@/backends/comfyTemplates';
 import { getWorkflowPlaceholders } from '@/backends/comfyui';
 import { naiSupportsCharacterPrompts } from '@/backends/nai';
 import { parseSize, pickSize, type Orientation } from '@/backends/size';
-import { createLayoutSelection, setLayoutSelectionMessage, type LayoutSelection } from '@/autoTag/layoutCooldown';
+import { createLayoutSelection, prepareLayoutSelectionMessage, type LayoutSelection } from '@/autoTag/layoutCooldown';
 import {
   cleanHistoryText,
   prepareTargetText,
@@ -163,50 +163,11 @@ function roleLabel(context: STContext, floor: number): string {
   return `assistant（${message.name || context.name2 || 'Assistant'}）`;
 }
 
-export async function buildAutoTagMessages(
-  context: STContext,
-  targetFloor: number,
+export function buildAutoTagFixedMessages(
   options: AutoTagSettings,
-  memory: BookMemoryContext | null,
-  /** Runner 在请求开始时生成的位置快照；缺省时由当前楼层即时生成。 */
-  preparedTargetOverride?: PreparedTargetText,
-  /** 角色固定外貌库文本(charAnchors.ts 产出);空/null = 本轮无库,示例改用自行补特征的口径。 */
-  library?: string | null,
-  /**
-   * 追加给模型的任务备注(单槽重写时说明「只重写第 N 张的提示词、画面不变」,
-   * 并带上该槽位当前提示词作锚点与其余画面清单)。
-   * 空串/缺省时不占消息位;放在角色参考与上下文之后、目标正文之前。
-   */
-  taskNote?: string,
-  /** 协议形态;runner 开跑时快照一份传进来,验收与收尾用同一份(缺省即时现算)。 */
   profile: AutoTagProfile = autoTagProfile(),
-  layoutSelection?: LayoutSelection,
-): Promise<ChatMsg[]> {
-  const target = context.chat[targetFloor];
-  const preparedTarget =
-    preparedTargetOverride ??
-    prepareTargetText(target.mes, settings.excludes.customStripTags);
-  const previous = recentFloors(context, targetFloor, options.contextMessages)
-    .filter(floor => floor !== targetFloor)
-    .map(
-      floor =>
-        `--- 上下文｜${roleLabel(context, floor)} ---\n${cleanHistoryText(
-          context.chat[floor].mes,
-          settings.excludes.customStripTags,
-        )}`,
-    )
-    .join('\n\n');
-  const memoryText = memory ? memory.text : '角色参考：柏宝书本次未提供。';
-
-  // 世界书/角色卡/人设:与柏宝书摘要副 API 同口径(有则带,取不到降级为空,不影响主流程)。
-  // 世界书扫描文本 = 目标楼 + 携带的上下文楼(关键词激活与主对话一致)。
-  const scanFloors = recentFloors(context, targetFloor, options.contextMessages);
-  const [worldInfo, charCard, persona] = await Promise.all([
-    fetchWorldInfo(context.chat, scanFloors, context.name1, context.name2),
-    Promise.resolve(fetchCharCard(context)),
-    Promise.resolve(fetchUserPersona(context)),
-  ]);
-
+  library?: string | null,
+): ChatMsg[] {
   // 自然语言模式(profile.nl):ComfyUI 当前工作流或 NAI 渠道开启了「生成自然语言」。
   // 开启后协议变为 tag/nl 两键——自然语言是配合短 tag 用的,不是替代。
   // 动态负面词同样取自当前预设:切工作流即同时切走自然语言与动态负面词的口径。
@@ -279,7 +240,23 @@ export async function buildAutoTagMessages(
   }
   if (negativeOn) sampleImage.negative = 'extra people, duplicate character';
   sampleImage.size ??= profile.lockedSize ?? 'portrait';
-  const outputShape = JSON.stringify({ images: [sampleImage], changes: [] });
+  const sampleImages = [sampleImage];
+  if (layoutOn && settings.manga.enabled && Number(options.maxImages) >= 2) {
+    const layouts = (profile.lockedSize ? [profile.lockedSize] : ['portrait','landscape'] as const)
+      .flatMap(orientation => resolveLayouts(settings.manga, orientation).map(layout => ({layout,orientation})));
+    const second = layouts.find(({layout}) => layout.id !== JSON.parse(sampleImage.tag as string).layout && layout.panels.length);
+    if (second) {
+      const inner = JSON.parse(sampleImage.tag as string);
+      inner.layout = second.layout.id;
+      inner.summary.canvas = second.layout.panels.length > 1 ? 'multi_panel' : 'single';
+      inner.summary.caption = `A different short event in ${second.layout.panels.length} panels following the selected layout.`;
+      const slots = second.layout.panels[0].slots;
+      inner.items[0].caption = 'The same adult traveler sets the same closed book on a table, fingertips resting on its cover.';
+      inner.items[0].slot = ['C','S','F'].find(key => slots[key]) ?? Object.keys(slots)[0];
+      sampleImages.push({...sampleImage, position:'P3', size:second.orientation, tag:JSON.stringify(inner)});
+    }
+  }
+  const outputShape = JSON.stringify({ images: sampleImages, changes: [] });
   // NAI 两种写法共用的尾段:角色块的取舍与 Base / 角色的分工不随自然语言开关变
   const naiCharacterRuleTail =
     'This includes visible characters who have no library profile: a one-off unnamed individual gets a Character Prompt too, keyed by the term the story uses for them. Anonymous crowds visible in the frame remain in Base. Character tag uses girl/boy without a numeric count and contains that character appearance, outfit, and action. Do not include quality tags, negative tags, or XML.';
@@ -351,6 +328,7 @@ export async function buildAutoTagMessages(
 
 请先在 <thinking>...</thinking> 中简洁完成检查，再紧接着输出最终 JSON。除一个 <thinking> 块和一个 JSON 对象外，不得返回其他内容，不要使用 Markdown 代码块。最终结果必须包含且只能包含一个可解析的 JSON 对象，格式固定为：
 ${outputShape}
+所有页必须平铺在唯一顶层 images 数组中；images 的每项只写一页，不得再嵌套 images 或 changes。changes 只在最外层汇总；每页的 summary/layout/items 写在该页 tag 字符串内（Layout 模式）。示例中的位置与版式只示范结构，实际以目标正文编号和本轮可选目录为准。
 
 规则：
 1. 先完成角色建档与变化检查，再选图；不能因为没有图片或图片数量较少而跳过 changes 检查，没有任何变化时 changes 返回空数组。
@@ -400,8 +378,56 @@ ${characterRule}
       ? '内部核对事实与状态、人物归属、镜头与接触、光影与细节、文字与读序、JSON与坐标；只给一个简短英文检查摘要及宿主最终 JSON。tag 为完整 Layout JSON 字符串，nl 留空，不输出逐格推理或提示词草稿。'
       : backendThinkingPrompt(options, nlOn, naiCharPromptsOn));
   if (thinking) messages.push({ role: 'system', content: thinking, purpose: 'check' });
+  return messages;
+}
+
+export async function buildAutoTagMessages(
+  context: STContext,
+  targetFloor: number,
+  options: AutoTagSettings,
+  memory: BookMemoryContext | null,
+  /** Runner 在请求开始时生成的位置快照；缺省时由当前楼层即时生成。 */
+  preparedTargetOverride?: PreparedTargetText,
+  /** 角色固定外貌库文本(charAnchors.ts 产出);空/null = 本轮无库,示例改用自行补特征的口径。 */
+  library?: string | null,
+  /**
+   * 追加给模型的任务备注(单槽重写时说明「只重写第 N 张的提示词、画面不变」,
+   * 并带上该槽位当前提示词作锚点与其余画面清单)。
+   * 空串/缺省时不占消息位;放在角色参考与上下文之后、目标正文之前。
+   */
+  taskNote?: string,
+  /** 协议形态;runner 开跑时快照一份传进来,验收与收尾用同一份(缺省即时现算)。 */
+  profile: AutoTagProfile = autoTagProfile(),
+  layoutSelection?: LayoutSelection,
+): Promise<ChatMsg[]> {
+  const target = context.chat[targetFloor];
+  const preparedTarget =
+    preparedTargetOverride ??
+    prepareTargetText(target.mes, settings.excludes.customStripTags);
+  const previous = recentFloors(context, targetFloor, options.contextMessages)
+    .filter(floor => floor !== targetFloor)
+    .map(
+      floor =>
+        `--- 上下文｜${roleLabel(context, floor)} ---\n${cleanHistoryText(
+          context.chat[floor].mes,
+          settings.excludes.customStripTags,
+        )}`,
+    )
+    .join('\n\n');
+  const memoryText = memory ? memory.text : '角色参考：柏宝书本次未提供。';
+
+  // 世界书/角色卡/人设:与柏宝书摘要副 API 同口径(有则带,取不到降级为空,不影响主流程)。
+  // 世界书扫描文本 = 目标楼 + 携带的上下文楼(关键词激活与主对话一致)。
+  const scanFloors = recentFloors(context, targetFloor, options.contextMessages);
+  const [worldInfo, charCard, persona] = await Promise.all([
+    fetchWorldInfo(context.chat, scanFloors, context.name1, context.name2),
+    Promise.resolve(fetchCharCard(context)),
+    Promise.resolve(fetchUserPersona(context)),
+  ]);
+
+  const messages = buildAutoTagFixedMessages(options, profile, library);
   const selection = layoutSelection ?? autoTagLayoutSelection(context, profile);
-  if (selection) setLayoutSelectionMessage(messages, selection);
+  if (selection) await prepareLayoutSelectionMessage(messages, selection);
   if (charCard) messages.push({ role: 'system', content: buildCharCardSystem(charCard) });
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
@@ -411,3 +437,4 @@ ${characterRule}
   messages.push({ role: 'user', content: userContent });
   return messages;
 }
+

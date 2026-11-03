@@ -370,3 +370,21 @@ it('关闭动态负面词时丢弃AI误返回的negative及别名，包括其中
   const plan = parseImagePlanWithRange(raw, segments, 0, 1, false);
   expect(plan.images[0].negative).toBe('');
 });
+
+ describe('whole response JSON boundaries',()=> {
+  it('rejects an incomplete outer object instead of extracting a valid child page',()=> {
+    const raw = '<thinking>brief check</thinking>{"images":[{"position":"P1","tag":"first"},{"images":[{"position":"P2","tag":"second"}],"changes":[]}';
+    expect(()=>parseImagePlan(raw,segments,3)).toThrow('外层 JSON 未闭合');
+  });
+  it('rejects nested responses and multiple outer objects instead of dropping pages',()=> {
+    expect(()=>parseImagePlan('{"images":[{"images":[{"position":"P2","tag":"second"}]}]}',segments,3)).toThrow('嵌套了 images');
+    expect(()=>parseImagePlan('{"images":[]} {"images":[]}',segments,3)).toThrow('多个外层 JSON');
+    expect(()=>parseImagePlan('{"images":[{"position":"P1","tag":"first"}],}',segments,3)).toThrow('外层 JSON 语法错误');
+    expect(()=>parseImagePlan('[{"images":[]}]',segments,3)).toThrow('最外层必须是对象');
+    expect(()=>parseImagePlan('```json\n[{"images":[]}]\n```',segments,3)).toThrow('最外层必须是对象');
+  });
+  it('keeps quoted braces and escaped quotes in a two-page response intact',()=> {
+    const raw=JSON.stringify({images:[{position:'P1',tag:'a "quote" and } brace'},{position:'P2',tag:'second { scene'}],changes:[]});
+    expect(parseImagePlan('<thinking>ignored {}</thinking>说明\n```json\n'+raw+'\n```',segments,3).images).toHaveLength(2);
+  });
+ });

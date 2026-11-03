@@ -697,9 +697,23 @@ async function confirmUpdate() {
           <input v-model="settings.autoTag.dshSession" type="checkbox" class="bbi-checkbox" aria-label="DSH 持久 Agent 会话" />
         </label>
         <template v-if="settings.autoTag.dshSession">
-          <p class="bbi-field-hint">使用上方指派的 DSH 副 API 渠道。固定四项仅在首次发送；当前候选版式的空间与槽位、世界书、角色资料和正文每次发送。版式修改在下一次请求生效；修改规范后，请手动发送固定规范。每个酒馆聊天独立绑定会话，普通 API 模式不受影响。</p>
+          <label class="bbi-switch-row">
+            <span class="bbi-field-label">柏宝绘专属会话</span>
+            <input v-model="settings.autoTag.dshDedicated" type="checkbox" class="bbi-checkbox" aria-label="柏宝绘专属会话" />
+          </label>
+          <p v-if="settings.autoTag.dshDedicated" class="bbi-field-hint">切换酒馆聊天仍复用专属会话。插件发送的固定内容变化会在下次生成前同步；每次任务只使用本轮资料，历史保留在 DSH 日志中。需要支持专属模式的 ST-bridge。</p>
+          <label class="bbi-switch-row">
+            <span class="bbi-field-label">规范来源</span>
+            <select v-model="settings.autoTag.dshRuleSource" class="bbi-input" style="width:min(240px,60%)" aria-label="DSH 规范来源">
+              <option value="plugin">插件规范</option>
+              <option value="skill">DSH Skill</option>
+            </select>
+          </label>
+          <p class="bbi-field-hint">仅对 DSH 的 ComfyUI 漫画 Layout 任务生效。选择 DSH Skill 后，不发送主规范和检查指导；前置提示词、宿主输出协议及本轮资料照常发送。两种来源使用独立会话绑定，旧会话保留。其他后端及普通 API 沿用插件规范。</p>
+          <p v-if="settings.autoTag.dshRuleSource==='skill'" class="bbi-field-hint">请在 DSH 为当前专属入口绑定 Skill，并确保正文及 references 分册可读取。插件会核对绑定和响应回显；Skill 内容或绑定更新后，按桥接提示重建会话。插件里的规范文本仍会保留，供切回时使用。</p>
+          <p class="bbi-field-hint">使用上方指派的 DSH 副 API 渠道。当前候选版式、世界书、角色资料和正文每次发送。{{ settings.autoTag.dshDedicated ? '专属模式首次使用或固定规范变化时自动同步；手动按钮管理当前输出模式的专属会话。' : '每个酒馆聊天独立绑定会话，固定规范仅在首次发送；修改规范后请手动重新发送。' }}普通 API 模式不受影响。</p>
           <div class="bbi-channel-bar">
-            <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('sync_rules')">重新发送固定规范</button>
+            <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('sync_rules')">{{ settings.autoTag.dshRuleSource==='skill' && settings.defaultBackend==='comfyui' && settings.manga.enabled ? '重新发送宿主协议' : '重新发送固定规范' }}</button>
             <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('reset')">重建 DSH 会话</button>
           </div>
           <p v-if="dshBusy || dshNotice" class="bbi-field-hint" role="status">{{ dshBusy ? '正在请求 DSH…' : dshNotice }}</p>

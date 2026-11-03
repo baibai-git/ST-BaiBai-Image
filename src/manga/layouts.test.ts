@@ -375,11 +375,11 @@ describe('buildMangaSpec', () => {
     expect(spec.startsWith('【版式清单与挑选】')).toBe(true);
     expect(spec).toContain('portrait(1088×1920)');
     expect(spec).toContain('landscape(1920×1088)');
-    expect(spec).toMatch(/1\(single\):[^\n]* S/);
+    expect(spec).toMatch(/1\(single\):[^\n]*槽位 F[^\n]*\bS\b/);
     expect(spec).not.toMatch(/1\(single\):[^\n]*\bX\b/);
     expect(spec).toContain('顶层增加 layout');
     expect(spec).toContain('位置[');
-    expect(spec).toContain('内框 C[');
+    expect(spec).toMatch(/；槽位 [^；\n]*\bC\b/);
     expect(spec).not.toContain('[-924,-504,924,504]');
     // 每行带「用途」引导，读序统一加前缀
     expect(spec).toContain('整页只给一个瞬间；表情或接触点的满页特写');

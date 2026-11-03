@@ -65,7 +65,8 @@ describe('ComfyUI 漫画能力迁移',()=>{
     expect(out.items[0].bbox).toEqual([-512,-512,70,512]);
     const spec=buildMangaSpec(manga);
     expect(spec).toContain('复杂姿势');expect(spec).toContain('多尺度');
-    expect(spec).toContain('1(upper):F S S_2 O TL TL_2');
+    const line=spec.split('\n').find(line=>line.startsWith('  1(upper):'))!;
+    expect(line).toContain('；槽位 F S S_2 O TL TL_2');
     expect(spec).not.toMatch(/1\(upper\):[^\n]*\bX\b/);
     expect(spec).not.toContain('一格一个主体框');
   });

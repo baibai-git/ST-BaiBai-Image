@@ -30,6 +30,7 @@ vi.mock('@/api/dsh', async () => {
     options.action === 'sync_rules' ? '固定规范已发送' : requestCompletion(channel, messages, options) };
 });
 vi.mock('@/autoTag/prompt', () => ({
+  buildAutoTagFixedMessages: () => [{role:'system',content:'fixed without chat',purpose:'spec'}],
   autoTagProfile: () => ({ layout: true, nl: false, naiCharPrompts: false, lockedSize: null }),
   autoTagLayoutSelection: (context: STContext) => createLayoutSelection(context, h.settings.manga,
     { portrait: { width: 1152, height: 1728 }, landscape: null }, null),
@@ -100,8 +101,8 @@ describe('runner layout adoption', () => {
     h.responses = ['{"images":[],"changes":[],"layout_fallback":"Other candidates cannot hold the dialogue."}', response('a')];
     await requestFloorTags(0);
     expect(h.messages).toHaveLength(2);
-    expect(h.messages[0].at(-1)?.content).toContain('portrait: b、c');
-    expect(h.messages[1].at(-1)?.content).toContain('portrait: a、b、c');
+    expect(h.messages[0].at(-1)?.content).toContain('竖版（portrait）：可选 2 套；ID：b、c');
+    expect(h.messages[1].at(-1)?.content).toContain('竖版（portrait）：可选 3 套；ID：a、b、c');
     expect(h.context.chatMetadata[LAYOUT_HISTORY_KEY]).toEqual([['a'], ['a']]);
     expect(h.saves).toBe(1);
   });
@@ -109,7 +110,7 @@ describe('runner layout adoption', () => {
   it('serializes two floors so the second sees the first accepted layout', async () => {
     h.responses = [response('a'), response('b')];
     await Promise.all([requestFloorTags(0), requestFloorTags(1)]);
-    expect(h.messages[1].at(-1)?.content).toContain('portrait: b、c');
+    expect(h.messages[1].at(-1)?.content).toContain('竖版（portrait）：可选 2 套；ID：b、c');
     expect(h.context.chatMetadata[LAYOUT_HISTORY_KEY]).toEqual([['a'], ['b']]);
   });
 
@@ -119,7 +120,7 @@ describe('runner layout adoption', () => {
     h.responses = [response('a', 'c')];
     await requestFloorTags(0);
     expect(h.messages).toHaveLength(1);
-    expect(h.messages[0].at(-1)?.content).toContain('portrait: a、c');
+    expect(h.messages[0].at(-1)?.content).toContain('竖版（portrait）：可选 2 套；ID：a、c');
     expect(h.context.chatMetadata[LAYOUT_HISTORY_KEY]).toEqual([['a'], ['b'], ['a', 'c']]);
   });
 
@@ -131,4 +132,12 @@ describe('runner layout adoption', () => {
     await controlDshSession('sync_rules');
     expect(h.context.chatMetadata[LAYOUT_HISTORY_KEY]).toEqual([[]]);
   });
+});
+
+it('dedicated manual controls work without a selected Tavern chat or story floor',async()=>{
+  h.settings.autoTag.dshSession=true;h.settings.autoTag.dshDedicated=true;h.channel={id:'dsh'};
+  h.context.getCurrentChatId=()=>'';h.context.chat=[];
+  await expect(controlDshSession('sync_rules')).resolves.toBe('固定规范已发送');
+  h.settings.autoTag.dshDedicated=false;
+  await expect(controlDshSession('sync_rules')).rejects.toThrow('打开一个酒馆聊天');
 });

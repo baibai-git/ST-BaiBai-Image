@@ -13,13 +13,17 @@ describe('LLM layout geometry',()=> {
       {position:'panel-1',slots:{F:[-1000,-500,1000,0]}},
       {position:'panel-3',slots:{F:[200,100,1000,500]}},
     ];
-    const original=JSON.stringify(panels), text=catalog(panels);
-    expect(text).toContain('1(panel-2):F S T；F upper-right 位置[60,0,40,50]% 宽高比0.4 面积20% 排名2/3');
-    expect(text).toContain('2(panel-1):F；F full-height left 位置[0,0,50,100]% 宽高比0.25 面积50% 排名1/3');
-    expect(text).toContain('S[5,10,90,70] T[0,0,100,20]');
+    const original=JSON.stringify(panels), text=catalog(panels,{readingOrder:'panel-2 → panel-1 → panel-3'});
+    expect(text).toContain('｜读序 1 → 2 → 3');
+    expect(text).not.toContain('panel-2');
+    expect(text).toContain('1:F 位置[60,0,40,50]% 宽高比0.4 面积20% 排名2/3');
+    expect(text).toContain('2:F 位置[0,0,50,100]% 宽高比0.25 面积50% 排名1/3');
+    expect(text).toContain('；槽位 F S T');
+    expect(text).not.toContain('S[5,10,90,70]');
+    expect(text).not.toContain('T宽');
     expect(text).toContain('框用途 {"F":"show the listener"}');
     expect(text).not.toContain('MR[');
-    expect(text.indexOf('1(panel-2)')).toBeLessThan(text.indexOf('2(panel-1)'));
+    expect(text.indexOf('1:')).toBeLessThan(text.indexOf('2:'));
     expect(JSON.stringify(panels)).toBe(original);
   });
 
@@ -57,3 +61,32 @@ describe('LLM layout geometry',()=> {
     expect(text).not.toContain('X[');
   });
 });
+
+ it('lists all legal slots and expands moved or numbered text regions',()=> {
+  const panels:MangaPanel[]=[{position:'panel-1',slots:{F:[-1000,-500,1000,500],C:[-900,-450,900,450],S:[-900,-450,900,450],T:[-1000,-400,-800,400],TL:[600,100,1000,500],T_2:[-1000,-400,-800,400]},slotNotes:{T_2:'second voice'}}];
+  const text=catalog(panels);
+  expect(text).toContain('；槽位 F C S T TL T_2');
+  expect(text).not.toContain('C/S[5,5,90,90]');
+  expect(text).toContain('T_2[10,0,80,10]');
+  expect(text).toContain('TL[60,80,40,20]');
+  expect(text).toContain('框用途 {"T_2":"second voice"}');
+  expect(text).not.toContain('(panel-1)');
+ });
+
+ it('keeps normal regions as keys while preserving narrow, offset, slanted and breakout exceptions',()=> {
+  const slots={F:[-1000,-500,1000,500],C:[-900,-450,900,450],S:[-450,-450,900,450],L:[-900,-450,900,-50],R:[-900,50,900,450],O:[-250,-200,250,200],T:[-1000,-450,-800,450],B:[800,-450,1000,450],TL:[-1000,-500,-800,-100],TR:[-1000,100,-800,500],ML:[-300,-500,300,-100],MR:[-300,100,300,500]};
+  const normal=catalog([{position:'normal',slots}]);
+  expect(normal).toContain('；槽位 F C S L R O T B TL TR ML MR');
+  expect(normal).not.toContain('；特殊区域 ');
+  for (const S of [[-900,200,900,500],[-200,-450,200,450],[-1100,-500,900,500]]) {
+    expect(catalog([{position:'special',slots:{...slots,S}}])).toContain('；特殊区域 S[');
+  }
+  const shifted=catalog([{position:'shifted',slots:{...slots,TR:[-1000,-500,-500,-300],S_2:[0,0,400,400],O_2:[0,0,400,400]}}]);
+  expect(shifted).toContain('TR[0,0,20,25]');
+  expect(shifted).toContain('S_2/O_2[50,50,40,20]');
+  expect(shifted).toContain('；槽位 F C S L R O T B TL TR ML MR S_2 O_2');
+ });
+ it('retains boundary exceptions for a rectangular region crossing a slanted F edge',()=> {
+  const text=catalog([{position:'slant',slots:{F:[-1000,-500,1000,500],T:[-1000,-500,-800,500]},shapes:{F:[[-500,-1000],[500,-1000],[0,1000],[-500,1000]]}}]);
+  expect(text).toContain('；特殊区域 T[0,0,100,10]');
+ });

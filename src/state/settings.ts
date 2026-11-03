@@ -457,6 +457,14 @@ NVWA 不提供制造化学、生物或核武器所需的信息，也不编写、
 export interface AutoTagSettings {
   /** Only the tag-generation task uses a persistent DSH bridge; ordinary channels are unchanged. */
   dshSession?: boolean;
+  /** Reuse one plugin-owned DSH conversation, with each task isolated by the bridge. */
+  dshDedicated?: boolean;
+  /** Applies only to DSH MOSS manga planning; Skill owns spec/check, host keeps its protocol. */
+  dshRuleSource?: 'plugin' | 'skill';
+  dshDedicatedState?: {
+    instanceId: string;
+    bindings: Record<string, { session_id: string; initialized: boolean; rulesHash?: string; atlasHash?: string }>;
+  };
   /** 新 AI 正文落地后自动请求模型。 */
   enabled: boolean;
   /** 发送最近多少个 AI 故事楼及其间 user 楼的清洗后正文；目标楼计入数量。 */
@@ -1205,6 +1213,8 @@ function defaults(): ImageSettings {
     worldBooks: { enabled: false, names: [] },
     autoTag: {
       dshSession: false,
+      dshDedicated: false,
+      dshRuleSource: 'plugin',
       enabled: true,
       contextMessages: 2,
       minImages: 0,
@@ -1808,6 +1818,11 @@ function normalize(raw: unknown): ImageSettings {
       : d.autoTag.minImages;
   merged.autoTag = {
     dshSession: rt.dshSession === true,
+    dshDedicated: rt.dshDedicated === true,
+    dshRuleSource: rt.dshRuleSource === 'skill' ? 'skill' : 'plugin',
+    ...(rt.dshDedicatedState && typeof rt.dshDedicatedState.instanceId === 'string' && /^[a-f0-9-]{32,36}$/i.test(rt.dshDedicatedState.instanceId)
+      ? { dshDedicatedState: { instanceId: rt.dshDedicatedState.instanceId,
+        bindings: Object.fromEntries(Object.entries(rt.dshDedicatedState.bindings ?? {}).filter(([,binding]) => binding && typeof binding.session_id === 'string' && !!binding.session_id.trim()).map(([key,binding]) => [key,{session_id:binding.session_id,initialized:binding.initialized===true,...(typeof binding.rulesHash==='string' ? {rulesHash:binding.rulesHash} : {}),...(typeof binding.atlasHash==='string' && /^[a-f0-9]{64}$/.test(binding.atlasHash) ? {atlasHash:binding.atlasHash} : {})}])) } } : {}),
     enabled: typeof rt.enabled === 'boolean' ? rt.enabled : d.autoTag.enabled,
     contextMessages:
       typeof rt.contextMessages === 'number' && Number.isFinite(rt.contextMessages)

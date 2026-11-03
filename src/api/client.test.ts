@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiChannel } from '@/state/settings';
-import { buildRequestBody, extractContent, readUsage, readSseContent, requestCompletion } from './client';
+import { buildRequestBody, extractContent, readUsage, readSseContent, requestCompletion, requestViaMainApi, wireMessages } from './client';
 
 /** 历史层全部 mock 掉:这里要断的正是「什么时候记成功/失败」 */
 const h = vi.hoisted(() => ({
   beginLlm: vi.fn(() => 1),
+  generateRaw: vi.fn(),
   finishLlm: vi.fn(),
   failLlm: vi.fn(),
   patchLlmTokens: vi.fn(),
@@ -27,7 +28,7 @@ vi.mock('@/state/history', () => ({
 }));
 
 vi.mock('@/st/context', () => ({
-  getContext: () => ({ getRequestHeaders: () => ({}) }),
+  getContext: () => ({ getRequestHeaders: () => ({}), generateRaw: h.generateRaw }),
 }));
 
 function jsonResponse(data: unknown): Response {
@@ -51,6 +52,19 @@ const channel: ApiChannel = {
   reasoningEffort: '',
 };
 const messages = [{ role: 'user' as const, content: 'hi' }];
+
+describe('layout image wire boundary',()=>{
+  it('keeps plain text unchanged and serializes attachments as actual image blocks without local metadata',()=>{
+    expect(wireMessages([{role:'system',content:'rules',purpose:'spec'},{role:'user',content:'atlas',images:['data:image/png;base64,AAA']}])).toEqual([
+      {role:'system',content:'rules'},
+      {role:'user',content:[{type:'text',text:'atlas'},{type:'image_url',image_url:{url:'data:image/png;base64,AAA',detail:'high'}}]},
+    ]);
+    expect(()=>wireMessages([{role:'system',content:'atlas',images:['x']}])).toThrow('user');
+  });
+  it('does not silently flatten images through the text-only main API helper',async()=>{
+    await expect(requestViaMainApi([{role:'user',content:'atlas',images:['data:image/png;base64,AAA']}])).rejects.toThrow('支持图片的副 API');
+  });
+});
 
 describe('readUsage: upstream cache counters', () => {
   it('reads DeepSeek cache hits without treating cache writes as hits', () => {
@@ -293,7 +307,7 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
       }),
     ).rejects.toThrow('协议不合法');
     expect(h.finishLlm).not.toHaveBeenCalled();
-    expect(h.failLlm).toHaveBeenCalledWith(1, '协议不合法', false);
+    expect(h.failLlm).toHaveBeenCalledWith(1, '协议不合法', false, {response:'答案文本', promptTokens:5, completionTokens:7, cacheReadTokens:null, tokensEstimated:false});
   });
 
   it('HTTP 失败时 validate 根本不该被调用', async () => {
@@ -307,3 +321,11 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
     expect(h.failLlm).toHaveBeenCalledTimes(1);
   });
 });
+
+ it('主 API 验收失败仍保留返回文本', async () => {
+  h.finishLlm.mockClear(); h.failLlm.mockClear();
+  h.generateRaw.mockResolvedValue('invalid response');
+  await expect(requestViaMainApi(messages,{validate:()=>{throw new Error('invalid JSON');}})).rejects.toThrow('invalid JSON');
+  expect(h.finishLlm).not.toHaveBeenCalled();
+  expect(h.failLlm).toHaveBeenCalledWith(1,'invalid JSON',false,{response:'invalid response',promptTokens:null,completionTokens:null,tokensEstimated:true});
+ });

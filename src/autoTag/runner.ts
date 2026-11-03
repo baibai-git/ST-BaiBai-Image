@@ -8,8 +8,8 @@ import {
 } from '@/autoTag/charAnchors';
 import { prepareTargetText } from '@/autoTag/clean';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
-import { autoTagLayoutSelection, autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
-import { layoutCandidates, recordLayoutRound, relaxLayoutSelection, setLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from '@/autoTag/layoutCooldown';
+import { autoTagLayoutSelection, autoTagProfile, buildAutoTagMessages, buildAutoTagFixedMessages } from '@/autoTag/prompt';
+import { layoutCandidates, recordLayoutRound, relaxLayoutSelection, prepareLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from '@/autoTag/layoutCooldown';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import {
@@ -406,6 +406,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
           await requestDshCompletion(channel, messages, context, {
             signal:controller.signal, source, validate,
             operation:dshOperation, expectedChatId:dshIdentity,
+            protocolKey:settings.manga.enabled && profile.layout ? 'manga' : profile.layout ? 'moss-layout' : profile.naiCharPrompts ? 'nai-character' : settings.defaultBackend,
             target:{floor,swipe_id:swipeId ?? null,revision:identity},
           });
         } else if (channel) {
@@ -429,7 +430,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
         if (candidate?.layoutFallback && layoutSelection) {
           if (!relaxLayoutSelection(layoutSelection)) throw new Error('已无可解除的版式冷却记录');
           console.info('[柏宝绘] 从最早记录解除版式冷却：', candidate.layoutFallback);
-          setLayoutSelectionMessage(messages, layoutSelection);
+          await prepareLayoutSelectionMessage(messages, layoutSelection);
           dshOperation.pending = undefined;
           attempt = -1; // A bounded new candidate tier, not another failed attempt or accepted round.
           continue;
@@ -770,14 +771,22 @@ export function bindAutoTagging(): void {
 export async function controlDshSession(action: 'sync_rules' | 'reset'): Promise<string> {
   const context=getContext(), channel=getTagGenChannel();
   if (!settings.autoTag.dshSession || !channel) throw new Error('请启用 DSH 持久会话并指派副 API 渠道。');
-  if (!context?.getCurrentChatId()) throw new Error('请先打开一个酒馆聊天。');
-  const expectedChatId=dshChatId(context);
+  if (!context) throw new Error('酒馆尚未就绪。');
+  const dedicated=settings.autoTag.dshDedicated===true;
+  if (!dedicated && !context.getCurrentChatId()) throw new Error('请先打开一个酒馆聊天。');
+  const expectedChatId=context.getCurrentChatId() ? dshChatId(context) : undefined;
+  const profile=autoTagProfile();
   let messages: Awaited<ReturnType<typeof buildAutoTagMessages>>=[];
   if (action==='sync_rules') {
-    const floor=context.chat.findLastIndex(message=>typeof message.mes==='string' && !!message.mes.trim());
-    if (floor<0) throw new Error('当前聊天还没有正文，请先发送一条消息。');
-    const anchors=resolveCharAnchors(charTagsBeforeFloor(floor),lockedCharTagNames());
-    messages=await buildAutoTagMessages(context,floor,settings.autoTag,readBookMemory(floor,context.chat[floor].mes,context.name1),undefined,anchors.text);
+    if (dedicated) messages=buildAutoTagFixedMessages(settings.autoTag,profile);
+    else {
+      const floor=context.chat.findLastIndex(message=>typeof message.mes==='string' && !!message.mes.trim());
+      if (floor<0) throw new Error('当前聊天还没有正文，请先发送一条消息。');
+      const anchors=resolveCharAnchors(charTagsBeforeFloor(floor),lockedCharTagNames());
+      messages=await buildAutoTagMessages(context,floor,settings.autoTag,readBookMemory(floor,context.chat[floor].mes,context.name1),undefined,anchors.text);
+    }
   }
-  return requestDshCompletion(channel,messages,context,{action,expectedChatId,source:action==='reset'?'DSH 重建会话':'DSH 手动发送固定规范'});
+  return requestDshCompletion(channel,messages,context,{action,expectedChatId,
+    protocolKey:settings.manga.enabled && profile.layout ? 'manga' : profile.layout ? 'moss-layout' : profile.naiCharPrompts ? 'nai-character' : settings.defaultBackend,
+    source:action==='reset'?'DSH 重建会话':'DSH 手动发送固定规范'});
 }

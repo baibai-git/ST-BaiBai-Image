@@ -39,7 +39,7 @@ describe('layout cooldown', () => {
     expect(ids(off)).toEqual(['a', 'b', 'c', 'd', 'e']);
     expect(() => validateLayoutSelection(plan('a', 'a'), off)).toThrow(/同轮/);
     const messages: ChatMsg[] = []; setLayoutSelectionMessage(messages, off);
-    expect(messages[0].content).toContain('跨轮版式冷却已关闭');
+    expect(messages[0].content).toContain('跨轮冷却已关闭');
     for (let n = 0; n < 40; n++) recordLayoutRound(c, [String(n)]);
     expect(c.chatMetadata[LAYOUT_HISTORY_KEY]).toHaveLength(30);
     expect(normalizeManga({}).cooldownRounds).toBe(3);
@@ -96,14 +96,16 @@ describe('layout cooldown', () => {
     const messages: ChatMsg[] = [{ role: 'system', content: 'fixed geometry', purpose: 'spec' }];
     setLayoutSelectionMessage(messages, selection);
     expect(messages[1].purpose).toBeUndefined();
-    expect(messages[1].content).toContain('portrait: b、c、d、e');
+    expect(messages[1].content).not.toContain('解除 0');
+    expect(messages[1].content).toContain('暂不可选 ID：a');
+    expect(messages[1].content).toContain('竖版（portrait）：可选 4 套；ID：b、c、d、e');
     expect(messages[1].content).toContain('layout_fallback');
     expect(messages[1].content).toContain('【本轮候选版式空间目录】');
     expect(messages[1].content).not.toContain('- a｜');
     expect(messages[1].content).toContain('- b｜1 格｜画布 1152×1728');
     relaxLayoutSelection(selection); setLayoutSelectionMessage(messages, selection);
     expect(messages).toHaveLength(2);
-    expect(messages[1].content).toContain('portrait: a、b、c、d、e');
+    expect(messages[1].content).toContain('竖版（portrait）：可选 5 套；ID：a、b、c、d、e');
     expect(messages[1].content).toContain('- a｜1 格｜画布 1152×1728');
     expect(messages[0].content).toBe('fixed geometry');
   });
@@ -117,7 +119,7 @@ describe('layout cooldown', () => {
     expect(messages[0].content).toContain('- c｜');
     for (const id of ['a','b','wrong-canvas']) expect(messages[0].content).not.toContain(`- ${id}｜`);
     expect(messages[0].content).toContain('CURRENT_SELECTION_NOTES');
-    expect(messages[0].content).toContain('landscape: 无可选版式');
+    expect(messages[0].content).toContain('横版（landscape）：暂无可选版式，本轮不可选此方向。');
     expect(messages[0].content).not.toContain('landscape(');
   });
 
