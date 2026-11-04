@@ -6,7 +6,7 @@ import { regroupLayoutAtlasMessages } from '@/manga/atlas';
 
 const STORE='baibai_dsh_sessions';
 interface Binding { session_id: string; initialized: boolean; rulesHash?: string; atlasHash?: string }
-interface Pending { rulesHash?: string; key: string; messages: ChatMsg[]; session: DshSessionRequest; channel: ApiChannel }
+interface Pending { rulesHash?: string; atlasHash?: string; key: string; messages: ChatMsg[]; session: DshSessionRequest; channel: ApiChannel }
 /** Kept by one runner invocation: ambiguous network retries reuse the exact request. */
 export interface DshOperation { pending?: Pending; acknowledged?: boolean }
 interface DshOptions extends RequestOptions {
@@ -115,12 +115,13 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
   };
   return serial(scopeKey,options.signal,async()=>{
     checkSource();
-    let skillId: string | undefined;
     const retry=operation.pending?.key===operationKey && operation.pending.session.action==='generate' && !operation.acknowledged ? operation.pending : undefined;
+    let skillId: string | undefined = retry?.session.skill_id;
     const imageMessages=retry?.messages ?? effectiveMessages;
-    const capabilities=(skillMode && action!=='reset' || action==='generate' && imageMessages.some(message=>message.images?.length))
+    const capabilities=(!retry && skillMode && action!=='reset' || action==='generate' && imageMessages.some(message=>message.images?.length))
       ? await readDshCapabilities(retry?.channel ?? channel,options.signal) : undefined;
-    if (skillMode && capabilities) {
+    if (skillMode && !retry && capabilities) {
+      if (capabilities.skill_updates?.mode!=='per-request' || capabilities.skill_updates.toggle!=='skill_enabled' || capabilities.skill_updates.retry!=='frozen-version') throw new ApiError('当前桥接不支持每轮更新 Skill 与请求版本冻结，请更新 ST-bridge 至 0.15.0 或更新版本。');
       const entry=Array.isArray(capabilities.client_endpoints) ? capabilities.client_endpoints.find(entry=>entry && typeof entry==='object' && entry.id===clientId && entry.enabled!==false) : undefined;
       if (typeof entry?.skillId!=='string' || !entry.skillId.trim()) throw new ApiError('当前 DSH 接入项未绑定 Skill。请在 DSH 为柏宝绘专属入口绑定 Skill，或将规范来源切回插件。');
       skillId=entry.skillId.trim();
@@ -133,11 +134,11 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
         effectiveMessages=regroupLayoutAtlasMessages(effectiveMessages,limit);
         parts=splitDshMessages(effectiveMessages);
       }
-      if (dedicated && effectiveMessages.some(message=>message.atlasRevision)) {
+      atlasHash=effectiveMessages.find(message=>message.atlasRevision)?.atlasRevision;
+      if (dedicated && atlasHash) {
         if (capabilities?.layout_atlas?.supported!==true || capabilities.layout_atlas.mode!=='session-prefix-v1') {
           throw new ApiError('当前 DSH 桥接不支持会话版式图保留，请更新 ST-bridge 至 0.15.0 或更新版本。');
         }
-        atlasHash=effectiveMessages.find(message=>message.atlasRevision)!.atlasRevision;
       }
       const validationMessages=atlasHash && read()?.atlasHash===atlasHash
         ? effectiveMessages.filter(message=>message.atlasRevision!==atlasHash) : effectiveMessages;
@@ -154,15 +155,22 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
         let atlas: DshSessionRequest['layout_atlas'];
         if (currentAction==='generate' && atlasHash) {
           if (binding?.atlasHash===atlasHash) outgoing=outgoing.filter(message=>message.atlasRevision!==atlasHash);
-          atlas={hash:atlasHash,message_indices:outgoing.flatMap((message,index)=>message.atlasRevision===atlasHash ? [index] : [])};
+          if (dedicated) atlas={hash:atlasHash,message_indices:outgoing.flatMap((message,index)=>message.atlasRevision===atlasHash ? [index] : [])};
         }
+        if (currentAction==='generate' && skillId) outgoing=[...outgoing,{role:'user',content:[
+          '<<<STB-KEEP>>>',
+          `本轮指定 Skill：${skillId}。`,
+          '请使用桥接为本次请求加载的该 Skill 规范，处理上方目标正文，并遵守本轮槽位白名单与宿主输出协议。',
+          '<<<STB-/KEEP>>>',
+        ].join('\n')}];
         if (currentAction==='generate') await assertDshImageSupport(channel,outgoing,options.signal,capabilities);
         const fixed=sendFixed ? parts.fixed : [];
-        operation.pending={rulesHash,key:operationKey,channel:{...channel,excludeParams:[...(channel.excludeParams ?? [])]},messages:outgoing.map(({role,content,images})=>({role,content,...(images?.length ? {images:[...images]} : {})})),session:{
+        operation.pending={rulesHash,...(currentAction==='generate' && atlasHash ? {atlasHash} : {}),key:operationKey,channel:{...channel,excludeParams:[...(channel.excludeParams ?? [])]},messages:outgoing.map(({role,content,images})=>({role,content,...(images?.length ? {images:[...images]} : {})})),session:{
           protocol_version:1,chat_id:chatId,request_id:requestId(),action:currentAction,
           ...(dedicated ? {session_mode:'dedicated',client_id:clientId,task_id:profile,...(origin ? {source_chat_id:origin} : {})} : {}),
           ...(skillMode && !dedicated ? {client_id:clientId,task_id:`${profile}-skill`} : {}),
           ...(skillId ? {skill_id:skillId} : {}),
+          skill_enabled:skillMode,
           ...(atlas ? {layout_atlas:atlas} : {}),
           ...(binding ? {session_id:binding.session_id} : {}),
           fixed_message_count:fixed.length,fixed_message_types:fixed.map(message=>message.purpose!),
@@ -183,8 +191,13 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
               throw new ApiError('当前 DSH 桥接未确认专属模式历史隔离能力，请更新 ST-bridge 或关闭专属模式。');
             }
             if (pending.session.skill_id && acknowledgement?.skill_id!==pending.session.skill_id) throw new ApiError('DSH 未确认加载所绑定的 Skill，未确认本次规则状态。请检查绑定或重建会话。');
+            if (pending.session.skill_enabled===false && acknowledgement?.skill_id) throw new ApiError('已关闭每轮 Skill，但桥接仍注入了 Skill；请更新桥接以支持 skill_enabled:false。');
             if (pending.session.layout_atlas && acknowledgement?.layout_atlas_hash!==pending.session.layout_atlas.hash) throw new ApiError('DSH 未确认保留完整版式图册，未确认本次请求状态。');
-            const savedAtlas=currentAction==='generate' ? pending.session.layout_atlas?.hash : currentAction==='sync_rules' && session===binding?.session_id ? binding.atlasHash : undefined;
+            // Ordinary sessions keep the first atlas in their native conversation history.
+            // A silently replaced session has no confirmed copy; upload again on its next turn.
+            const savedAtlas=currentAction==='generate'
+              ? !dedicated && pending.session.session_id && session!==pending.session.session_id ? undefined : pending.atlasHash
+              : currentAction==='sync_rules' && session===binding?.session_id ? binding.atlasHash : undefined;
             save({session_id:session,initialized:currentAction!=='reset',...(savedAtlas ? {atlasHash:savedAtlas} : {}),...(dedicated && currentAction!=='reset' ? {rulesHash:pending.session.fixed_message_count ? pending.rulesHash : binding?.rulesHash} : {})});
             operation.acknowledged=true;
           },

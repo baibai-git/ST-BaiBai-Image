@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mangaDefaults, normalizeManga, type MangaSettings } from '@/manga/layouts';
 import { parseImagePlan, type ImagePlan } from './protocol';
-import { createLayoutSelection, layoutCandidates, LAYOUT_HISTORY_KEY, recordLayoutRound, relaxLayoutSelection, setLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from './layoutCooldown';
+import { createLayoutSelection, layoutCandidates, LAYOUT_HISTORY_KEY, prepareLayoutSelectionMessage, recordLayoutRound, relaxLayoutSelection, setLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from './layoutCooldown';
 import type { ChatMsg } from '@/api/client';
+
+vi.mock('@/manga/atlas', async importOriginal => ({
+  ...await importOriginal<typeof import('@/manga/atlas')>(),
+  rasterizeLayoutAtlas: vi.fn(async () => 'data:image/png;base64,AA=='),
+}));
 
 const sizes = { portrait: { width: 1152, height: 1728 }, landscape: { width: 1728, height: 1152 } };
 const panels = [{ position: 'one', slots: { F: [-800, -500, 800, 500] as [number, number, number, number] } }];
@@ -121,6 +126,37 @@ describe('layout cooldown', () => {
     expect(messages[0].content).toContain('CURRENT_SELECTION_NOTES');
     expect(messages[0].content).toContain('横版（landscape）：暂无可选版式，本轮不可选此方向。');
     expect(messages[0].content).not.toContain('landscape(');
+  });
+
+  it('protects the complete multi-paragraph whitelist while retaining its replaceable header', () => {
+    const m = manga(); m.selectionNotes = 'FIRST_PARAGRAPH\n\nLAST_PARAGRAPH';
+    const selection = createLayoutSelection(context([['a']]), m, sizes, 'portrait');
+    const messages: ChatMsg[] = [];
+    setLayoutSelectionMessage(messages, selection);
+    const content = messages[0].content;
+    expect(content).toMatch(/^【本轮版式选择范围】\n<<<STB-KEEP>>>\n/);
+    expect(content).toMatch(/\n<<<STB-\/KEEP>>>$/);
+    const range = content.split('<<<STB-KEEP>>>')[1].split('<<<STB-/KEEP>>>')[0];
+    expect(range).toContain('槽位 F');
+    expect(range).toContain('【可选局部定位】');
+    expect(range).toContain('G1+G2+G4+G5');
+    expect(range).toContain('FIRST_PARAGRAPH\n\nLAST_PARAGRAPH');
+    relaxLayoutSelection(selection); setLayoutSelectionMessage(messages, selection);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content.match(/<<<STB-KEEP>>>/g)).toHaveLength(1);
+    expect(messages[0].content).toContain('ID：a、b、c、d、e');
+  });
+
+  it('protects exact atlas slot keys as well as the separate per-round whitelist', async () => {
+    const selection = createLayoutSelection(context(), manga(), sizes, 'portrait');
+    selection.visual = true;
+    const messages: ChatMsg[] = [];
+    await prepareLayoutSelectionMessage(messages, selection);
+    expect(messages[0].content).toMatch(/<<<STB-KEEP>>>[\s\S]*ID：a、b、c、d、e[\s\S]*<<<STB-\/KEEP>>>/);
+    const atlas = messages.find(message => message.atlasCatalog);
+    expect(atlas?.content).toMatch(/^【会话完整版式图册】/);
+    expect(atlas?.atlasCatalog).toMatch(/<<<STB-KEEP>>>[\s\S]*槽位 F[\s\S]*<<<STB-\/KEEP>>>$/);
+    expect(atlas?.atlasCatalog).toMatch(/<<<STB-KEEP>>>[\s\S]*【可选局部定位】[\s\S]*G1 G2 G3[\s\S]*<<<STB-\/KEEP>>>$/);
   });
 
   it('accepts an explicit fallback control only when permitted, without adopting images or changes', () => {

@@ -298,7 +298,11 @@ export function applyMangaFrames(
           resolvedSlot=alternatives[0]; counts.set(resolvedSlot,(counts.get(resolvedSlot) ?? 0)+1); textUsage.set(panel,counts);
         }
       }
-      const box = resolvedSlot === 'X' && panel.slots.F ? breakoutBox(panel, layout.panels.length, manga.bleed, canvas) : panel.slots[resolvedSlot];
+      const gridBox = !panel.slots[resolvedSlot] && /^G/.test(resolvedSlot) ? resolveMangaGridRegion(panel,resolvedSlot) : undefined;
+      if (gridBox && (item.label !== 'object' || item.text !== undefined || item.tags !== undefined)) {
+        throw new Error('漫画 Layout:G 辅助区使用 label=object，只描述已有主体的局部，不填写 text 或 tags；人物身份由主体框统领，文字使用现有字区。');
+      }
+      const box = resolvedSlot === 'X' && panel.slots.F ? breakoutBox(panel, layout.panels.length, manga.bleed, canvas) : panel.slots[resolvedSlot] ?? gridBox;
       if (!box) {
         throw new Error(
           `漫画 Layout:版式 ${layout.id} 的 ${panel.position} 格没有 ${slot} 槽位(可用 ${slotLine(panel)})。`,
@@ -310,6 +314,7 @@ export function applyMangaFrames(
       // content regions, not additional comic frames.
       const caption = typeof item.caption === 'string' ? item.caption.replace(/^\s*panel\s+\d+\s*[,;:]\s*/i,'') : '';
       item.caption = `Content of panel ${layout.panels.indexOf(panel)+1}: ${caption}`.trim();
+      if (gridBox) item.caption += ' Local positioning detail of the existing subject or object in this panel, continuous with its described anatomy and covering clothing; retain the main shot framing. This region is not a separate comic panel.';
       if (item.label==='text' && typeof item.text==='string' && item.text.trim() && TEXT_REGIONS[slotType(resolvedSlot)]) {
         item.caption += ` Placement: ${TEXT_REGIONS[slotType(resolvedSlot)]} text region.`;
         const key=`${layout.panels.indexOf(panel)}:${resolvedSlot}`;
@@ -438,8 +443,61 @@ function breakoutBox(panel: MangaPanel, panelCount: number, base: number, canvas
 }
 
 function slotLine(panel: MangaPanel): string {
-  return Object.keys(panel.slots).filter(slot => slotType(slot) !== 'X').join(' ');
+  return [...Object.keys(panel.slots).filter(slot => slotType(slot) !== 'X'),...Object.keys(mangaGridRegions(panel))].join(' ');
 }
+
+/** Virtual local-positioning boxes. Never persisted as layout slots or drawn by the editor/atlas. */
+export function mangaGridRegions(panel: MangaPanel): Record<string,FrameBox> {
+  const regions:Record<string,FrameBox>={};
+  const frame=panel.slots.F;
+  if (!frame || frame.length!==4 || !frame.every(Number.isFinite) || frame[0]>=frame[2] || frame[1]>=frame[3]) return regions;
+  for (let i=0;i<9;i++) {
+    const key=`G${i+1}`;
+    if (panel.slots[key]) continue; // Existing custom slots keep their own meaning and geometry.
+    const box=fitGridBox(panel,gridBounds(frame,Math.floor(i/3),i%3,Math.floor(i/3)+1,i%3+1));
+    if (box) regions[key]=box;
+  }
+  return regions;
+}
+
+function gridBounds(frame:FrameBox, row:number, col:number, endRow:number, endCol:number): FrameBox {
+  const [top,left,bottom,right]=frame;
+  return [Math.round(top+(bottom-top)*row/3),Math.round(left+(right-left)*col/3),
+    Math.round(top+(bottom-top)*endRow/3),Math.round(left+(right-left)*endCol/3)];
+}
+
+function fitGridBox(panel:MangaPanel, candidate:FrameBox): FrameBox | undefined {
+  const outline=regionOutline(panel,'F');
+  if (!outline || outlineArea(outline)<=0) return;
+  const corners=([t,l,b,r]:FrameBox)=>[[l,t],[r,t],[r,b],[l,b]];
+  if (candidate[0]>=candidate[2] || candidate[1]>=candidate[3]) return;
+  if (frameContains(outline,corners(candidate))) return candidate;
+  const [t,l,b,r]=candidate, cy=(t+b)/2, cx=(l+r)/2;
+  if (!frameContains(outline,[[cx,cy]])) return;
+  let lo=0, hi=1;
+  for (let i=0;i<30;i++) {
+    const scale=(lo+hi)/2;
+    const box=[cy-(b-t)*scale/2,cx-(r-l)*scale/2,cy+(b-t)*scale/2,cx+(r-l)*scale/2];
+    if (frameContains(outline,corners(box))) lo=scale; else hi=scale;
+  }
+  const box=[Math.ceil(cy-(b-t)*lo/2),Math.ceil(cx-(r-l)*lo/2),Math.floor(cy+(b-t)*lo/2),Math.floor(cx+(r-l)*lo/2)];
+  if (box[0]<box[2] && box[1]<box[3] && frameContains(outline,corners(box))) return box;
+}
+
+/** A plus-list must completely fill one rectangle of available grid cells. */
+export function resolveMangaGridRegion(panel:MangaPanel, slot:string): FrameBox | undefined {
+  const regions=mangaGridRegions(panel);
+  if (regions[slot]) return regions[slot];
+  const parts=slot.split('+');
+  if (parts.length<2 || parts.length>9 || new Set(parts).size!==parts.length || parts.some(key=>!/^G[1-9]$/.test(key) || !regions[key])) return;
+  const cells=parts.map(key=>Number(key.slice(1))-1);
+  const rows=cells.map(i=>Math.floor(i/3)), cols=cells.map(i=>i%3);
+  const top=Math.min(...rows), bottom=Math.max(...rows), left=Math.min(...cols), right=Math.max(...cols);
+  if ((bottom-top+1)*(right-left+1)!==cells.length) return;
+  return fitGridBox(panel,gridBounds(panel.slots.F,top,left,bottom+1,right+1));
+}
+
+const GRID_GUIDE='【可选局部定位】每个 F 外框提供隐藏九宫格，按画面方向从左到右、从上到下编号：上排 G1 G2 G3，中排 G4 G5 G6，下排 G7 G8 G9；只在本格槽位清单列出时可用。它们不是新分格、人物、字区或读序，不要求填满，通常仅复杂姿势选 1～3 处。主体先用 F/S/L/R 等已有区域写完整姿态、身份与取景，再用 G 项以 label=object 描述同一主体的手、脚或道具等局部；caption 写清所属角色、部位、连接方向及覆盖布料，局部不重复完整外貌，不填 tags/text，不扩大原景别或补画被裁掉的身体。规则允许用加号合并清单中相邻且填满矩形的 G 键，如 G1+G2 或 G1+G2+G4+G5；斜对角、缺角组合无效。G 范围相对 F 等分，斜框边缘自动内缩，无法容纳的格子不列出；G 只在 F 内定位，出框继续用已保存的主体框。未使用的 G 不输出 items，已有字区仍按实际发言使用。';
 
 function regionOutline(panel: MangaPanel, slot: string): number[][] | undefined {
   const box = panel.slots[slot];
@@ -511,6 +569,7 @@ export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayo
     'F位置[左,上,宽,高]%相对整页，原点为左上；宽高比按实际尺寸计算，面积按实际轮廓计算且未扣遮挡，面积排名不等于叙事主次，也不设大小格阈值。',
     '槽位只列本格合法键；常规范围省略，不代表无限空间。特殊区域[左,上,宽,高]%相对F外接框：保留编号、偏置或狭窄主体、非标准位置、斜框与出框范围；无F时相对整页。斜框另列实际面积/外接框面积。斜杠连接仅表示范围相同，输出仍选单个合法键。百分比不是输出坐标或文字容量保证。',
   ];
+  lines.push(GRID_GUIDE);
   for (const orientation of ['portrait','landscape'] as const) {
     const entries=layouts[orientation];
     if (!entries.length) continue;
@@ -569,6 +628,7 @@ export function buildMangaSpec(manga: MangaSettings, includeCatalog=true): strin
   lines.push('- 槽位:F 格框 C 完整内区 S 实际主体区域 L/R 左右人物 O 道具音效 T/TL/TR 顶部字区 B 底部字区 BL/BR 左下/右下字区 ML/MR 侧边字区 E 允许小部分越线进格间留白。清单里没列出的槽位在该格不存在,填了会让这次生成失败。');
   lines.push('- 同类内框可有编号，如 S、S_2、O、O_2、TL、TL_2；每个完整键对应独立区域，编号不表示读序、人物数量或自动新增人物。仅使用该格清单中已有的完整键。');
   lines.push('- 连续人物以一个主体框统领；复杂姿势可用已有辅助框定位手、脚、袖口等局部，局部描述写明所属角色、部位与连接方向，保留覆盖该部位的服装，避免在局部框重复完整外貌或生成另一个人。');
+  lines.push('- 每个 F 的隐藏 G1～G9 局部定位及相邻矩形合并规则见本轮动态目录；仅输出实际需要的辅助项，G 项使用 label=object，不作为新人物或文字。');
   lines.push('- 同一角色若有有意安排的巨大脸部特写与小比例身体等多尺度展示，分别绑定已有区域并写明同一身份的两处独立呈现，不将两处画成一具连体身体；普通局部辅助则保持与主体连续。');
   lines.push('- 用途与框内说明中的具体人物、地点、道具和动作属于参考示范,不是必须匹配的剧情条件。选版主要比较格形、时序、主次关系与容量,示范内容按原文替换;仍须遵守独立格与同刻嵌入格的区别。');
   lines.push('- 框用途是用户提供的内容分配说明：F 描述整格用途，其余键只作用于对应内框。结合原文与该说明选择内容，不把说明当作台词、旁白或可见印字，不新增槽位、坐标、剧情事件或参与者。空说明沿用槽位默认用途。');

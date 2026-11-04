@@ -26,7 +26,7 @@ function response(body:any,over:Record<string,unknown>={}):Response {
 }
 function server(run:(body:any)=>Response|Promise<Response>=body=>response(body)):void {
   vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
-    if (String(_url).endsWith('/v1/bridge/capabilities')) return new Response(JSON.stringify({client_endpoints:clientEndpoints,layout_atlas:{supported:true,mode:'session-prefix-v1'},image_input:{supported:true,modes:['data_url'],roles:['user'],media_types:['image/png'],max_images_per_message:imageLimit,max_bytes_per_image:10485760,max_total_bytes:20971520}}));
+    if (String(_url).endsWith('/v1/bridge/capabilities')) return new Response(JSON.stringify({skill_updates:{mode:'per-request',toggle:'skill_enabled',retry:'frozen-version'},client_endpoints:clientEndpoints,layout_atlas:{supported:true,mode:'session-prefix-v1'},image_input:{supported:true,modes:['data_url'],roles:['user'],media_types:['image/png'],max_images_per_message:imageLimit,max_bytes_per_image:10485760,max_total_bytes:20971520}}));
     const body=JSON.parse(init.body);calls.push(body);return run(body);
   }));
 }
@@ -52,7 +52,9 @@ describe('DSH Skill rule source',()=>{
     expect(generated.messages.map((m:any)=>m.content)).toContain('world');
     expect(generated.messages.map((m:any)=>m.content)).toContain('target');
     expect(generated.messages.map((m:any)=>m.content)).toContain('current character library and cooldown');
-    expect(generated.messages.at(-1).content[1].type).toBe('image_url');
+    expect(generated.messages.some((m:any)=>Array.isArray(m.content) && m.content[1]?.type==='image_url')).toBe(true);
+    expect(current.skill_enabled).toBe(true);
+    expect(generated.messages.at(-1)).toEqual({role:'user',content:'<<<STB-KEEP>>>\n本轮指定 Skill：moss-layout-spec。\n请使用桥接为本次请求加载的该 Skill 规范，处理上方目标正文，并遵守本轮槽位白名单与宿主输出协议。\n<<<STB-/KEEP>>>'});
     expect(calls.flatMap(c=>c.messages).map((m:any)=>m.content)).not.toContain('spec');
     expect(calls.flatMap(c=>c.messages).map((m:any)=>m.content)).not.toContain('check');
     expect(JSON.stringify(batch)).toBe(before);
@@ -60,6 +62,8 @@ describe('DSH Skill rule source',()=>{
     await requestDshCompletion(alias,messages,h.context!,options);
     expect(payload(calls.at(-1)).session_id).toBe('session-'+old.chat_id);
     expect(payload(calls.at(-1)).skill_id).toBeUndefined();
+    expect(payload(calls.at(-1)).skill_enabled).toBe(false);
+    expect(calls.at(-1).messages.some((m:any)=>typeof m.content==='string' && m.content.includes('本轮指定 Skill：'))).toBe(false);
   });
   it('does not resync removed rules, and manual sync sends only the retained host groups',async()=>{
     settings.autoTag.dshRuleSource='skill'; settings.autoTag.dshDedicated=true;
@@ -82,6 +86,36 @@ describe('DSH Skill rule source',()=>{
     await expect(requestDshCompletion(alias,messages,h.context!,{protocolKey:'manga'})).rejects.toThrow('未确认加载');
     expect(h.context!.chatMetadata).toEqual({});
   });
+  it('adds the protected Skill instruction once at the end of every generate, never to control requests',async()=>{
+    settings.autoTag.dshRuleSource='skill';
+    await requestDshCompletion(alias,messages,h.context!,{protocolKey:'manga'});
+    await requestDshCompletion(alias,messages,h.context!,{protocolKey:'manga'});
+    for (const call of calls) {
+      expect(call.messages.at(-1).content).toMatch(/^<<<STB-KEEP>>>\n本轮指定 Skill：moss-layout-spec。[\s\S]*\n<<<STB-\/KEEP>>>$/);
+      expect(call.messages.filter((m:any)=>typeof m.content==='string' && m.content.includes('本轮指定 Skill：'))).toHaveLength(1);
+    }
+    await requestDshCompletion(alias,messages,h.context!,{protocolKey:'manga',action:'sync_rules'});
+    expect(calls.at(-1).messages.some((m:any)=>m.content.includes('本轮指定 Skill：'))).toBe(false);
+    await requestDshCompletion(alias,[],h.context!,{protocolKey:'manga',action:'reset'});
+    expect(calls.at(-1).messages).toEqual([]);
+  });
+  it('retries the exact frozen Skill invocation even when the live binding changes',async()=>{
+    settings.autoTag.dshRuleSource='skill';
+    const operation:DshOperation={};let count=0;
+    server(body=>{if(!count++) throw new TypeError('network');return response(body);});
+    await expect(requestDshCompletion(alias,messages,h.context!,{protocolKey:'manga',operation})).rejects.toThrow('network');
+    const first=structuredClone(calls[0]);
+    clientEndpoints=[];
+    await requestDshCompletion(alias,messages,h.context!,{protocolKey:'manga',operation});
+    expect(calls[1].messages).toEqual(first.messages);
+    expect(payload(calls[1])).toEqual(payload(first));
+  });
+  it('refuses a bridge that still injects Skill after the switch is turned off',async()=>{
+    server(body=>response(body,{dsh_session:{session_id:'old-bridge',skill_id:'moss-layout-spec'}}));
+    await expect(requestDshCompletion(alias,messages,h.context!,{protocolKey:'manga'})).rejects.toThrow('已关闭每轮 Skill');
+    expect(payload(calls[0]).skill_enabled).toBe(false);
+    expect(h.context!.chatMetadata).toEqual({});
+  });
   it.each(['nai-character','moss-layout'])('keeps other protocol profiles unchanged: %s',async(protocolKey)=>{
     settings.autoTag.dshRuleSource='skill';
     await requestDshCompletion(alias,messages,h.context!,{protocolKey});
@@ -101,6 +135,67 @@ describe('DSH Skill rule source',()=>{
 });
 
 describe('DSH persistent agent routing',()=>{
+  it.each(['plugin','skill'] as const)('uploads ordinary-session layout guidance only once, with %s rules',async(ruleSource)=>{
+    settings.autoTag.dshRuleSource=ruleSource;imageLimit=20;
+    const endpoint={...channel,url:'http://127.0.0.1:43121/clients/baibaohui/v1'};
+    const batch=(hash='a'.repeat(64),ids='1、2')=>[...messages,{role:'system' as const,content:`CURRENT IDS: ${ids}`},
+      ...layoutAtlasMessages(Array(6).fill('data:image/png;base64,AAAA'),Array(6).fill('portrait，layout ID 1'),4,hash,'STATIC GUIDANCE AND CATALOG')];
+    const options={protocolKey:'manga'};
+    await requestDshCompletion(endpoint,batch(),h.context!,options);
+    expect(calls[0].messages.find((m:any)=>Array.isArray(m.content)).content).toHaveLength(7);
+    expect(payload(calls[0]).layout_atlas).toBeUndefined();
+    expect(payload(calls[0]).session_mode).toBeUndefined();
+    h.context!.chatMetadata=JSON.parse(JSON.stringify(h.context!.chatMetadata));
+    calls=[];
+    await requestDshCompletion(endpoint,batch(undefined,'2'),h.context!,options);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].messages.every((m:any)=>typeof m.content==='string')).toBe(true);
+    expect(JSON.stringify(calls[0])).not.toContain('STATIC GUIDANCE');
+    expect(calls[0].messages.map((m:any)=>m.content)).toContain('CURRENT IDS: 2');
+    await requestDshCompletion(endpoint,batch(),h.context!,{...options,action:'sync_rules'});
+    await requestDshCompletion(endpoint,batch(),h.context!,options);
+    expect(calls.at(-1).messages.every((m:any)=>typeof m.content==='string')).toBe(true);
+    await requestDshCompletion(endpoint,batch('b'.repeat(64)),h.context!,options);
+    expect(calls.at(-1).messages.find((m:any)=>Array.isArray(m.content)).content).toHaveLength(7);
+    await requestDshCompletion(endpoint,[],h.context!,{...options,action:'reset'});
+    await requestDshCompletion(endpoint,batch('b'.repeat(64)),h.context!,options);
+    expect(calls.at(-1).messages.find((m:any)=>Array.isArray(m.content)).content).toHaveLength(7);
+  });
+  it('keeps ordinary atlas uploads isolated by chat and channel',async()=>{
+    const batch=[...messages,...layoutAtlasMessages(['data:image/png;base64,AAAA'],['portrait'],4,'a'.repeat(64),'STATIC GUIDANCE')];
+    const original=h.context!;
+    await requestDshCompletion(channel,batch,original);
+    h.context=context('chat-b');
+    await requestDshCompletion(channel,batch,h.context!);
+    expect(calls.at(-1).messages.at(-1).content).toHaveLength(2);
+    h.context=original;
+    await requestDshCompletion(channel,batch,original);
+    expect(calls.at(-1).messages.every((m:any)=>typeof m.content==='string')).toBe(true);
+    await requestDshCompletion({...channel,id:'another-channel'},batch,original);
+    expect(calls.at(-1).messages.at(-1).content).toHaveLength(2);
+  });
+  it('records the actual retried ordinary atlas revision rather than the latest prepared revision',async()=>{
+    const batch=(hash:string)=>[...messages,...layoutAtlasMessages(['data:image/png;base64,AAAA'],['portrait'],4,hash,'STATIC GUIDANCE')];
+    const operation:DshOperation={};let failed=false;
+    server(body=>{if(!failed){failed=true;throw new TypeError('network');}return response(body);});
+    await expect(requestDshCompletion(channel,batch('a'.repeat(64)),h.context!,{operation})).rejects.toThrow('network');
+    await requestDshCompletion(channel,batch('b'.repeat(64)),h.context!,{operation});
+    expect(calls[1]).toEqual(calls[0]);
+    await requestDshCompletion(channel,batch('b'.repeat(64)),h.context!);
+    expect(calls[2].messages.at(-1).content).toHaveLength(2);
+    await requestDshCompletion(channel,batch('b'.repeat(64)),h.context!);
+    expect(calls[3].messages.every((m:any)=>typeof m.content==='string')).toBe(true);
+  });
+  it('uploads again when an ordinary response replaces the session without carrying the atlas',async()=>{
+    const batch=[...messages,...layoutAtlasMessages(['data:image/png;base64,AAAA'],['portrait'],4,'a'.repeat(64))];
+    await requestDshCompletion(channel,batch,h.context!);
+    server(body=>response(body,{dsh_session:{session_id:'new-remote-session'}}));
+    await requestDshCompletion(channel,batch,h.context!);
+    expect(calls.at(-1).messages.every((m:any)=>typeof m.content==='string')).toBe(true);
+    await requestDshCompletion(channel,batch,h.context!);
+    expect(payload(calls.at(-1)).session_id).toBe('new-remote-session');
+    expect(calls.at(-1).messages.at(-1).content).toHaveLength(2);
+  });
   it('uploads the full atlas once per dedicated session and resends revisions or after reset',async()=>{
     settings.autoTag.dshDedicated=true;imageLimit=20;
     const atlas=(hash:string)=>layoutAtlasMessages(Array(6).fill('data:image/png;base64,AAAA'),Array(6).fill('portrait，layout ID 1'),4,hash,'FULL CATALOG');

@@ -43,6 +43,8 @@ export interface DshSessionRequest {
   source_chat_id?: string;
   /** Optional assertion of the administrator-managed binding; the bridge loads the Skill. */
   skill_id?: string;
+  /** Explicitly opt in/out of the administrator-bound Skill for this request. */
+  skill_enabled?: boolean;
   layout_atlas?: { hash: string; message_indices: number[] };
   chat_id: string;
   session_id?: string;

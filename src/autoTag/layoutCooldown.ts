@@ -66,7 +66,7 @@ export function setLayoutSelectionMessage(messages: ChatMsg[], selection: Layout
   for (let i=messages.length-1;i>=0;i--) if (messages[i].content.startsWith(ATLAS_IMAGE_HEADER)) messages.splice(i,1);
   const candidates = layoutCandidates(selection);
   const canRelax = selection.released < selection.recent.length;
-  const content = [HEADER,
+  const content = [HEADER, '<<<STB-KEEP>>>',
     ...(selection.visual ? [] : ['只从下面的可选 ID 中选择；每个 ID 的格位、大小和槽位见后面的空间目录。历史清单和协议示例不授予选择权限。']),
     selection.visual ? `冷却窗口：${selection.rounds} 次已采纳规划。` : selection.rounds
       ? `最近 ${selection.rounds} 次已采纳规划结果使用过的 ID 暂不可选；同轮多页也必须使用不同 ID。`
@@ -83,6 +83,7 @@ export function setLayoutSelectionMessage(messages: ChatMsg[], selection: Layout
     selection.visual ? `layout_fallback：${canRelax ? '允许' : '禁止（已无可解除的冷却记录）'}。` : canRelax
       ? '若有应绘制的事件，但本轮候选均无法满足原文时序、画布、槽位、文字容量或同轮去重，不删改剧情、不强塞内容，也不自行选禁用 ID。返回控制结果 {"images":[],"changes":[],"layout_fallback":"候选不适用的具体原因"}；宿主会从最早记录起逐步解除并重新请求。此结果不受最少图片数限制，不代表本轮最终结果。'
       : '本轮已无更多冷却记录可解除；不要输出 layout_fallback，按宿主图片数量与事实要求输出最终结果。',
+    '<<<STB-/KEEP>>>',
   ].join('\n');
   const index = messages.findIndex(message => message.content.startsWith(HEADER) || message.content.startsWith('【本轮版式冷却白名单】'));
   const message: ChatMsg = { role: 'system', content }; // Dynamic: must reach DSH on every generate request.
@@ -96,9 +97,11 @@ export async function prepareLayoutSelectionMessage(messages: ChatMsg[], selecti
   const atlases=buildLayoutAtlases(selection.layouts);
   if (!atlases.length) return;
   const catalog=['【会话完整版式空间目录】覆盖全部启用且画布相容的版式，每张图4套；P编号就是 item.panel。图册不是本轮白名单，冷却限制另行下发。',
+    '<<<STB-KEEP>>>',
     '【会话版式选择规则】以下固定说明随图册保留，后续每轮仅更新选择范围与冷却状态。只从本轮可选 ID 中选择；格位、大小、槽位和用途参考本图册。图册含冷却 ID，不授予选择权限；同轮多页必须使用不同 ID。',
     '本轮标注 layout_fallback 允许时，若所有候选均无法满足原文时序、画布、槽位、文字容量或同轮去重，不删改剧情、不强塞内容，也不自行选禁用 ID；返回控制结果 {"images":[],"changes":[],"layout_fallback":"候选不适用的具体原因"}，宿主会从最早记录起逐步解除并重新请求。此控制结果不受最少图片数限制，不代表本轮最终结果。本轮标注禁止时，不输出 layout_fallback，按宿主图片数量与事实要求输出最终结果。',
-    ...buildMangaCatalog(selection.layouts,selection.selectionNotes,true).split('\n').slice(1)].join('\n');
+    ...buildMangaCatalog(selection.layouts,selection.selectionNotes,true).split('\n').slice(1),
+    '<<<STB-/KEEP>>>'].join('\n');
   const revision=[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([atlases.map(atlas=>atlas.svg),catalog]))))]
     .map(byte=>byte.toString(16).padStart(2,'0')).join('');
   const images: string[]=[];
