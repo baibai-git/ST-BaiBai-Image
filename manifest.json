@@ -3,9 +3,9 @@
   "loading_order": 100,
   "requires": [],
   "optional": [],
-  "js": "dist/index.js?ver=0.3.8",
+  "js": "dist/index.js?ver=0.3.9",
   "author": "柏柏",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "homePage": "https://github.com/baibai-git/ST-BaiBai-Image",
   "auto_update": false,
   "minimum_client_version": "1.12.13"

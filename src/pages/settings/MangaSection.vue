@@ -3,6 +3,8 @@ import { computed, nextTick, ref } from 'vue';
 import { settings } from '@/state/settings';
 import MangaLayoutEditor from '@/pages/settings/MangaLayoutEditor.vue';
 import { buildLayoutAtlases, rasterizeLayoutAtlas } from '@/manga/atlas';
+import { confirmDialog } from '@/components/confirm';
+import { exportMangaLayouts, importMangaLayouts } from '@/manga/library';
 import {
   parseCustomLayout,
   normalizeCooldownRounds,
@@ -28,6 +30,45 @@ const quickSource = ref('');
 const quickEditingId = ref('');
 const batchWidth = ref(1664), batchHeight = ref(2496);
 const batchError = ref('');
+const importInput = ref<HTMLInputElement>();
+const transferBusy = ref(false), transferError = ref(''), transferNote = ref('');
+
+function exportLayouts(id?:string): void {
+  transferError.value=''; transferNote.value='';
+  let url:string|undefined;
+  try {
+    const text=exportMangaLayouts(settings.manga,id);
+    const name=id===undefined ? '全部版式' : id.replace(/[<>:"/\\|?*\u0000-\u001f]/g,'_');
+    url=URL.createObjectURL(new Blob([text],{type:'application/json;charset=utf-8'}));
+    const link=document.createElement('a');
+    link.href=url; link.download=`柏宝绘-版式-${name}.json`; link.rel='noopener';
+    document.body.appendChild(link);
+    try { link.click(); } finally { link.remove(); }
+    transferNote.value=id===undefined ? `已导出全部 ${rows.value.length} 套版式。` : `已导出版式 ${id}。`;
+  } catch (issue) { transferError.value=issue instanceof Error ? issue.message : String(issue); }
+  finally { if(url) { const usedUrl=url; setTimeout(()=>URL.revokeObjectURL(usedUrl),60_000); } }
+}
+
+async function importLayoutFile(event:Event): Promise<void> {
+  const input=event.target as HTMLInputElement;
+  const file=input.files?.[0]; input.value='';
+  if (!file || transferBusy.value) return;
+  transferBusy.value=true; transferError.value=''; transferNote.value='';
+  try {
+    if (file.size>20*1024*1024) throw new Error('版式文件超过 20 MiB，请拆分后导入。');
+    const text=await file.text();
+    const preview=importMangaLayouts(settings.manga,text);
+    if (preview.replaced || preview.hidden) {
+      const confirmed=await confirmDialog({title:'导入版式',text:`将导入 ${preview.count} 套版式，其中 ${preview.replaced} 套同名版式会被覆盖，${preview.hidden} 套当前默认版式会按文件标记隐藏。其他版式保留。`,confirmText:'确认导入'});
+      if (!confirmed) return;
+    }
+    const result=importMangaLayouts(settings.manga,text);
+    settings.manga.custom=result.custom; settings.manga.disabled=result.disabled; settings.manga.deleted=result.deleted;
+    resizeBackup.value=undefined; atlasPreview.value=[];
+    transferNote.value=`已导入 ${result.count} 套版式（覆盖 ${result.replaced} 套），启用状态随文件保留。`;
+  } catch (issue) { transferError.value=issue instanceof Error ? issue.message : String(issue); }
+  finally { transferBusy.value=false; }
+}
 const atlasPreview = ref<{ image: string; ids: string[]; orientation: string }[]>([]);
 const atlasBusy = ref(false), atlasError = ref('');
 async function previewAtlases(): Promise<void> {
@@ -360,6 +401,18 @@ function resetBuiltin(id: string): void {
       <p v-if="batchError" class="bbi-manga-error" role="alert">{{ batchError }}</p>
     </div>
 
+    <div class="bbi-manga-editor bbi-manga-item">
+      <strong>版式导入 / 导出</strong>
+      <div class="bbi-manga-item-actions">
+        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts()">导出全部版式（{{ rows.length }}）</button>
+        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="importInput?.click()">{{ transferBusy ? '正在导入…' : '导入版式' }}</button>
+        <input ref="importInput" type="file" accept=".json,application/json" aria-label="导入版式 JSON 文件" hidden @change="importLayoutFile" />
+      </div>
+      <p class="bbi-manga-hint">导出当前列表中的全部启用及停用版式，保留画布、坐标、形变、读序、层级和框说明；同时记录已删除的默认版式状态。支持导入全部版式文件或单套版式，同名项确认后覆盖，其他版式保留。</p>
+      <p v-if="transferNote" class="bbi-manga-hint" role="status">{{ transferNote }}</p>
+      <p v-if="transferError" class="bbi-manga-error" role="alert">{{ transferError }}</p>
+    </div>
+
     <div v-for="row in rows" :key="row.id" class="bbi-manga-item">
       <div class="bbi-manga-item-head">
         <code>{{ row.id }}</code>
@@ -386,6 +439,7 @@ function resetBuiltin(id: string): void {
           {{ editing === row.id ? '收起' : row.custom ? '编辑 / 覆盖' : '改写为自定义' }}
         </button>
         <button type="button" class="bbi-manga-btn" @click="openQuick(row.id)">可视化编辑</button>
+        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(row.id)">导出当前版式</button>
         <button v-if="row.custom && builtins.has(row.id)" type="button" class="bbi-manga-btn" @click="resetBuiltin(row.id)">恢复内置</button>
         <button type="button" class="bbi-manga-btn" @click="deleteLayout(row.id)">删除</button>
       </div>

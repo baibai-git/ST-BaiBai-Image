@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRenderer, defineComponent, ssrContextKey } from 'vue';
 import { applyMangaFrames, mangaDefaults, normalizeManga, parseCustomLayout, resolveLayouts } from '@/manga/layouts';
 vi.mock('@/pages/settings/MangaLayoutEditor.vue', () => ({ default: {} }));
+vi.mock('@/components/confirm', () => ({confirmDialog:vi.fn(async()=>true)}));
 vi.mock('@/state/settings', async () => {
   const { reactive } = await import('vue');
   const { mangaDefaults } = await import('@/manga/layouts');
@@ -9,6 +10,7 @@ vi.mock('@/state/settings', async () => {
 });
 import { settings } from '@/state/settings';
 import Section from './MangaSection.vue';
+import { confirmDialog } from '@/components/confirm';
 
 function section() {
   let state: any;
@@ -174,5 +176,42 @@ describe('可视化编辑保存',()=>{
     expect(resolveLayouts(settings.manga,'portrait').find(layout=>layout.id==='balanced_1')?.canvas).toEqual({width:1088,height:1920});
     expect(saved.portrait?.[0].slots.F).toEqual(previous.panels[0].slots.F.map((n,index)=>Math.round(n*(index%2?1088/1664:1920/2496))));
     close();
+  });
+});
+
+describe('版式文件按钮',()=>{
+  beforeEach(()=>{settings.manga=mangaDefaults(); vi.mocked(confirmDialog).mockReset().mockResolvedValue(true);});
+  afterEach(()=>{vi.unstubAllGlobals(); vi.useRealTimers();});
+  const fileEvent=(text:string)=>({target:{value:'library.json',files:[{size:text.length,text:async()=>text}]}}) as unknown as Event;
+  it('导出按钮产生可重新导入的 JSON 文件，使用完整单套版式而非当前列表的摘要',async()=>{
+    const blobs:Blob[]=[], links:any[]=[];
+    vi.useFakeTimers();
+    vi.stubGlobal('URL',{createObjectURL:(blob:Blob)=>{blobs.push(blob);return 'blob:layout';},revokeObjectURL:vi.fn()});
+    vi.stubGlobal('document',{body:{appendChild:vi.fn()},createElement:()=>{const link={click:vi.fn(),remove:vi.fn(),download:'',href:'',rel:''};links.push(link);return link;}});
+    const {state,close}=section();
+    state.exportLayouts('balanced_1');
+    const single=JSON.parse(await blobs[0].text());
+    expect(single.portrait).toHaveLength(1); expect(single.landscape).toHaveLength(1);
+    expect(links[0].download).toBe('柏宝绘-版式-balanced_1.json'); expect(links[0].click).toHaveBeenCalledTimes(1);
+    state.exportLayouts();
+    expect(JSON.parse(await blobs[1].text()).layouts).toHaveLength(state.rows.value.length);
+    expect(state.transferError.value).toBe('');
+    vi.runAllTimers(); expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+    close();
+  });
+  it('导入失败或取消覆盖不改变设置；确认后原地替换并刷新列表',async()=>{
+    settings.manga.custom=[{id:'mine',portrait:[{position:'old',slots:{F:[-500,-500,500,500]}}]}];
+    const {state,close}=section(), before=JSON.stringify(settings.manga);
+    const text=JSON.stringify({id:'mine',enabled:false,portrait:[{position:'new',slots:{F:[-600,-500,600,500]}}]});
+    vi.mocked(confirmDialog).mockResolvedValueOnce(false);
+    await state.importLayoutFile(fileEvent(text));
+    expect(JSON.stringify(settings.manga)).toBe(before);
+    await state.importLayoutFile(fileEvent('{broken'));
+    expect(state.transferError.value).toContain('JSON'); expect(JSON.stringify(settings.manga)).toBe(before);
+    await state.importLayoutFile(fileEvent(text));
+    expect(settings.manga.custom[0].portrait?.[0].position).toBe('new');
+    expect(settings.manga.disabled).toContain('mine'); expect(state.transferNote.value).toContain('覆盖 1 套');
+    expect(state.rows.value.find((row:any)=>row.id==='mine').disabled).toBe(true);
+    expect(state.transferBusy.value).toBe(false);close();
   });
 });
