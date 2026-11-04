@@ -63,19 +63,30 @@ describe('F virtual positioning grid',()=>{
     expect(out.items).toHaveLength(2);
     expect(out.items[1].bbox).toEqual([-240,-480,240,160]);
     expect(out.items[1].caption).toContain('Content of panel 1:');
-    expect(out.items[1].caption).toContain('covering clothing');
+    expect(out.items[1].caption).toContain('wrist continuous with the jacket sleeve');
     expect(out.items.every((item:any)=>item.panel===undefined && item.slot===undefined)).toBe(true);
     expect(out.summary.caption).toContain('exactly 1 distinct comic panels');
     expect(out.bbox_format).toBe('yxyx'); expect(out.bbox_coord_space).toBe('abs_centralized');
     expect(JSON.stringify(settings)).toBe(before);
     expect(compile([{panel:1,slot:'S',label:'character',caption:'One traveler.'}]).items).toHaveLength(1);
   });
-  it('rejects invalid references and helper attempts to introduce people or lettering',()=>{
+  it('rejects invalid references without changing grid geometry',()=>{
     for(const slot of ['G10','G1+G5','G1+G2+G4']) expect(()=>compile([{panel:1,slot,label:'object',caption:'Detail.'}])).toThrow(/没有/);
-    for(const extra of [{label:'character'},{label:'text',text:'Hi'},{label:'object',text:'Hi'},{label:'object',tags:['new person']}]) {
-      expect(()=>compile([{panel:1,slot:'G5',caption:'Detail.',...extra}])).toThrow(/label=object/);
-    }
     expect(()=>compile([{panel:2,slot:'G5',label:'object',caption:'Detail.'}])).toThrow(/没有第 2 格/);
+  });
+  it('supports independent characters, objects and text in single or merged grid regions',()=>{
+    const out=compile([
+      {panel:1,slot:'S',label:'character',tags:['alice'],caption:'Alice in a blue jacket.'},
+      {panel:1,slot:'G2+G5+G8',label:'character',tags:['bob'],palette:['brown'],caption:'Bob in a brown coat beside Alice.'},
+      {panel:1,slot:'G1',label:'text',text:'你好',caption:'Spoken by Bob, large printed glyphs.'},
+      {panel:1,slot:'G4',label:'object',caption:'A freestanding reading lamp.'},
+    ]);
+    expect(out.items.map((item:any)=>item.label)).toEqual(['character','character','text','object']);
+    expect(out.items[1].bbox).toEqual([-720,-160,720,160]);
+    expect(out.items[1].tags).toEqual(['bob']);expect(out.items[1].palette).toEqual(['brown']);
+    expect(out.items[2].text).toBe('你好');expect(out.items[2].caption).toContain('selected grid text region');
+    for(const item of out.items) expect(item.caption).not.toContain('Local positioning detail');
+    expect(out.items[3].caption).not.toContain('anatomy');
   });
   it('keeps existing custom G keys intact and unavailable for virtual merges',()=>{
     const p=panel(); p.slots.G5=[0,0,50,50];
@@ -83,17 +94,18 @@ describe('F virtual positioning grid',()=>{
     expect(resolveMangaGridRegion(p,'G4+G5')).toBeUndefined();
     expect(compile([{panel:1,slot:'G5',label:'character',caption:'Existing region.'}],p).items[0].bbox).toEqual([0,0,50,50]);
   });
-  it('advertises helpers dynamically in both catalog modes without drawing or persisting them',()=>{
+  it('advertises helpers dynamically in both modes and draws them without persisting them',()=>{
     const settings=setup(), layouts={portrait:resolveLayouts(settings,'portrait').filter(x=>x.id==='grid_test'),landscape:[]};
     const before=JSON.stringify(layouts);
     for (const visual of [false,true]) {
       const catalog=buildMangaCatalog(layouts,'',visual);
-      expect(catalog).toContain('G1 G2 G3'); expect(catalog).toContain('G1+G2+G4+G5'); expect(catalog).toContain('label=object');
-      expect(catalog.split('\n').slice(1).join('\n')).toContain('【可选局部定位】');
+      expect(catalog).toContain('G1 G2 G3'); expect(catalog).toContain('G1+G2+G4+G5'); expect(catalog).toContain('character、object、text');
+      expect(catalog.split('\n').slice(1).join('\n')).toContain('【可选网格区域】');
       expect(catalog).toContain('槽位 F S G1 G2 G3 G4 G5 G6 G7 G8 G9');
     }
     const [atlas]=buildLayoutAtlases(layouts);
-    expect(atlas.svg).not.toMatch(/>G[1-9]</);
+    expect(atlas.svg).toMatch(/>G[1-9]</);
+    expect(atlas.svg.match(/data-state="available"/g)).toHaveLength(9);
     expect(JSON.stringify(layouts)).toBe(before);
     expect(Object.keys(layouts.portrait[0].panels[0].slots)).toEqual(['F','S']);
   });

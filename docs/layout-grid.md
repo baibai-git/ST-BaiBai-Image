@@ -1,6 +1,6 @@
-# F 外框的隐藏九宫格辅助定位
+# F 外框的 G 通用区域
 
-0.3.8 起，每个 F 外框提供可选的局部定位区，按画面方向排列：
+每个 F 外框提供可选的九宫格区域，按画面方向排列：
 
 ```text
 G1 G2 G3
@@ -8,21 +8,40 @@ G4 G5 G6
 G7 G8 G9
 ```
 
-这些区域自动出现在发送给规划 LLM 的动态目录中；不写入版式文件，不在编辑器或图册中绘制。文字目录、图册文字清单均受 KEEP 保护，启用每轮指定 Skill 时也能使用。
+这些区域自动出现在发送给规划 LLM 的动态目录中，不写入版式文件。图册用紫色虚线显示实际可用范围，灰斜纹与“不可用”标牌表示整项 G 禁用，同处其他合法槽位不受影响。文字目录、图册文字清单均受 KEEP 保护，启用每轮指定 Skill 时也能使用。
 
-先用已有 F/S/L/R 等区域描述主体身份、整体姿态和取景。复杂动作通常只需 1～3 个 G 辅助项，以 `label:object` 写清已有主体的部位、连接方向、接触物和覆盖布料；省略 tags/text，避免重复完整身份或新增人物。没有定位需要时直接省略 G 项。
+0.3.12 起，单个 G 与合法矩形合并区均支持 `character`、`object`、`text`，可承载独立人物、局部、物件或文字；`tags`、`text`、`palette` 按通用项目规则填写。只使用实际需要的区域，不要求填满。
+
+同格人物各有独立主项，使用不同的完整槽位键。例如 `S` 放 Alice，`G2+G5+G8` 放 Bob；后者是一条覆盖中列的项目，不是三个人物项。局部描述写清所属人物与连接方向，避免复制同一具连续身体。文字仍需准确字样、说话人和与容量相符的字号。
 
 ```json
-{
-  "panel": 1,
-  "slot": "G4+G5",
-  "label": "object",
-  "caption": "The same traveler's left gloved hand holding the book at waist height, wrist continuous with the jacket sleeve."
-}
+[
+  {
+    "panel": 1,
+    "slot": "S",
+    "label": "character",
+    "tags": ["alice"],
+    "caption": "panel 1, Alice in a blue jacket stands at the left, facing Bob."
+  },
+  {
+    "panel": 1,
+    "slot": "G2+G5+G8",
+    "label": "character",
+    "tags": ["bob"],
+    "caption": "panel 1, Bob in a brown coat stands in the center, facing Alice."
+  },
+  {
+    "panel": 1,
+    "slot": "G1",
+    "label": "text",
+    "text": "你好",
+    "caption": "panel 1, spoken by Alice, a white speech bubble with large black printed glyphs, naturally wrapped."
+  }
+]
 ```
 
-示例需放入当前合法版式的 items，格号和 G 键以本轮目录为准。相邻且填满矩形的区域允许用加号合并，例如 `G1+G2`、`G1+G2+G4+G5`；对角、缺角、重复或缺失键会报错。
+示例项目需放入当前合法版式的 items，人物身份、格号和槽位以本轮输入为准。相邻且填满矩形的 G 区域允许用加号合并，例如 `G1+G2`、`G1+G2+G4+G5`、`G2+G5+G8`；对角、缺角、重复或缺失键会报错。同格独立项目应使用不同完整键；合并键调换顺序仍按同一区域看待，不应据此重复使用。
 
-G 按 F 外接框等分；遇到斜框边缘时向实际轮廓内收缩，无法安全容纳的区域不列入清单。辅助区不能承担跨格，跨格主体继续使用已保存的 S/L/R 等区域。历史版式若已有同名 G 槽，保留其原坐标，不参与虚拟合并。
+G 按 F 外接框等分，而非相对 S；遇到斜框边缘时向实际轮廓内收缩，无法安全容纳的区域不列入清单。G 位于本 panel 内，跨格主体继续使用已保存的 S/L/R 等区域。历史版式若已有同名 G 槽，保留其原坐标，不参与虚拟合并。
 
-编译器只为实际引用的辅助项回填 bbox，不补画九宫格、人物、气泡或新分格。布局仍属于模型提示，实际姿势和定位效果需要出图检查。
+编译器为实际引用的项目回填 bbox，保留身份、文字与 palette，不追加固定的局部解剖或服装描述。G 不增加漫画分格或读序；图册的网格、图例、编号与箭头不进入作品。实际姿势和定位效果仍需出图检查。

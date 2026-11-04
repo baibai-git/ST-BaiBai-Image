@@ -96,7 +96,7 @@ export async function prepareLayoutSelectionMessage(messages: ChatMsg[], selecti
   if (!selection.visual) return;
   const atlases=buildLayoutAtlases(selection.layouts);
   if (!atlases.length) return;
-  const catalog=['【会话完整版式空间目录】覆盖全部启用且画布相容的版式，每张图4套；P编号就是 item.panel。图册不是本轮白名单，冷却限制另行下发。',
+  const catalog=['【会话完整版式空间目录】覆盖全部启用且画布相容的版式，每张图4套；panel 编号就是 item.panel，F位置[左,上,宽,高]%相对整页；宽高比按实际尺寸、面积按轮廓计算且未扣遮挡，均不保证文字容量。图册不是本轮白名单，冷却限制另行下发。',
     '<<<STB-KEEP>>>',
     '【会话版式选择规则】以下固定说明随图册保留，后续每轮仅更新选择范围与冷却状态。只从本轮可选 ID 中选择；格位、大小、槽位和用途参考本图册。图册含冷却 ID，不授予选择权限；同轮多页必须使用不同 ID。',
     '本轮标注 layout_fallback 允许时，若所有候选均无法满足原文时序、画布、槽位、文字容量或同轮去重，不删改剧情、不强塞内容，也不自行选禁用 ID；返回控制结果 {"images":[],"changes":[],"layout_fallback":"候选不适用的具体原因"}，宿主会从最早记录起逐步解除并重新请求。此控制结果不受最少图片数限制，不代表本轮最终结果。本轮标注禁止时，不输出 layout_fallback，按宿主图片数量与事实要求输出最终结果。',

@@ -138,7 +138,7 @@ describe('layout cooldown', () => {
     expect(content).toMatch(/\n<<<STB-\/KEEP>>>$/);
     const range = content.split('<<<STB-KEEP>>>')[1].split('<<<STB-/KEEP>>>')[0];
     expect(range).toContain('槽位 F');
-    expect(range).toContain('【可选局部定位】');
+    expect(range).toContain('【可选网格区域】');
     expect(range).toContain('G1+G2+G4+G5');
     expect(range).toContain('FIRST_PARAGRAPH\n\nLAST_PARAGRAPH');
     relaxLayoutSelection(selection); setLayoutSelectionMessage(messages, selection);
@@ -156,7 +156,7 @@ describe('layout cooldown', () => {
     const atlas = messages.find(message => message.atlasCatalog);
     expect(atlas?.content).toMatch(/^【会话完整版式图册】/);
     expect(atlas?.atlasCatalog).toMatch(/<<<STB-KEEP>>>[\s\S]*槽位 F[\s\S]*<<<STB-\/KEEP>>>$/);
-    expect(atlas?.atlasCatalog).toMatch(/<<<STB-KEEP>>>[\s\S]*【可选局部定位】[\s\S]*G1 G2 G3[\s\S]*<<<STB-\/KEEP>>>$/);
+    expect(atlas?.atlasCatalog).toMatch(/<<<STB-KEEP>>>[\s\S]*【可选网格区域】[\s\S]*G1 G2 G3[\s\S]*<<<STB-\/KEEP>>>$/);
   });
 
   it('accepts an explicit fallback control only when permitted, without adopting images or changes', () => {

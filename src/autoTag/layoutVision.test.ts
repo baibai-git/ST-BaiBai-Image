@@ -33,6 +33,9 @@ describe('dynamic visual layout candidates',()=>{
     expect(imageMessage.role).toBe('user'); expect(imageMessage.purpose).toBeUndefined();
     expect(imageMessage.images).toHaveLength(2); expect(imageMessage.content).toContain('a、b、c、d');
     expect(imageMessage.content).toContain('same person');
+    expect(imageMessage.content).toContain('F 位置[');
+    expect(imageMessage.content).toContain('宽高比');
+    expect(imageMessage.content).toContain('面积');
     expect(imageMessage.content).toContain('【会话版式选择规则】');
     expect(imageMessage.content).toContain('"layout_fallback":"候选不适用的具体原因"');
     const revision=imageMessage.atlasRevision;

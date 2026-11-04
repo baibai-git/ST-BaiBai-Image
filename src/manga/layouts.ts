@@ -299,9 +299,6 @@ export function applyMangaFrames(
         }
       }
       const gridBox = !panel.slots[resolvedSlot] && /^G/.test(resolvedSlot) ? resolveMangaGridRegion(panel,resolvedSlot) : undefined;
-      if (gridBox && (item.label !== 'object' || item.text !== undefined || item.tags !== undefined)) {
-        throw new Error('漫画 Layout:G 辅助区使用 label=object，只描述已有主体的局部，不填写 text 或 tags；人物身份由主体框统领，文字使用现有字区。');
-      }
       const box = resolvedSlot === 'X' && panel.slots.F ? breakoutBox(panel, layout.panels.length, manga.bleed, canvas) : panel.slots[resolvedSlot] ?? gridBox;
       if (!box) {
         throw new Error(
@@ -314,9 +311,8 @@ export function applyMangaFrames(
       // content regions, not additional comic frames.
       const caption = typeof item.caption === 'string' ? item.caption.replace(/^\s*panel\s+\d+\s*[,;:]\s*/i,'') : '';
       item.caption = `Content of panel ${layout.panels.indexOf(panel)+1}: ${caption}`.trim();
-      if (gridBox) item.caption += ' Local positioning detail of the existing subject or object in this panel, continuous with its described anatomy and covering clothing; retain the main shot framing. This region is not a separate comic panel.';
-      if (item.label==='text' && typeof item.text==='string' && item.text.trim() && TEXT_REGIONS[slotType(resolvedSlot)]) {
-        item.caption += ` Placement: ${TEXT_REGIONS[slotType(resolvedSlot)]} text region.`;
+      if (item.label==='text' && typeof item.text==='string' && item.text.trim() && (TEXT_REGIONS[slotType(resolvedSlot)] || gridBox)) {
+        item.caption += ` Placement: ${TEXT_REGIONS[slotType(resolvedSlot)] ?? 'selected grid'} text region.`;
         const key=`${layout.panels.indexOf(panel)}:${resolvedSlot}`;
         const group=textGroups.get(key) ?? {box,items:[],shaped:!!panel.shapes?.[resolvedSlot]};
         group.items.push(item); textGroups.set(key,group);
@@ -446,7 +442,7 @@ function slotLine(panel: MangaPanel): string {
   return [...Object.keys(panel.slots).filter(slot => slotType(slot) !== 'X'),...Object.keys(mangaGridRegions(panel))].join(' ');
 }
 
-/** Virtual local-positioning boxes. Never persisted as layout slots or drawn by the editor/atlas. */
+/** Virtual local-positioning boxes. Shared by compilation, catalog and atlas; never persisted. */
 export function mangaGridRegions(panel: MangaPanel): Record<string,FrameBox> {
   const regions:Record<string,FrameBox>={};
   const frame=panel.slots.F;
@@ -497,7 +493,19 @@ export function resolveMangaGridRegion(panel:MangaPanel, slot:string): FrameBox 
   return fitGridBox(panel,gridBounds(panel.slots.F,top,left,bottom+1,right+1));
 }
 
-const GRID_GUIDE='【可选局部定位】每个 F 外框提供隐藏九宫格，按画面方向从左到右、从上到下编号：上排 G1 G2 G3，中排 G4 G5 G6，下排 G7 G8 G9；只在本格槽位清单列出时可用。它们不是新分格、人物、字区或读序，不要求填满，通常仅复杂姿势选 1～3 处。主体先用 F/S/L/R 等已有区域写完整姿态、身份与取景，再用 G 项以 label=object 描述同一主体的手、脚或道具等局部；caption 写清所属角色、部位、连接方向及覆盖布料，局部不重复完整外貌，不填 tags/text，不扩大原景别或补画被裁掉的身体。规则允许用加号合并清单中相邻且填满矩形的 G 键，如 G1+G2 或 G1+G2+G4+G5；斜对角、缺角组合无效。G 范围相对 F 等分，斜框边缘自动内缩，无法容纳的格子不列出；G 只在 F 内定位，出框继续用已保存的主体框。未使用的 G 不输出 items，已有字区仍按实际发言使用。';
+const GRID_GUIDE='【可选网格区域】每个 F 外框提供九宫格，按画面方向从左到右、从上到下编号：上排 G1 G2 G3，中排 G4 G5 G6，下排 G7 G8 G9；范围相对 F 而非 S，仅本格清单列出的键可用。G 与普通区域一样支持 character、object、text，可承载独立人物、局部、物件或文字；tags、text、palette 等按通用项目规则填写，不限定为局部 object，也不预设使用数量。同格人物各有独立主项，主体区按实际位置、重叠与容量选择，不因使用 G 而复制同一人。可用加号合并清单中相邻且填满矩形的 G 键，如 G1+G2、G1+G2+G4+G5、G2+G5+G8；斜对角、缺角及包含不可用键的组合无效。斜框边缘自动内缩，无法容纳的格子不列出。图册紫色虚线为实际范围，灰斜纹与“不可用”表示整项 G 禁用，同处其他合法槽位不受影响；图例、编号与箭头不进入作品。G 是本 panel 内的区域，不是新分格或读序；按实际取景和字区容量使用，未使用的区域不输出 items。';
+
+/** Explicit saved position names take precedence over numeric output panel references. */
+export function mangaPanelReadingOrder(layout: Pick<ResolvedLayout,'panels'|'readingOrder'>): number[] {
+  const fallback=layout.panels.map((_,index)=>index);
+  const order=(layout.readingOrder ?? '').split(/\s*(?:→|->|⇒|➜|、|，|,)\s*/).map(name=>{
+    const index=layout.panels.findIndex(panel=>panel.position===name.trim());
+    if (index>=0) return index;
+    const match=name.trim().match(/^(?:panel[-\s]*)?(\d+)$/i);
+    return match ? Number(match[1])-1 : -1;
+  });
+  return order.length===fallback.length && new Set(order).size===order.length && order.every(index=>index>=0 && index<fallback.length) ? order : fallback;
+}
 
 function regionOutline(panel: MangaPanel, slot: string): number[][] | undefined {
   const box = panel.slots[slot];
@@ -562,7 +570,7 @@ function compactRegions(panel: MangaPanel, base: FrameBox): string[] {
 /** Compact planning geometry only; never changes panel order, saved regions or compiled boxes. */
 export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayout[]>, notes='', visual=false): string {
   const lines=visual ? [
-    '【本轮候选版式空间目录】几何见本轮示意图；每张图4套，按ID对应；P1等于item.panel=1，槽位标签按本格合法键引用。',
+    '【本轮候选版式空间目录】每张图4套，按ID对应；panel 1等于item.panel=1，槽位标签按本格合法键引用。F位置[左,上,宽,高]%相对整页；宽高比按实际尺寸、面积按轮廓计算且未扣遮挡，均不保证文字容量。',
     '图片只表示已保存的框位和叠放，不是角色、动作或文字内容。各槽位是可选区域，不要求填满；形状不授权新增slot或改动边界。文字清单负责精确代号与用途，实际坐标由插件编译。',
   ] : [
     '【本轮候选版式空间目录】本轮目录优先于历史清单；位置代号只是标识，不表示读序或大小。',
@@ -581,7 +589,7 @@ export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayo
         const index = layout.panels.findIndex(panel => panel.position === name);
         return index < 0 ? name : String(index+1);
       });
-      lines.push(`- ${parts.join('｜')}${readingOrder ? `｜读序 ${readingOrder}` : ''}`);
+      lines.push(`- ${parts.join('｜')}${visual ? `｜panel读序 ${mangaPanelReadingOrder(layout).map(index=>index+1).join(' → ')}` : readingOrder ? `｜读序 ${readingOrder}` : ''}`);
       if (!visual) lines.push(`  格位概览：${layout.panels.map((panel,index)=>`${index+1}=${panel.slots.F ? framePosition(outlineBox(regionOutline(panel,'F')!),layout.canvas).replace('nearly full-page','近乎整页').replace('full-height','通高').replace('full-width','通栏').replace('upper','上方').replace('lower','下方').replace('middle','中部').replace('center','居中').replace('left','左侧').replace('right','右侧') : '边界未知'}`).join('，')}`);
       if (layout.panels.some(panel=>panel.layer!==undefined) && panelLayerGuides(layout.panels).length) {
         const order=layout.panels.map((panel,index)=>({panel,index})).sort((a,b)=>(a.panel.layer ?? a.index)-(b.panel.layer ?? b.index) || a.index-b.index);
@@ -594,12 +602,12 @@ export function buildMangaCatalog(layouts: Record<MangaOrientation, ResolvedLayo
         const outline=outlines[index], box=outline ? outlineBox(outline) : page;
         const [top,left,bottom,right]=box;
         const geometry=outline
-          ? `F 位置[${relativeBox(box,page)}]% 宽高比${Math.round((right-left)/(bottom-top)*100)/100} 面积${rounded(areas[index]/(width*height)*100)}% 排名${areas.filter(area=>area>areas[index]).length+1}/${layout.panels.length}${panel.shapes?.F ? `；斜四边形轮廓[${outline.map(([x,y])=>`${rounded((x-left)/(right-left)*100)},${rounded((y-top)/(bottom-top)*100)}`).join(';')}]%相对F外接框` : ''}`
+          ? `F 位置[${relativeBox(box,page)}]% 宽高比${Math.round((right-left)/(bottom-top)*100)/100} 面积${rounded(areas[index]/(width*height)*100)}%${visual ? '' : ` 排名${areas.filter(area=>area>areas[index]).length+1}/${layout.panels.length}`}${!visual && panel.shapes?.F ? `；斜四边形轮廓[${outline.map(([x,y])=>`${rounded((x-left)/(right-left)*100)},${rounded((y-top)/(bottom-top)*100)}`).join(';')}]%相对F外接框` : ''}`
           : 'F未配置，整格边界未知；以下内框相对整页';
         const regions=compactRegions(panel,box);
         const crossing=crossingSubjects(panel);
         const notes=Object.entries(panel.slotNotes ?? {}).filter(([key])=>slotType(key)!=='X');
-        lines.push(`  ${index+1}${/^panel-\d+$/.test(panel.position) ? '' : `(${panel.position})`}:${visual ? '' : `${geometry}；`}槽位 ${slotLine(panel)}${!visual && regions.length ? `；特殊区域 ${regions.join(' ')}` : ''}${crossing.length ? `；跨格主体 ${crossing.join(' ')}` : ''}${notes.length ? `；框用途 ${JSON.stringify(Object.fromEntries(notes))}` : ''}`);
+        lines.push(`  ${index+1}${/^panel-\d+$/.test(panel.position) ? '' : `(${panel.position})`}:${geometry}；槽位 ${slotLine(panel)}${!visual && regions.length ? `；特殊区域 ${regions.join(' ')}` : ''}${crossing.length ? `；跨格主体 ${crossing.join(' ')}` : ''}${notes.length ? `；框用途 ${JSON.stringify(Object.fromEntries(notes))}` : ''}`);
       });
       for (const guide of panelLayerGuides(layout.panels)) lines.push(`  重叠层级：${guide}（仅在轮廓重叠处遮挡，不改变读序）。`);
       outlines.forEach((outer,i)=>outlines.forEach((inner,j)=> {
@@ -628,7 +636,7 @@ export function buildMangaSpec(manga: MangaSettings, includeCatalog=true): strin
   lines.push('- 槽位:F 格框 C 完整内区 S 实际主体区域 L/R 左右人物 O 道具音效 T/TL/TR 顶部字区 B 底部字区 BL/BR 左下/右下字区 ML/MR 侧边字区 E 允许小部分越线进格间留白。清单里没列出的槽位在该格不存在,填了会让这次生成失败。');
   lines.push('- 同类内框可有编号，如 S、S_2、O、O_2、TL、TL_2；每个完整键对应独立区域，编号不表示读序、人物数量或自动新增人物。仅使用该格清单中已有的完整键。');
   lines.push('- 连续人物以一个主体框统领；复杂姿势可用已有辅助框定位手、脚、袖口等局部，局部描述写明所属角色、部位与连接方向，保留覆盖该部位的服装，避免在局部框重复完整外貌或生成另一个人。');
-  lines.push('- 每个 F 的隐藏 G1～G9 局部定位及相邻矩形合并规则见本轮动态目录；仅输出实际需要的辅助项，G 项使用 label=object，不作为新人物或文字。');
+  lines.push('- 每个 F 的 G1～G9 及合法矩形合并区均支持 character/object/text，字段按普通项目规则填写；几何与可用性见动态目录，G 不增加分格或读序。');
   lines.push('- 同一角色若有有意安排的巨大脸部特写与小比例身体等多尺度展示，分别绑定已有区域并写明同一身份的两处独立呈现，不将两处画成一具连体身体；普通局部辅助则保持与主体连续。');
   lines.push('- 用途与框内说明中的具体人物、地点、道具和动作属于参考示范,不是必须匹配的剧情条件。选版主要比较格形、时序、主次关系与容量,示范内容按原文替换;仍须遵守独立格与同刻嵌入格的区别。');
   lines.push('- 框用途是用户提供的内容分配说明：F 描述整格用途，其余键只作用于对应内框。结合原文与该说明选择内容，不把说明当作台词、旁白或可见印字，不新增槽位、坐标、剧情事件或参与者。空说明沿用槽位默认用途。');
