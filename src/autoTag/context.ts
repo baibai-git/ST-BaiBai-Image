@@ -276,15 +276,19 @@ export function fetchUserPersona(context: STContext): string {
 /* ============ 系统消息包装(与柏宝书 prompts.ts 的 build*System 文案一致) ============ */
 
 /** 世界设定与场景描写参考；按正文选用，不把条目示例当成已发生剧情。 */
-export function buildWorldInfoSystem(worldInfo: string): string {
-  return `【世界设定与场景描写参考(世界书激活条目)】
+export function buildWorldInfoSystem(worldInfo: string, protectForDsh = false): string {
+  const content = protectForDsh ? worldInfo.trim().replace(/<<<STB-\/?KEEP>>>/g, '') : worldInfo.trim();
+  const message = `【世界设定与场景描写参考(世界书激活条目)】
 以下条目可用于理解世界与角色，并按适用条件补充当前场景的材质、光影、环境和描写方式；只采用与目标正文及人物连续性相符的内容。
 条目中的示例、假设与写法说明不代表本轮已经发生的事件，不据此新增人物、动作或对白，也不把说明当成画面文字。
 原文明确事实、宿主输出协议、当前版式清单及规范中的格式、连续性与物理约束优先；将适用参考落实为对应画面描述，不整段复述世界书。
 画风来源单独核对：本轮明确指定的画风优先，其次是下方标记的「本轮已激活画风开关」，没有时使用规范的默认画风。已激活画风开关替换默认媒介；漫画 Layout 只约束分格、排版与字段，不强制二维。只有画风条目负责媒介、线条、上色和材质表现，普通世界书仍按参考资料处理。
 Layout 模式把选定画风落实到 summary.caption，并使人物、背景与材质描述相容；常规模式放在对应的画风描述位置。条目要求英文句子开头时，指画风描述的位置，不在宿主 JSON 外追加文本，也不覆盖事实、格式、槽位与物理约束。
 
-${worldInfo.trim()}`;
+${content}`;
+  // Pin only the post-activation/post-exclusion result. This remains a dynamic
+  // message; KEEP never forces inactive or deliberately excluded entries back in.
+  return protectForDsh ? `<<<STB-KEEP>>>\n${message}\n<<<STB-/KEEP>>>` : message;
 }
 
 /** 把角色卡描述包成独立 system 消息(有些卡人设写在角色描述而非世界书里,tag 生成也需据此理解角色)。 */

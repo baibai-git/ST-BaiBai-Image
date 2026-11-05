@@ -430,7 +430,7 @@ export async function buildAutoTagMessages(
   if (selection) await prepareLayoutSelectionMessage(messages, selection);
   if (charCard) messages.push({ role: 'system', content: buildCharCardSystem(charCard) });
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
-  if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
+  if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo, options.dshSession === true) });
   const libraryBlock = library?.trim() || `【角色固定外貌库】[system-maintained; currently empty]\n（当前为空，没有任何角色已建档。世界书、角色卡、柏宝书和正文只提供建档依据；未列在本区块中的正式角色必须通过 field:"new" 建档。）`;
   const taskBlock = taskNote?.trim() ? `${taskNote.trim()}\n\n` : '';
   const userContent = `${memoryText}\n\n${libraryBlock}\n\n${taskBlock}${previous ? `${previous}\n\n` : ''}--- 目标正文｜${roleLabel(context, targetFloor)} ---\n${preparedTarget.promptText}`;

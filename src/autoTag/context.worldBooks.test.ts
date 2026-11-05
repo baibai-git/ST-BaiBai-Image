@@ -50,6 +50,22 @@ describe('专用书单请求隔离', () => {
     expect(mocks.standard).not.toHaveBeenCalled();
     expect(mocks.dedicated).not.toHaveBeenCalled();
   });
+  it('DSH 仅保护最终激活且未排除的世界书，普通 API 无控制标记', async()=>{
+    mocks.settings.worldBooks={enabled:true,names:['Dedicated','Excluded']};
+    mocks.settings.excludes.excludedWorldNames=['Excluded'];
+    const active=await fetchWorldInfo(chat,[0],'User','Alice');
+    const wrapped=buildWorldInfoSystem(active,true);
+    expect(wrapped).toMatch(/^<<<STB-KEEP>>>\n【世界设定与场景描写参考/);
+    expect(wrapped).toMatch(/\nOcean\n<<<STB-\/KEEP>>>$/);
+    expect(wrapped).not.toContain('Filtered');
+    expect(buildWorldInfoSystem(active)).not.toContain('<<<STB-');
+  });
+  it('已有保护符号归一化为一对外层标记，跨段正文保持完整',()=>{
+    const wrapped=buildWorldInfoSystem('<<<STB-KEEP>>>\nFIRST_ENTRY\n<<<STB-/KEEP>>>\n\nLAST_ENTRY',true);
+    expect(wrapped.match(/<<<STB-KEEP>>>/g)).toHaveLength(1);
+    expect(wrapped.match(/<<<STB-\/KEEP>>>/g)).toHaveLength(1);
+    expect(wrapped).toContain('FIRST_ENTRY');expect(wrapped).toContain('LAST_ENTRY');
+  });
   it('宿主接口缺失或扫描失败时明确失败，不串用酒馆书单', async () => {
     mocks.settings.worldBooks = { enabled: true, names: ['Dedicated'] };
     mocks.available = false;

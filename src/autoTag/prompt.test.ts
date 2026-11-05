@@ -248,6 +248,12 @@ describe('auto tag prompt', () => {
       expect(first[5].content).toContain('PERSONA_MARKER');
       expect(first[6].content).toContain('WORLD_A');
       expect(second[6].content).toContain('WORLD_B');
+      expect(second[6].content).not.toContain('<<<STB-KEEP>>>');
+      const protectedRound = await buildAutoTagMessages(context(), 1, {...options,dshSession:true}, null);
+      const protectedWorld=protectedRound.find(message=>message.content.includes('WORLD_B'))!;
+      expect(protectedWorld.role).toBe('system');expect(protectedWorld.purpose).toBeUndefined();
+      expect(protectedWorld.content).toMatch(/^<<<STB-KEEP>>>[\s\S]*WORLD_B\n<<<STB-\/KEEP>>>$/);
+      expect(protectedRound.slice(0,4)).toEqual(second.slice(0,4));
       expect(first.at(-1)?.role).toBe('user');
       expect(first.at(-1)?.content).toContain('目标第一行');
     } finally {
