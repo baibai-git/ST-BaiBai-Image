@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  standard: vi.fn(), dedicated: vi.fn(), available: true,
+  standard: vi.fn(), dedicated: vi.fn(), overlay: vi.fn(), available: true,
   settings: {
-    worldBooks: { enabled: false, names: [] as string[] },
+    worldBooks: { enabled: false, includeTavern: false, names: [] as string[] },
     excludes: { excludedWorldNames: [] as string[], excludedWorldInfoPatterns: [], customStripTags: [] },
   },
 }));
@@ -12,6 +12,7 @@ vi.mock('@/st/context', () => ({
   getContext: () => ({ substituteParams: (s: string) => s }),
   getCheckWorldInfo: async () => mocks.standard,
   getCheckWorldInfoForBooks: async () => mocks.available ? mocks.dedicated : null,
+  getCheckWorldInfoWithAdditionalBooks: async () => mocks.available ? mocks.overlay : null,
   getEjsTemplate: () => null,
 }));
 import { buildWorldInfoSystem, fetchWorldInfo } from './context';
@@ -26,10 +27,11 @@ describe('专用书单请求隔离', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.available = true;
-    mocks.settings.worldBooks = { enabled: false, names: [] };
+    mocks.settings.worldBooks = { enabled: false, includeTavern: false, names: [] };
     mocks.settings.excludes.excludedWorldNames = [];
     mocks.standard.mockResolvedValue(activated());
     mocks.dedicated.mockResolvedValue(activated());
+    mocks.overlay.mockResolvedValue(activated());
   });
   it('未启用保持原来的酒馆扫描路径', async () => {
     await fetchWorldInfo(chat, [0], 'User', 'Alice');
@@ -37,7 +39,7 @@ describe('专用书单请求隔离', () => {
     expect(mocks.dedicated).not.toHaveBeenCalled();
   });
   it('启用后仅把独立书单交给原生扫描器，保留排除规则', async () => {
-    mocks.settings.worldBooks = { enabled: true, names: ['Dedicated', 'Excluded'] };
+    mocks.settings.worldBooks = { enabled: true, includeTavern: false, names: ['Dedicated', 'Excluded'] };
     mocks.settings.excludes.excludedWorldNames = ['Excluded'];
     expect(await fetchWorldInfo(chat, [0], 'User', 'Alice')).toBe('Ocean');
     expect(mocks.standard).not.toHaveBeenCalled();
@@ -50,8 +52,37 @@ describe('专用书单请求隔离', () => {
     expect(mocks.standard).not.toHaveBeenCalled();
     expect(mocks.dedicated).not.toHaveBeenCalled();
   });
+  it('叠加模式只调用一次合并扫描器，保留排除及 KEEP 保护', async () => {
+    mocks.settings.worldBooks = { enabled: true, includeTavern: true, names: ['Dedicated'] };
+    mocks.settings.excludes.excludedWorldNames = ['Excluded'];
+    mocks.overlay.mockResolvedValue({ allActivatedEntries: new Set([
+      { world: 'Normal', uid: 1, content: 'Normal entry' },
+      { world: 'Dedicated', uid: 1, content: 'Extra entry' },
+      { world: 'Excluded', uid: 1, content: 'Excluded entry' },
+    ]) });
+    const text = await fetchWorldInfo(chat, [0], 'User', 'Alice');
+    expect(text).toContain('Normal entry');
+    expect(text).toContain('Extra entry');
+    expect(text).not.toContain('Excluded entry');
+    expect(buildWorldInfoSystem(text, true)).toContain('<<<STB-KEEP>>>');
+    expect(mocks.overlay).toHaveBeenCalledExactlyOnceWith(expect.any(Array), expect.any(Number), true, ['Dedicated']);
+    expect(mocks.standard).not.toHaveBeenCalled();
+    expect(mocks.dedicated).not.toHaveBeenCalled();
+  });
+  it('叠加空书单跟随酒馆，接口缺失明确报错', async () => {
+    mocks.settings.worldBooks = { enabled: true, includeTavern: true, names: [] };
+    await fetchWorldInfo(chat, [0], 'User', 'Alice');
+    expect(mocks.standard).toHaveBeenCalledOnce();
+    mocks.settings.worldBooks.names = ['Dedicated'];
+    mocks.available = false;
+    await expect(fetchWorldInfo(chat, [0], 'User', 'Alice')).rejects.toThrow('叠加世界书扫描接口不可用');
+    mocks.available = true;
+    mocks.overlay.mockRejectedValueOnce(new Error('overlay failed'));
+    await expect(fetchWorldInfo(chat, [0], 'User', 'Alice')).rejects.toThrow('overlay failed');
+    expect(mocks.standard).toHaveBeenCalledOnce();
+  });
   it('DSH 仅保护最终激活且未排除的世界书，普通 API 无控制标记', async()=>{
-    mocks.settings.worldBooks={enabled:true,names:['Dedicated','Excluded']};
+    mocks.settings.worldBooks={enabled:true,includeTavern:false,names:['Dedicated','Excluded']};
     mocks.settings.excludes.excludedWorldNames=['Excluded'];
     const active=await fetchWorldInfo(chat,[0],'User','Alice');
     const wrapped=buildWorldInfoSystem(active,true);
@@ -67,7 +98,7 @@ describe('专用书单请求隔离', () => {
     expect(wrapped).toContain('FIRST_ENTRY');expect(wrapped).toContain('LAST_ENTRY');
   });
   it('宿主接口缺失或扫描失败时明确失败，不串用酒馆书单', async () => {
-    mocks.settings.worldBooks = { enabled: true, names: ['Dedicated'] };
+    mocks.settings.worldBooks = { enabled: true, includeTavern: false, names: ['Dedicated'] };
     mocks.available = false;
     await expect(fetchWorldInfo(chat, [0], 'User', 'Alice')).rejects.toThrow('专用世界书扫描接口不可用');
     mocks.available = true;

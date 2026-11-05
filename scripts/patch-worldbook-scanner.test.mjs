@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { patchWorldbookScanner } from './patch-worldbook-scanner.mjs';
 
 const host = `export async function getSortedEntries() {
-    const [globalLore] = await Promise.all([
+    const [globalLore, characterLore, chatLore, personaLore] = await Promise.all([
             getGlobalLore(),
+            Promise.resolve([]), Promise.resolve([]), Promise.resolve([]),
     ]);
+        await eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore });
     return globalLore;
 }
 //MARK: checkWorldInfo
@@ -20,10 +22,10 @@ describe('宿主专用书单兼容补丁', () => {
     expect(patched.changed).toBe(true);
     expect(patchWorldbookScanner(patched.text)).toEqual({ text: patched.text, changed: false });
     const source = patched.text.replaceAll('export ', '');
-    const normal = ['Original'];
-    const api = new Function('getGlobalLore', 'loadWorldInfo', 'defaultGlobalScanData', `${source}; return {checkWorldInfo,checkWorldInfoForBooks};`)(
+    const normal = [{ world: 'Original', uid: 1, content: 'Original' }];
+    const api = new Function('getGlobalLore', 'loadWorldInfo', 'defaultGlobalScanData', 'eventSource', 'event_types', `${source}; return {checkWorldInfo,checkWorldInfoForBooks,checkWorldInfoWithAdditionalBooks};`)(
       async () => [...normal],
-      async world => ({ entries: { 1: { uid: 1, content: world } } }), {},
+      async world => ({ entries: { 1: { uid: 1, content: world } } }), {}, { emit: async () => {} }, { WORLDINFO_ENTRIES_LOADED: 'loaded' },
     );
     const [a, b, standard] = await Promise.all([
       api.checkWorldInfoForBooks([], 100, true, ['A', 'A']),
@@ -32,10 +34,26 @@ describe('宿主专用书单兼容补丁', () => {
     ]);
     expect(a.map(e => e.world)).toEqual(['A']);
     expect(b.map(e => e.world)).toEqual(['B']);
-    expect(standard).toEqual(['Original']);
-    expect(normal).toEqual(['Original']);
+    expect(standard).toEqual(normal);
+    expect(normal).toEqual([{ world: 'Original', uid: 1, content: 'Original' }]);
+    const overlay = await api.checkWorldInfoWithAdditionalBooks([], 100, true, ['Original', 'A', 'A']);
+    expect(overlay.map(e => e.world)).toEqual(['Original', 'A']);
+    expect(await api.checkWorldInfoWithAdditionalBooks([], 100, true, [])).toEqual(normal);
+    await expect(api.checkWorldInfoWithAdditionalBooks([], 100, true, [''])).rejects.toThrow();
     expect(await api.checkWorldInfoForBooks([], 100, true, [])).toEqual([]);
     await expect(api.checkWorldInfoForBooks([], 100, true, [''])).rejects.toThrow();
+  });
+  it('已有专用补丁可升级，升级后不重复注入合并代码', () => {
+    const current = patchWorldbookScanner(host).text;
+    const old = current
+      .replace(/        \/\/ Request-local overlay;[\s\S]*?(?=        await eventSource.emit)/, '')
+      .replace(/\/\*\* Merge normal books[\s\S]*?(?=\/\/MARK: checkWorldInfo)/, '');
+    const upgraded = patchWorldbookScanner(old);
+    expect(upgraded.changed).toBe(true);
+    expect(upgraded.text).toBe(current);
+    expect(patchWorldbookScanner(upgraded.text).changed).toBe(false);
+    const incomplete = current.replace('Array.isArray(worldNamesOverride?.additionalWorldNames)', 'false');
+    expect(() => patchWorldbookScanner(incomplete)).toThrow('不完整');
   });
   it('不匹配的宿主和不完整的已有补丁应拒绝修改', () => {
     expect(() => patchWorldbookScanner('unrelated source')).toThrow('不匹配');

@@ -1055,7 +1055,7 @@ export interface ImageSettings {
   /** 自动判断并向正文插入生图 tag。 */
   autoTag: AutoTagSettings;
   /** 柏宝绘独立书单，不改变酒馆的世界书选择。 */
-  worldBooks: { enabled: boolean; names: string[] };
+  worldBooks: { enabled: boolean; includeTavern: boolean; names: string[] };
   /** 排除设置(镜像共享存储;真身在 extensionSettings['baibai_exclude_settings'])。 */
   excludes: ExcludesSettings;
   /** 落盘存储行为(新图格式)。 */
@@ -1210,7 +1210,7 @@ function defaults(): ImageSettings {
     nai: naiDefaults(),
     channels: [],
     assignments: { tagGen: '' },
-    worldBooks: { enabled: false, names: [] },
+    worldBooks: { enabled: false, includeTavern: false, names: [] },
     autoTag: {
       dshSession: false,
       dshDedicated: false,
@@ -1801,6 +1801,7 @@ function normalize(raw: unknown): ImageSettings {
   merged.assignments = { tagGen: typeof ra.tagGen === 'string' ? ra.tagGen : '' };
   merged.worldBooks = {
     enabled: r.worldBooks?.enabled === true,
+    includeTavern: r.worldBooks?.includeTavern === true,
     names: Array.isArray(r.worldBooks?.names)
       ? [...new Set(r.worldBooks.names.filter((n): n is string => typeof n === 'string').map(n => n.trim()).filter(Boolean))]
       : [],

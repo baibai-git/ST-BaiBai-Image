@@ -1,5 +1,5 @@
 import type { STContext, STMessage, WorldInfoEntry } from '@/st/context';
-import { getCheckWorldInfo, getCheckWorldInfoForBooks, getContext, getEjsTemplate } from '@/st/context';
+import { getCheckWorldInfo, getCheckWorldInfoForBooks, getCheckWorldInfoWithAdditionalBooks, getContext, getEjsTemplate } from '@/st/context';
 import { isWorldInfoEntryExcluded, sortWorldInfoEntriesLikeST } from '@/autoTag/excludes';
 import { stripCustomTags } from '@/autoTag/clean';
 import { settings } from '@/state/settings';
@@ -189,10 +189,12 @@ export async function fetchWorldInfo(
   try {
     const dedicated = settings.worldBooks;
     let res;
-    if (dedicated.enabled) {
+    if (dedicated.enabled && (!dedicated.includeTavern || dedicated.names.length > 0)) {
       if (!dedicated.names.length) return '';
-      const check = await getCheckWorldInfoForBooks();
-      if (!check) throw new Error('专用世界书扫描接口不可用，请安装配套兼容补丁并刷新酒馆。');
+      const check = dedicated.includeTavern
+        ? await getCheckWorldInfoWithAdditionalBooks()
+        : await getCheckWorldInfoForBooks();
+      if (!check) throw new Error(`${dedicated.includeTavern ? '叠加' : '专用'}世界书扫描接口不可用，请安装配套兼容补丁并刷新酒馆。`);
       res = await check(scanText, HUGE_WI_CONTEXT, true, [...dedicated.names]);
     } else {
       const check = await getCheckWorldInfo();

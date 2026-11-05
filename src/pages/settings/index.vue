@@ -41,6 +41,19 @@ const dshSkillEnabled = computed({
   set: (enabled: boolean) => { settings.autoTag.dshRuleSource = enabled ? 'skill' : 'plugin'; },
 });
 
+const worldBookMode = computed({
+  get: () => !settings.worldBooks.enabled ? 'tavern' : settings.worldBooks.includeTavern ? 'overlay' : 'dedicated',
+  set: (mode: string) => {
+    settings.worldBooks.enabled = mode !== 'tavern';
+    settings.worldBooks.includeTavern = mode === 'overlay';
+  },
+});
+const WORLD_BOOK_MODES = [
+  { value: 'tavern', label: '跟随酒馆正常世界书' },
+  { value: 'dedicated', label: '仅柏宝绘专用书' },
+  { value: 'overlay', label: '酒馆正常世界书＋柏宝绘专用书' },
+];
+
 const NAV_OPTIONS: { value: NavPosition; label: string }[] = [
   { value: 'auto', label: '自动' },
   { value: 'top', label: '顶部' },
@@ -890,14 +903,15 @@ async function confirmUpdate() {
       </Collapsible>
 
       <Collapsible title="专用世界书设置" :open="false">
-        <label class="bbi-exclude-row">
-          <input v-model="settings.worldBooks.enabled" type="checkbox" class="bbi-checkbox" />
-          <span>启用柏宝绘专用世界书</span>
-        </label>
+        <div class="bbi-select-row">
+          <span class="bbi-field-label">书单模式</span>
+          <BbiSelect v-model="worldBookMode" :options="WORLD_BOOK_MODES" aria-label="世界书书单模式" />
+        </div>
         <p class="bbi-field-hint">
-          开启后，柏宝绘只扫描下方选中的世界书；常驻、关键词及其他触发规则沿用酒馆。
-          书单独立保存，不改变酒馆对话的启用名单。关闭后跟随酒馆当前世界书。
-          选书不会自动激活全部条目；现有排除名单仍然生效。开启但未选书时不带世界书。
+          跟随酒馆：读取酒馆当前书单。仅专用书：只扫描下方书单，未选书时不带世界书。
+          叠加模式：合并酒馆正常世界书与下方专用书，在同一次扫描中激活、递归并去重；专用书为空时跟随酒馆。
+          书单独立保存，不改变酒馆对话的启用名单。常驻、关键词及其他触发规则沿用酒馆，选书不会激活全部条目；排除名单仍优先生效。
+          专用及叠加模式需要配套宿主兼容补丁，升级后请重新安装补丁并刷新酒馆。
         </p>
         <div class="bbi-channel-bar">
           <span class="bbi-field-label">已选 {{ settings.worldBooks.names.length }} 本</span>

@@ -201,6 +201,19 @@ export async function getCheckWorldInfoForBooks(): Promise<CheckWorldInfoForBook
   }
 }
 
+/** 叠加入口：同一次原生扫描中合并酒馆书单与专用书，支持跨书递归。 */
+export async function getCheckWorldInfoWithAdditionalBooks(): Promise<CheckWorldInfoForBooksFn | null> {
+  try {
+    const wiPath = '/scripts/world-info.js';
+    const mod: Record<string, unknown> = await import(/* @vite-ignore */ wiPath);
+    return typeof mod.checkWorldInfoWithAdditionalBooks === 'function'
+      ? mod.checkWorldInfoWithAdditionalBooks as CheckWorldInfoForBooksFn
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * ST-Prompt-Template(提示词模板插件)挂在 globalThis 的执行器接口(见其 exports.ts)。
  * 只用到 prepareContext + evalTemplate:前者备好含变量/世界书上下文的 env,

@@ -10,36 +10,73 @@ export function patchWorldbookScanner(source) {
     if (!text.includes('const sortedEntries = await getSortedEntries(worldNamesOverride);')) {
       throw new Error('发现不同版本的专用书单补丁，请先人工核对，未修改文件。');
     }
-    return { text: source, changed: false };
+  } else {
+    const pairs = [
+      ['export async function getSortedEntries() {', 'export async function getSortedEntries(worldNamesOverride) {'],
+      ['] = await Promise.all([\n            getGlobalLore(),', `] = Array.isArray(worldNamesOverride)
+              ? [(await Promise.all([...new Set(worldNamesOverride)].map(async (worldName) => {
+                  const data = await loadWorldInfo(worldName);
+                  return data ? Object.values(data.entries ?? {}).map(entry => ({ ...entry, world: worldName })) : [];
+              }))).flat(), [], [], []]
+              : await Promise.all([
+              getGlobalLore(),`],
+      ['export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData) {',
+        'export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData, worldNamesOverride) {'],
+      ['const sortedEntries = await getSortedEntries();', 'const sortedEntries = await getSortedEntries(worldNamesOverride);'],
+      ['//MARK: checkWorldInfo\n', `/** Scan an explicit, request-local book list without changing global/chat/character selections. */
+  export async function checkWorldInfoForBooks(chat, maxContext, isDryRun, worldNames, globalScanData) {
+      if (!Array.isArray(worldNames) || worldNames.some(name => typeof name !== 'string' || !name.trim())) {
+          throw new TypeError('worldNames must be an array of non-empty book names');
+      }
+      return checkWorldInfo(chat, maxContext, isDryRun, globalScanData, [...new Set(worldNames)]);
   }
-  const pairs = [
-    ['export async function getSortedEntries() {', 'export async function getSortedEntries(worldNamesOverride) {'],
-    ['] = await Promise.all([\n            getGlobalLore(),', `] = Array.isArray(worldNamesOverride)
-            ? [(await Promise.all([...new Set(worldNamesOverride)].map(async (worldName) => {
+
+  //MARK: checkWorldInfo
+  `],
+    ];
+    for (const [before, after] of pairs) {
+      if (text.split(before).length !== 2) throw new Error('此酒馆版本的扫描器结构不匹配，未修改文件。');
+      text = text.replace(before, after);
+    }
+  }
+  // Upgrade both unpatched hosts and the previous dedicated-only patch.
+  if (!text.includes('export async function checkWorldInfoWithAdditionalBooks(')) {
+    const anchor = '        await eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore });';
+    const merge = `        // Request-local overlay; normal sources retain their native insertion priority.
+        if (Array.isArray(worldNamesOverride?.additionalWorldNames)) {
+            const seen = new Set([...globalLore, ...characterLore, ...chatLore, ...personaLore]
+                .map(entry => JSON.stringify([entry.world, entry.uid])));
+            for (const worldName of new Set(worldNamesOverride.additionalWorldNames)) {
                 const data = await loadWorldInfo(worldName);
-                return data ? Object.values(data.entries ?? {}).map(entry => ({ ...entry, world: worldName })) : [];
-            }))).flat(), [], [], []]
-            : await Promise.all([
-            getGlobalLore(),`],
-    ['export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData) {',
-      'export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData = defaultGlobalScanData, worldNamesOverride) {'],
-    ['const sortedEntries = await getSortedEntries();', 'const sortedEntries = await getSortedEntries(worldNamesOverride);'],
-    ['//MARK: checkWorldInfo\n', `/** Scan an explicit, request-local book list without changing global/chat/character selections. */
-export async function checkWorldInfoForBooks(chat, maxContext, isDryRun, worldNames, globalScanData) {
+                for (const entry of Object.values(data?.entries ?? {})) {
+                    const key = JSON.stringify([worldName, entry.uid]);
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    globalLore.push({ ...entry, world: worldName });
+                }
+            }
+        }
+
+`;
+    if (text.split(anchor).length !== 2) throw new Error('此酒馆版本的叠加扫描器结构不匹配，未修改文件。');
+    text = text.replace(anchor, merge + anchor);
+    const wrapper = `/** Merge normal books with request-local additions before a single native activation scan. */
+export async function checkWorldInfoWithAdditionalBooks(chat, maxContext, isDryRun, worldNames, globalScanData) {
     if (!Array.isArray(worldNames) || worldNames.some(name => typeof name !== 'string' || !name.trim())) {
         throw new TypeError('worldNames must be an array of non-empty book names');
     }
-    return checkWorldInfo(chat, maxContext, isDryRun, globalScanData, [...new Set(worldNames)]);
+    return checkWorldInfo(chat, maxContext, isDryRun, globalScanData, { additionalWorldNames: [...new Set(worldNames)] });
 }
 
-//MARK: checkWorldInfo
-`],
-  ];
-  for (const [before, after] of pairs) {
-    if (text.split(before).length !== 2) throw new Error('此酒馆版本的扫描器结构不匹配，未修改文件。');
-    text = text.replace(before, after);
+`;
+    const marker = '//MARK: checkWorldInfo\n';
+    if (text.split(marker).length !== 2) throw new Error('此酒馆版本的扫描器结构不匹配，未修改文件。');
+    text = text.replace(marker, wrapper + marker);
+  } else if (!text.includes('Array.isArray(worldNamesOverride?.additionalWorldNames)')) {
+    throw new Error('发现不完整的叠加书单补丁，未修改文件。');
   }
-  return { text: text.replaceAll('\n', eol), changed: true };
+  const next = text.replaceAll('\n', eol);
+  return { text: next, changed: next !== source };
 }
 
 async function findRoot() {
@@ -59,7 +96,7 @@ async function main() {
   const target = join(rootArg ? resolve(rootArg) : await findRoot(), 'public/scripts/world-info.js');
   const before = await readFile(target, 'utf8');
   const result = patchWorldbookScanner(before);
-  if (!result.changed) { console.log('专用世界书扫描接口已安装，无需修改。'); return; }
+  if (!result.changed) { console.log('专用及叠加世界书扫描接口已安装，无需修改。'); return; }
   if (mode === '--check') { console.log('兼容检查通过；尚未修改文件。使用 --apply 安装。'); return; }
   // Back up before writing; refuse an update if another process changed the source meanwhile.
   const backup = `${target}.bbi-worldbooks-${Date.now()}.bak`;
