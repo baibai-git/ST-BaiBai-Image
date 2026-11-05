@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>柏宝绘正文美化兼容回归检查</title>
+<h1>正文美化兼容回归检查</h1>
+<ol id="results"></ol>
+<div id="fixture" hidden></div>
+<script type="module">
+  // 从仓库根目录启动 Vite，打开 /scripts/test-slot-anchors.html。
+  import { resolveSlotAnchors } from '../src/floor/slotAnchors.ts';
+  const fixture = document.querySelector('#fixture');
+  const results = document.querySelector('#results');
+  function check(condition, description) {
+    const row = document.createElement('li');
+    row.textContent = `${condition ? 'PASS' : 'FAIL'}: ${description}`;
+    results.appendChild(row);
+    if (!condition) throw new Error(description);
+  }
+  const slot = '<div data-bbi-slot=""></div>';
+
+  fixture.innerHTML = slot + slot;
+  const normal = [...fixture.children];
+  check(resolveSlotAnchors(fixture, 2).every((a, i) => a === normal[i]), '正常行内占位保持原位');
+  check(!fixture.querySelector('[data-bbi-fallback]'), '正常楼层不增加备用区');
+
+  fixture.innerHTML = '<iframe title="正文美化"></iframe>';
+  fixture.firstChild.srcdoc = slot + slot;
+  const recovered = resolveSlotAnchors(fixture, 2);
+  check(recovered.length === 2 && recovered.every(a => a.ownerDocument === document), 'iframe 内的两图在主文档补齐');
+  check(fixture.lastChild.matches('[data-bbi-fallback]'), '备用区位于美化正文之后');
+  check(resolveSlotAnchors(fixture, 2).every((a, i) => a === recovered[i]), '重复水合复用占位，不重复挂载');
+
+  const survivingSecondSlot = document.createElement('div');
+  survivingSecondSlot.setAttribute('data-bbi-slot', '');
+  fixture.prepend(survivingSecondSlot);
+  check(resolveSlotAnchors(fixture, 2).every((a, i) => a === recovered[i]), '部分占位丢失时整楼备用，避免第二张误配第一张');
+  check(!recovered.includes(survivingSecondSlot), '行内剩余占位不重复显示');
+
+  check(resolveSlotAnchors(fixture, 3).length === 3, '增加标签时补齐第三个占位');
+  survivingSecondSlot.remove();
+  check(resolveSlotAnchors(fixture, 1)[0] === recovered[0] && !recovered[1].isConnected, '减少标签时保留首卡、清掉多余占位');
+
+  fixture.prepend(...normal);
+  check(resolveSlotAnchors(fixture, 2).every((a, i) => a === normal[i]), '行内占位恢复后回到原位');
+  check(!fixture.querySelector('[data-bbi-fallback]'), '恢复行内显示后移除备用区');
+
+  fixture.innerHTML = '<iframe title="正文美化"></iframe>';
+  resolveSlotAnchors(fixture, 2);
+  check(resolveSlotAnchors(fixture, 0).length === 0 && !fixture.querySelector('[data-bbi-fallback]'), '删除全部标签后清掉备用区');
+  const before = resolveSlotAnchors(fixture, 2);
+  fixture.innerHTML = '<iframe title="重新美化"></iframe>';
+  const after = resolveSlotAnchors(fixture, 2);
+  check(after.length === 2 && after.every(a => !before.includes(a)), '正文整体重渲染后可以重新补挂');
+  check(after.every(a => a.innerHTML === ''), '占位为空，不把提示词复制进 DOM');
+  document.body.dataset.result = 'passed';
+</script>

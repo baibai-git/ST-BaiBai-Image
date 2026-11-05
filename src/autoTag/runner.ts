@@ -1,4 +1,5 @@
 import { requestCompletion, requestViaMainApi } from '@/api/client';
+import { dshChatId, requestDshCompletion, type DshOperation } from '@/api/dsh';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   applyPositionedCharRefs,
@@ -7,7 +8,8 @@ import {
 } from '@/autoTag/charAnchors';
 import { prepareTargetText } from '@/autoTag/clean';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
-import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
+import { autoTagLayoutSelection, autoTagProfile, buildAutoTagMessages, buildAutoTagFixedMessages } from '@/autoTag/prompt';
+import { layoutCandidates, recordLayoutRound, relaxLayoutSelection, prepareLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from '@/autoTag/layoutCooldown';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import {
@@ -39,11 +41,12 @@ import {
   serializeImageTag,
   stripImageTags,
 } from '@/st/imageTagRegex';
-import { getTagGenChannel, isCurrentChatExcluded, settings } from '@/state/settings';
+import { activeComfyPreset, getTagGenChannel, isCurrentChatExcluded, settings } from '@/state/settings';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
 let bound = false;
+let layoutEpoch = 0;
 const scheduled = new Set<ReturnType<typeof setTimeout>>();
 const DIAGNOSTIC_PREFIX = '[BBI][AutoTagDebug]';
 
@@ -177,6 +180,21 @@ function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
   const context = getContext();
+  if (context && settings.defaultBackend === 'comfyui' && settings.manga.enabled) {
+    const chatId = dshChatId(context), epoch = layoutEpoch, message = context.chat[floor];
+    const source = message?.mes, swipe = message?.swipe_id;
+    return withLayoutTurn(chatId, async () => {
+      const active = getContext();
+      if (epoch !== layoutEpoch || !active || dshChatId(active) !== chatId ||
+        active.chat[floor] !== message || message?.mes !== source || message?.swipe_id !== swipe) return;
+      await runForFloorNow(floor, opts);
+    });
+  }
+  return runForFloorNow(floor, opts);
+}
+
+async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<void> {
+  const context = getContext();
   diagnostic('runForFloor:enter', {
     floor,
     manual: Boolean(opts.manual),
@@ -272,6 +290,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     return;
   }
   const swipeId = activeSwipeId(message);
+  const dshIdentity = dshChatId(context);
   const identity = `${chatId}\u0000${floor}\u0000${swipeId ?? 'none'}\u0000${textHash(source)}`;
   // 手动是显式意图:即使同一正文自动流程已处理过(比如结论是无需插图)也照跑,
   // 但仍写入 processed,防止自动流程随后对同一正文重复请求。
@@ -311,6 +330,13 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       : settings.autoTag;
     // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一
     const profile = autoTagProfile();
+    const layoutSelection = autoTagLayoutSelection(context, profile);
+    if (layoutSelection) {
+      const needed = Math.max(1, promptOptions.minImages);
+      const count = () => new Set(Object.values(layoutCandidates(layoutSelection)).flat().map(layout => layout.id)).size;
+      while (count() < needed && relaxLayoutSelection(layoutSelection)) { /* release oldest rounds only */ }
+      if (count() < needed) throw new Error(`当前画布只有 ${count()} 个可用版式，无法满足 ${needed} 页同轮去重；请启用更多相容版式或降低最少图片数。`);
+    }
     const messages = await buildAutoTagMessages(
       context,
       floor,
@@ -320,8 +346,12 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       anchors.text,
       slot ? buildSlotTaskNote(rawSource, slot.seq) : '',
       profile,
+      layoutSelection,
     );
     const channel = getTagGenChannel();
+    const dshOn = settings.autoTag.dshSession === true;
+    if (dshOn && !channel) throw new Error('DSH 持久会话需要先为“生成 tag 使用”指派独立副 API 渠道。');
+    const dshOperation: DshOperation = {};
     // 失败重试:请求异常与「返回无法解析/校验不通过」都视为可重试的异常(后者常见于模型没遵守协议);
     // 中止信号立即收手,不消耗重试。parseImagePlan 对坏输出抛错,「无画面」则是正常返回空数组。
     // 解析/校验放进 validate 回调:不过则请求历史如实记为失败(而非「HTTP 拿到文本」的绿色成功),
@@ -329,6 +359,11 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
     let plan: ImagePlan | null = null;
     let lastError = '';
+    let selectedLayouts: string[] = [];
+    const recordAdoptedLayouts = () => {
+      const active = getContext();
+      if (layoutSelection && active && dshChatId(active) === dshIdentity) recordLayoutRound(active, selectedLayouts);
+    };
     for (let attempt = 0; attempt <= retries && !plan; attempt++) {
       if (controller.signal.aborted) {
         processed.delete(identity);
@@ -344,7 +379,10 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
             preparedTarget.segments,
             promptOptions.minImages,
             promptOptions.maxImages,
+            settings.defaultBackend !== 'comfyui' || activeComfyPreset().generateNegative === true,
+            !!layoutSelection && layoutSelection.released < layoutSelection.recent.length,
           );
+          if (layoutSelection && !candidate.layoutFallback) selectedLayouts = validateLayoutSelection(candidate, layoutSelection);
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
           // changes 白白消耗重试次数。NAI 关了自然语言时协议不要 nl,也就不验。
           if (
@@ -358,12 +396,20 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           parsed.plan = candidate;
         };
         // 有重试时给 source 带上第几次,历史里两条记录一眼看出是重试关系
-        const source = slot
+        const sourceBase = slot
           ? `重写提示词(第 ${floor} 楼 · 第 ${slot.seq + 1} 张${retries > 0 ? ` · 第 ${attempt + 1} 次` : ''})`
           : retries > 0
             ? `自动 tag(第 ${floor} 楼 · 第 ${attempt + 1} 次)`
             : `自动 tag(第 ${floor} 楼)`;
-        if (channel) {
+        const source = sourceBase + (layoutSelection?.released ? ` · 冷却放宽 ${layoutSelection.released} 轮` : '');
+        if (dshOn && channel) {
+          await requestDshCompletion(channel, messages, context, {
+            signal:controller.signal, source, validate,
+            operation:dshOperation, expectedChatId:dshIdentity,
+            protocolKey:settings.manga.enabled && profile.layout ? 'manga' : profile.layout ? 'moss-layout' : profile.naiCharPrompts ? 'nai-character' : settings.defaultBackend,
+            target:{floor,swipe_id:swipeId ?? null,revision:identity},
+          });
+        } else if (channel) {
           await requestCompletion(channel, messages, {
             signal: controller.signal,
             source,
@@ -380,13 +426,23 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           processed.delete(identity);
           return;
         }
-        plan = parsed.plan;
+        const candidate = parsed.plan;
+        if (candidate?.layoutFallback && layoutSelection) {
+          if (!relaxLayoutSelection(layoutSelection)) throw new Error('已无可解除的版式冷却记录');
+          console.info('[柏宝绘] 从最早记录解除版式冷却：', candidate.layoutFallback);
+          await prepareLayoutSelectionMessage(messages, layoutSelection);
+          dshOperation.pending = undefined;
+          attempt = -1; // A bounded new candidate tier, not another failed attempt or accepted round.
+          continue;
+        }
+        plan = candidate;
       } catch (error) {
         if (controller.signal.aborted) {
           processed.delete(identity);
           return;
         }
         lastError = error instanceof Error ? error.message : String(error);
+        if (layoutSelection) messages.push({ role: 'system', content: `上一轮未通过验收：${lastError}。请遵守本轮版式冷却白名单与同轮去重要求；只有全部候选均不适用且允许放宽时才请求 layout_fallback。` });
         console.warn(`[柏宝绘] 第 ${floor} 楼第 ${attempt + 1}/${retries + 1} 次生成 tag 失败`, error);
       }
     }
@@ -484,6 +540,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     }
     // 没有图片、没有角色变化、也没有旧楼层变化要清理时,保持原来的无写入早退。
     if (!plan.images.length && !floorOps.length && !previousDelta) {
+      recordAdoptedLayouts();
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '柏宝绘');
       else console.debug(`[柏宝绘] 第 ${floor} 楼无需插图`);
       return;
@@ -544,6 +601,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           },
     );
     if (result === 'saved') {
+      recordAdoptedLayouts();
       if (slot) {
         toastr.success(`已重写第 ${slot.seq + 1} 张的提示词，正在按新提示词出图`, '柏宝绘');
         return;
@@ -588,6 +646,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
 }
 
 function cancelAll(): void {
+  layoutEpoch++;
   diagnostic('cancelAll', { scheduled: scheduled.size, running: running.size });
   clearGeneration();
   for (const timer of scheduled) clearTimeout(timer);
@@ -705,4 +764,29 @@ export function bindAutoTagging(): void {
     diagnostic('CHAT_CHANGED', { args, currentChatId: getContext()?.getCurrentChatId?.() ?? '' });
     cancelAll();
   });
+}
+
+
+/** Manual controls update rules/session only; they never request another image plan. */
+export async function controlDshSession(action: 'sync_rules' | 'reset'): Promise<string> {
+  const context=getContext(), channel=getTagGenChannel();
+  if (!settings.autoTag.dshSession || !channel) throw new Error('请启用 DSH 持久会话并指派副 API 渠道。');
+  if (!context) throw new Error('酒馆尚未就绪。');
+  const dedicated=settings.autoTag.dshDedicated===true;
+  if (!dedicated && !context.getCurrentChatId()) throw new Error('请先打开一个酒馆聊天。');
+  const expectedChatId=context.getCurrentChatId() ? dshChatId(context) : undefined;
+  const profile=autoTagProfile();
+  let messages: Awaited<ReturnType<typeof buildAutoTagMessages>>=[];
+  if (action==='sync_rules') {
+    if (dedicated) messages=buildAutoTagFixedMessages(settings.autoTag,profile);
+    else {
+      const floor=context.chat.findLastIndex(message=>typeof message.mes==='string' && !!message.mes.trim());
+      if (floor<0) throw new Error('当前聊天还没有正文，请先发送一条消息。');
+      const anchors=resolveCharAnchors(charTagsBeforeFloor(floor),lockedCharTagNames());
+      messages=await buildAutoTagMessages(context,floor,settings.autoTag,readBookMemory(floor,context.chat[floor].mes,context.name1),undefined,anchors.text);
+    }
+  }
+  return requestDshCompletion(channel,messages,context,{action,expectedChatId,
+    protocolKey:settings.manga.enabled && profile.layout ? 'manga' : profile.layout ? 'moss-layout' : profile.naiCharPrompts ? 'nai-character' : settings.defaultBackend,
+    source:action==='reset'?'DSH 重建会话':'DSH 手动发送固定规范'});
 }

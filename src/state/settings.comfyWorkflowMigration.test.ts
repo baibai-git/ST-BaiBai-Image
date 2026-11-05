@@ -29,6 +29,14 @@ async function hydrateWithComfy(comfyui: Record<string, unknown> | undefined) {
 }
 
 describe('ComfyUI 工作流库迁移', () => {
+  it('取图默认使用 JPG', async () => {
+    const jpeg = await hydrateWithComfy({});
+    expect(jpeg.comfyui.imageFormat).toBe('jpeg');
+  });
+  it('可显式选择原始格式', async () => {
+    const original = await hydrateWithComfy({ imageFormat: 'original' });
+    expect(original.comfyui.imageFormat).toBe('original');
+  });
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal('toastr', { info: vi.fn(), success: vi.fn(), error: vi.fn() });
@@ -140,6 +148,7 @@ describe('ComfyUI 工作流库迁移', () => {
     const { simpleDefaults } = await import('@/backends/comfyTemplates');
     expect(effectiveComfyConn()).toEqual({
       url: 'http://example:8188',
+      imageFormat: 'jpeg',
       workflow: '{"2":{}}',
       // 存量预设没有 mode/simple 字段 → custom + 简易模式默认值
       mode: 'custom',
@@ -148,4 +157,17 @@ describe('ComfyUI 工作流库迁移', () => {
       landscapeSize: '1024×1024',
     });
   });
+});
+
+
+it('AI负面词按工作流保存，旧数据默认关闭，显式开关跨加载保留', async () => {
+  vi.resetModules();
+  vi.stubGlobal('toastr', { info: vi.fn(), success: vi.fn(), error: vi.fn() });
+  vi.stubGlobal('window', { addEventListener: vi.fn(), dispatchEvent: vi.fn() });
+  const state = await hydrateWithComfy({ workflows: [
+    { id: 'old', name: '旧工作流' }, { id: 'on', name: '开启', generateNegative: true }, { id: 'off', name: '关闭', generateNegative: false },
+  ], activeWorkflowId: 'on' });
+  expect(state.comfyui.workflows.map(p => p.generateNegative)).toEqual([false, true, false]);
+  const { newComfyWorkflow } = await import('@/state/settings');
+  expect(newComfyWorkflow().generateNegative).toBe(false);
 });

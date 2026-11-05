@@ -184,6 +184,36 @@ export async function getCheckWorldInfo(): Promise<CheckWorldInfoFn | null> {
   }
 }
 
+/** 独立书单入口：宿主兼容补丁直接复用原扫描器，不修改全局启用名单。 */
+export type CheckWorldInfoForBooksFn = (
+  chat: string[], maxContext: number, isDryRun: boolean, worldNames: string[],
+) => Promise<CheckWorldInfoResult>;
+
+export async function getCheckWorldInfoForBooks(): Promise<CheckWorldInfoForBooksFn | null> {
+  try {
+    const wiPath = '/scripts/world-info.js';
+    const mod: Record<string, unknown> = await import(/* @vite-ignore */ wiPath);
+    return typeof mod.checkWorldInfoForBooks === 'function'
+      ? mod.checkWorldInfoForBooks as CheckWorldInfoForBooksFn
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 叠加入口：同一次原生扫描中合并酒馆书单与专用书，支持跨书递归。 */
+export async function getCheckWorldInfoWithAdditionalBooks(): Promise<CheckWorldInfoForBooksFn | null> {
+  try {
+    const wiPath = '/scripts/world-info.js';
+    const mod: Record<string, unknown> = await import(/* @vite-ignore */ wiPath);
+    return typeof mod.checkWorldInfoWithAdditionalBooks === 'function'
+      ? mod.checkWorldInfoWithAdditionalBooks as CheckWorldInfoForBooksFn
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * ST-Prompt-Template(提示词模板插件)挂在 globalThis 的执行器接口(见其 exports.ts)。
  * 只用到 prepareContext + evalTemplate:前者备好含变量/世界书上下文的 env,

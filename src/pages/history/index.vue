@@ -6,6 +6,7 @@ import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import {
   clearHistory,
+  cacheHitRate,
   records,
   roughTokens,
   type HistoryRecord,
@@ -89,6 +90,12 @@ function tokenTitle(record: LlmRecord): string {
     : '上游返回的真实用量（usage）';
 }
 
+function cacheLabel(record: LlmRecord, compact = false): string {
+  const rate = cacheHitRate(record);
+  if (compact) return rate === null ? '缓存 —' : `缓存 ${rate.toFixed(1)}%`;
+  return rate === null ? '缓存命中率：未提供' : `缓存命中率 ${rate.toFixed(1)}%`;
+}
+
 /** 把一条记录摊成「按顺序的若干段」——展开区就是照这个顺序渲染的。 */
 function segments(record: HistoryRecord): Segment[] {
   if (record.kind === 'llm') {
@@ -123,6 +130,10 @@ function facts(record: HistoryRecord): string[] {
     if (record.completionTokens !== null) {
       out.push(`输出 ${record.tokensEstimated ? '≈' : ''}${record.completionTokens.toLocaleString()} token`);
     }
+    if (record.cacheReadTokens !== null) {
+      out.push(`缓存命中 ${record.cacheReadTokens.toLocaleString()} token`);
+    }
+    out.push(cacheLabel(record));
   } else {
     out.push(`种子 ${record.seed}`, record.size);
   }
@@ -138,6 +149,10 @@ function copyAll(record: HistoryRecord): void {
       ? `提示词 token：${tokenLabel(record)}`
       : '',
     record.error ? `错误：${record.error}` : '',
+    ...(record.kind === 'llm' ? [cacheLabel(record),
+      record.cacheReadTokens !== null ? `缓存命中 token：${record.cacheReadTokens}` : '',
+      record.completionTokens !== null ? `输出 token：${record.completionTokens}` : '',
+    ].filter(Boolean) : []),
   ].filter(Boolean);
   const body = segments(record).map(s => `--- ${s.label} ---\n${s.text}`);
   void copyText([...head, '', ...body].join('\n'), '记录已复制');
@@ -151,6 +166,8 @@ function copyAll(record: HistoryRecord): void {
       <span class="bbi-count" title="本次会话已记录的请求数">{{ records.length }}</span>
     </div>
     <hr class="bbi-rule" />
+
+    <p class="bbi-field-hint">缓存命中率 = 上游缓存读取 token ÷ 真实输入 token。未提供不等于 0%；当前流式与跟随主 API 路径不采集缓存数据，旧记录无法补算。</p>
 
     <div class="bbi-hist-bar">
       <div class="bbi-segmented-wrap">
@@ -194,6 +211,11 @@ function copyAll(record: HistoryRecord): void {
             >
               {{ tokenLabel(record) }}
             </span>
+            <span
+              v-if="record.kind === 'llm'"
+              class="bbi-hist-tok"
+              title="缓存读取 token ÷ 真实输入 token；仅展示上游返回的数据。未提供不等于 0%。"
+            >{{ cacheLabel(record, true) }}</span>
             <span class="bbi-hist-time">{{ time(record.startedAt) }}</span>
             <span class="bbi-prompt-state" :class="`is-${record.status}`">{{ statusLabel(record) }}</span>
           </span>

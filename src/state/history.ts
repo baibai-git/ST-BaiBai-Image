@@ -59,6 +59,8 @@ export interface LlmRecord extends BaseRecord {
   response: string;
   promptTokens: number | null;
   completionTokens: number | null;
+  /** 上游报告的缓存读取 token；未报告时为 null，不能当成零命中。 */
+  cacheReadTokens: number | null;
   /**
    * token 数是否为本地估算。
    * 真值只在「自建渠道 + 非流式」时拿得到(ST 代理原样透传上游 usage);
@@ -133,7 +135,7 @@ export function roughTokens(text: string): number {
 
 function truncateMessages(messages: ChatMsg[]): ChatMsg[] {
   if (!Array.isArray(messages)) return [];
-  return messages.map(m => ({ role: m.role, content: truncate(m.content) }));
+  return messages.map(m => ({ role: m.role, content: truncate(m.content + (m.images?.length ? `\n[附带 ${m.images.length} 张版式图片；图片数据不写入历史]` : '')) }));
 }
 
 /** 压入一条并维持封顶。新记录进头部,超出时从尾部(最旧)丢弃。 */
@@ -176,6 +178,7 @@ export function beginLlm(info: LlmBegin): number {
     response: '',
     promptTokens: null,
     completionTokens: null,
+    cacheReadTokens: null,
     tokensEstimated: false,
   });
   return id;
@@ -185,6 +188,7 @@ export interface LlmFinish {
   response: string;
   promptTokens: number | null;
   completionTokens: number | null;
+  cacheReadTokens?: number | null;
   tokensEstimated: boolean;
 }
 
@@ -196,16 +200,33 @@ export function finishLlm(id: number, info: LlmFinish): void {
   record.response = truncate(info.response);
   record.promptTokens = info.promptTokens;
   record.completionTokens = info.completionTokens;
+  record.cacheReadTokens = info.cacheReadTokens ?? null;
   record.tokensEstimated = info.tokensEstimated;
+}
+
+/** 只用上游真实输入与缓存数计算；估算、缺失、空输入和异常数据均不计算。 */
+export function cacheHitRate(record: Pick<LlmRecord, 'promptTokens' | 'cacheReadTokens' | 'tokensEstimated'>): number | null {
+  const { promptTokens: prompt, cacheReadTokens: cached } = record;
+  if (record.tokensEstimated || prompt === null || cached === null ||
+      !Number.isSafeInteger(prompt) || !Number.isSafeInteger(cached) ||
+      prompt <= 0 || cached < 0 || cached > prompt) return null;
+  return cached / prompt * 100;
 }
 
 /**
  * 请求失败或被取消。aborted 与 error 分开:前者是用户主动取消,不是故障,
  * UI 用中性色而非红色。
  */
-export function failLlm(id: number, message: string, aborted = false): void {
+export function failLlm(id: number, message: string, aborted = false, info?: LlmFinish): void {
   const record = find(id);
   if (record?.kind !== 'llm') return;
+  if (info) {
+    record.response = truncate(info.response);
+    record.promptTokens = info.promptTokens;
+    record.completionTokens = info.completionTokens;
+    record.cacheReadTokens = info.cacheReadTokens ?? null;
+    record.tokensEstimated = info.tokensEstimated;
+  }
   record.status = aborted ? 'aborted' : 'error';
   record.durationMs = Date.now() - record.startedAt;
   record.error = aborted ? '' : message;

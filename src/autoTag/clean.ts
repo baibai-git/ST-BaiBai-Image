@@ -1,8 +1,10 @@
 /**
- * 正文清洗工具(与柏宝书 timeTag.ts 的 stripCustomTags 完全同口径,改动需双端同步)。
+ * 正文清洗工具：自定义标签与柏宝书同口径；生图标签另按插件自己的识别规则清理。
  * 名单来自共享存储(settings.excludes.customStripTags),输入时已由 sanitizeTagName 消毒,
  * 这里只负责按标签名生成「整块删除」正则并执行。
  */
+
+import { imageTagRemovalRanges, stripImageTags } from '@/st/imageTagRegex';
 
 const RE_THINK_BLOCK = /<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi;
 const RE_START = /<bbs_start\b[^>]*>([\s\S]*?)<\/bbs_start>/gi;
@@ -62,12 +64,9 @@ function stripManagedTags(s: string): string {
 function clampToStoryBody(
   mes: string,
   tags: string[],
-  preserveImageTags: boolean,
   noiseReplacement = '',
 ): string {
-  const customTags = preserveImageTags
-    ? tags.filter(tag => tag.toLowerCase() !== 'bbi_image')
-    : tags;
+  const customTags = tags.filter(tag => tag.toLowerCase() !== 'bbi_image');
   let s = String(mes ?? '')
     .replace(RE_THINK_BLOCK, noiseReplacement)
     .replace(/<!--[\s\S]+?-->/g, noiseReplacement)
@@ -88,9 +87,9 @@ function clampToStoryBody(
     .trim();
 }
 
-/** 历史楼层与柏宝书 cleanBody 同口径；本插件的 bbi_image 必须保留供角色外貌续接。 */
+/** 仅清理发送副本：历史生图标签及其中的 Layout JSON 不回传，原文与图片锚点不变。 */
 export function cleanHistoryText(mes: string, tags: string[]): string {
-  return clampToStoryBody(mes, tags, true)
+  return clampToStoryBody(stripImageTags(mes), tags)
     .replace(RE_START, (_, value) => `(起始时间:${String(value).trim()})`)
     .replace(RE_END, (_, value) => `(结束时间:${String(value).trim()})`);
 }
@@ -184,11 +183,12 @@ function retainedLineText(source: string, line: SourceLineRange, ranges: Removal
 
 function targetRemovalRanges(source: string, tags: string[]): RemovalRange[] {
   const noise: RemovalRange[] = [
+    ...imageTagRemovalRanges(source),
     ...rangesForRegex(source, RE_THINK_BLOCK),
     ...rangesForRegex(source, /<!--[\s\S]+?-->/g),
     ...rangesForRegex(source, /<horae[\s\S]*?>[\s\S]*?<\/horae[\s\S]*?>/gi),
   ];
-  for (const tag of [...tags, 'bbs_items', 'bbs_vars']) {
+  for (const tag of [...tags.filter(tag => tag.toLowerCase() !== 'bbi_image'), 'bbs_items', 'bbs_vars']) {
     if (!tag) continue;
     for (const regex of blockStripRegexes(tag)) noise.push(...rangesForRegex(source, regex));
   }
@@ -232,6 +232,9 @@ export function prepareTargetText(mes: string, tags: string[]): PreparedTargetTe
   const segments = sourceLineRanges(source)
     .map(line => ({ sourceLine: line.index, text: retainedLineText(source, line, ranges) }))
     .filter(segment => !!segment.text)
+    // Container delimiters are not narrative anchors: inserting after an opening
+    // <summary>/<update> line would put the image inside hidden metadata.
+    .filter(segment => !/^(?:<\/?[a-z][\w:~-]*(?:\s[^<>]*?)?\s*\/?>\s*)+$/i.test(segment.text))
     .map((segment, index) => ({ id: `P${index + 1}`, ...segment }));
   return {
     promptText: segments.map(segment => `${segment.text} ⟦${segment.id}⟧`).join('\n\n'),

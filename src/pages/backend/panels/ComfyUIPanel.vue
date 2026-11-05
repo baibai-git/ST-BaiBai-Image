@@ -192,6 +192,13 @@ const modelOptions = computed(() => {
 const vaeOptions = computed(() => lists.value?.vaes ?? []);
 const clipOptions = computed(() => lists.value?.clips ?? []);
 const loraOptions = computed(() => lists.value?.loras ?? []);
+const loraEmptyText = computed(() => fetching.value ? '正在读取 LoRA 清单…'
+  : fetchError.value ? `读取失败：${fetchError.value}；可手动输入文件名`
+  : lists.value?.mode === 'server' ? '后端转发未提供 LoRA 清单；启用 ComfyUI 跨域直连后重试，或手动输入'
+  : '未找到 LoRA 文件，可手动输入文件名');
+function openLoraOptions() {
+  if (!loraOptions.value.length) void onFetchModels(true);
+}
 const samplerOptions = computed(() =>
   lists.value?.samplers.length ? lists.value.samplers : FALLBACK_SAMPLERS,
 );
@@ -370,6 +377,15 @@ function applyAssist() {
           />
         </div>
 
+        <div class="api-row">
+          <span class="bbi-field-label">取图格式</span>
+          <select v-model="settings.comfyui.imageFormat" class="bbi-select" aria-label="ComfyUI 取图格式">
+            <option value="jpeg">JPG 轻量传输</option>
+            <option value="original">原始格式</option>
+          </select>
+        </div>
+        <p class="bbi-field-hint">JPG 保持原尺寸、质量 92，不携带 PNG 工作流信息；电脑原图保留。需要浏览器直连，ComfyUI 启动参数加入 --enable-cors-header。取图串行，短暂失败只重试读取原任务。</p>
+
         <div class="conn-actions">
           <span v-if="inUse" class="conn-inuse"><Icon name="check" :size="13" /> 当前出图渠道</span>
           <button
@@ -485,6 +501,12 @@ function applyAssist() {
           <input v-model="active.naturalLanguage" type="checkbox" class="bbi-checkbox" />
         </label>
         <p class="bbi-field-hint wf-switch-hint">{{ nlHint }}</p>
+
+        <label class="bbi-switch-row">
+          <span class="bbi-field-label">AI 生成负面提示词</span>
+          <input v-model="active.generateNegative" type="checkbox" class="bbi-checkbox" aria-label="AI 生成负面提示词" />
+        </label>
+        <p class="bbi-field-hint wf-switch-hint">关闭时仅使用工作流固定负面词，AI 返回及旧卡片中的动态负面词均不参与生成；开启后还需模板或工作流支持负面输入。</p>
 
         <div class="bbi-num-row">
           <span class="bbi-field-label">竖屏尺寸(宽×高)</span>
@@ -607,6 +629,7 @@ function applyAssist() {
                 :aria-label="clip.label"
               />
             </div>
+            <p v-if="active.simple.template === 'moss'" class="bbi-field-hint">文本编码器类型：moss_image；VAE 请选择 Flux2 VAE。</p>
           </section>
 
           <section class="wf-group">
@@ -628,6 +651,9 @@ function applyAssist() {
                 :options="loraOptions"
                 placeholder="lora 文件名"
                 aria-label="LoRA 文件"
+                always-dropdown
+                :empty-text="loraEmptyText"
+                @open="openLoraOptions"
               />
               <input
                 class="bbi-input wf-lora-str"
@@ -671,7 +697,7 @@ function applyAssist() {
                 <span>Guidance</span>
                 <input class="bbi-input" type="number" v-model.number="active.simple.guidance" min="1" max="10" step="0.1" />
               </label>
-              <label class="wf-param" v-if="active.simple.template === 'anima'" title="ModelSamplingAuraFlow 的 shift">
+              <label class="wf-param" v-if="active.simple.template === 'anima' || active.simple.template === 'moss'" title="ModelSamplingAuraFlow 的 shift">
                 <span>Shift</span>
                 <input class="bbi-input" type="number" v-model.number="active.simple.shift" min="0" max="10" step="0.1" />
               </label>
@@ -702,7 +728,7 @@ function applyAssist() {
                 v-model="active.simple.negative"
                 :rows="2"
                 :max-rows="6"
-                placeholder="固定负面:通用负面词;AI 生成的动态负面追加在后"
+                :placeholder="active.generateNegative ? '固定负面:通用负面词;AI 生成的动态负面追加在后' : '固定负面:仅使用这里填写的负面词'"
               />
             </div>
           </section>
@@ -791,7 +817,7 @@ function applyAssist() {
           自然语言：{{ assistResult.nlMode === 'combined' ? '与正向 tag 共用输入' : '使用独立输入' }}
         </p>
         <p v-if="assistResult.hasNegative" class="workflow-detection">
-          已配置动态负面词；生成 tag 时会按画面输出补充负面 tag。
+          已配置负面输入；是否生成动态负面词由当前工作流的“AI 生成负面提示词”开关决定。
         </p>
 
         <footer class="bbi-modal-foot">

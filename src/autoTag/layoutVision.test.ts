@@ -1,0 +1,58 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { ChatMsg } from '@/api/client';
+import { mangaDefaults, buildMangaCatalog } from '@/manga/layouts';
+import { createLayoutSelection, layoutCandidates, prepareLayoutSelectionMessage, relaxLayoutSelection } from './layoutCooldown';
+import { regroupLayoutAtlasMessages } from '@/manga/atlas';
+vi.mock('@/manga/atlas',async importOriginal=>({...await importOriginal<typeof import('@/manga/atlas')>(),rasterizeLayoutAtlas:vi.fn(async(svg:string)=>'data:image/png;base64,'+btoa(svg.slice(0,40)))}));
+
+describe('dynamic visual layout candidates',()=>{
+  it('splits 21 layout candidates into 6 atlases in two user messages, with accurate local and global image indices',async()=>{
+    const manga={...mangaDefaults(),catalogMode:'image' as const,custom:Array.from({length:21},(_,i)=>({id:String(i+1),canvas:{width:100,height:200},portrait:[{position:'p',slots:{F:[-100,-50,100,50]}}]}))};
+    const selection=createLayoutSelection({chatMetadata:{}},manga,{portrait:{width:100,height:200},landscape:null},'portrait');
+    const messages:ChatMsg[]=[]; await prepareLayoutSelectionMessage(messages,selection);
+    const images=messages.filter(x=>x.images);
+    expect(images.map(x=>x.images!.length)).toEqual([4,2]);
+    expect(images[0].content).toContain('本消息第 4 张（总图 4）：portrait，layout ID 13、14、15、16');
+    expect(images[1].content).toContain('本消息第 1 张（总图 5）：portrait，layout ID 17、18、19、20');
+    expect(images[1].content).toContain('本消息第 2 张（总图 6）：portrait，layout ID 21');
+    const before=JSON.stringify(messages);
+    const combined=regroupLayoutAtlasMessages(messages,20).filter(message=>message.images);
+    expect(combined).toHaveLength(1);
+    expect(combined[0].images).toHaveLength(6);
+    expect(combined[0].content).toContain('本消息第 6 张（总图 6）：portrait，layout ID 21');
+    expect(JSON.stringify(messages)).toBe(before);
+    selection.visual=false; await prepareLayoutSelectionMessage(messages,selection);
+    expect(messages.some(x=>x.images)).toBe(false);
+  });
+  it('keeps the full atlas unchanged when cooldown changes, while updating only the whitelist',async()=>{
+    const manga={...mangaDefaults(),catalogMode:'image' as const,deleted:[],disabled:[],custom:['a','b','c','d','e','f'].map(id=>({id,canvas:{width:100,height:200},portrait:[{position:'panel-3',slots:{F:[-100,-50,100,50],S:[-80,-40,80,40]},slotNotes:{S:'same person'}}]}))};
+    const selection=createLayoutSelection({chatMetadata:{baibai_layout_rounds:[['a','b']]}},manga,{portrait:{width:100,height:200},landscape:null},'portrait');
+    const messages:ChatMsg[]=[{role:'system',content:'fixed',purpose:'spec'}];
+    await prepareLayoutSelectionMessage(messages,selection);
+    const imageMessage=messages.find(x=>x.images)!;
+    expect(imageMessage.role).toBe('user'); expect(imageMessage.purpose).toBeUndefined();
+    expect(imageMessage.images).toHaveLength(2); expect(imageMessage.content).toContain('a、b、c、d');
+    expect(imageMessage.content).toContain('same person');
+    expect(imageMessage.content).toContain('F 位置[');
+    expect(imageMessage.content).toContain('宽高比');
+    expect(imageMessage.content).toContain('面积');
+    expect(imageMessage.content).toContain('【会话版式选择规则】');
+    expect(imageMessage.content).toContain('"layout_fallback":"候选不适用的具体原因"');
+    const revision=imageMessage.atlasRevision;
+    const catalog=messages.find(x=>x.content.startsWith('【本轮版式选择范围】'))!.content;
+    expect(catalog).toContain('ID：c、d、e、f'); expect(catalog).not.toContain('槽位 F S'); expect(catalog).not.toContain('same person');
+    expect(catalog).not.toContain('只从');
+    expect(catalog).not.toContain('"images":[]');
+    expect(catalog).toContain('layout_fallback：允许');
+    expect(relaxLayoutSelection(selection)).toBe(true);
+    await prepareLayoutSelectionMessage(messages,selection);
+    expect(messages.filter(x=>x.images)).toHaveLength(1); expect(messages.find(x=>x.images)!.images).toHaveLength(2);
+    expect(messages.find(x=>x.images)!.atlasRevision).toBe(revision);
+    expect(messages.find(x=>x.images)!.content).toContain('a、b、c、d');
+    expect(messages.find(x=>x.content.startsWith('【本轮版式选择范围】'))!.content).toContain('layout_fallback：禁止');
+    selection.visual=false; await prepareLayoutSelectionMessage(messages,selection);
+    expect(messages.some(x=>x.images)).toBe(false);
+    expect(messages.find(x=>x.content.startsWith('【本轮版式选择范围】'))!.content).toContain('F 位置[');
+    expect(buildMangaCatalog(layoutCandidates(selection))).toContain('位置[');
+  });
+});

@@ -8,10 +8,11 @@ import { setNaiConcurrency } from '@/floor/genQueue';
 import { clearAllGen, pruneGenSlots } from '@/floor/genState';
 import { clearAllTagPlans } from '@/floor/tagPlanState';
 import { SlotRegistry } from '@/floor/registry';
+import { resolveSlotAnchors } from '@/floor/slotAnchors';
 import { checkSlotHealth, floorIdOf } from '@/floor/slotHealth';
 import { historyEntries, latestStaleEntry, promptHash, readStore } from '@/floor/storage';
 import { getContext, type STContext } from '@/st/context';
-import { BBI_SLOT_SELECTOR, parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
+import { parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
 import { settings } from '@/state/settings';
 
 /**
@@ -37,8 +38,8 @@ import { settings } from '@/state/settings';
  *
  * 相邻的柏宝书没这个毛病,不是因为它更结实,是因为它的宿主挂在 .mes_text **外面**
  * 当兄弟节点,`.html()`/`.empty()` 只清 innerHTML,碰不到兄弟。而本插件的卡片必须
- * 落在 tag 的行内位置(多 tag 楼层要按位置分别成图),搬不出去——同一条约束下
- * 当初也否掉了官方 extra.media 方案(architecture.md §6)。故自愈是位置约束下的唯一解。
+ * 正常情况下落在 tag 的行内位置；iframe 美化吞掉占位时整楼退回正文末尾，
+ * 按 tag 顺序显示，保持同一套槽位 key、生成状态与历史记录。
  */
 
 export const slotRegistry = new SlotRegistry();
@@ -140,19 +141,13 @@ export function hydrateMessage(messageId: number, ctx: STContext): void {
     // 来对账,运行态记录会永久留存,日后同 key 复现时被新卡片误认领。按 tag 数剪掉越界的。
     pruneGenSlots(chatId ?? '-', messageId, swipeId, tags.length);
 
+    const mesText = findMesText(messageId);
+    // tag 全部删除时也要清掉兼容显示区；不能让空区域留在聊天中。
+    const anchors = mesText ? resolveSlotAnchors(mesText, tags.length) : [];
     if (tags.length > 0) {
-      const mesText = findMesText(messageId);
       // 楼层不在 DOM(未渲染/群聊懒渲染):desired 留空,本楼旧记录被卸载,等下次渲染事件
       if (mesText) {
-        const anchors = [...mesText.querySelectorAll<HTMLElement>(BBI_SLOT_SELECTOR)];
-        if (anchors.length !== tags.length) {
-          console.warn(
-            `[柏宝绘] 楼层 #${messageId} 锚点 ${anchors.length} 个 ≠ 生图 tag ${tags.length} 个,按少者配对`,
-          );
-        }
-        const count = Math.min(anchors.length, tags.length);
-
-        for (let seq = 0; seq < count; seq++) {
+        for (let seq = 0; seq < tags.length; seq++) {
           const key = slotRegistry.key(chatId, messageId, swipeId, seq);
           // 从 extra 恢复:当前 tag 原文重算 hash 匹配同槽位历史 → ready(可翻页);
           // 无匹配但有旧提示词结果 → stale(DESIGN-FLOOR-UI.md §7.1)。

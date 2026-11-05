@@ -1,5 +1,5 @@
 import type { STContext, STMessage, WorldInfoEntry } from '@/st/context';
-import { getCheckWorldInfo, getContext, getEjsTemplate } from '@/st/context';
+import { getCheckWorldInfo, getCheckWorldInfoForBooks, getCheckWorldInfoWithAdditionalBooks, getContext, getEjsTemplate } from '@/st/context';
 import { isWorldInfoEntryExcluded, sortWorldInfoEntriesLikeST } from '@/autoTag/excludes';
 import { stripCustomTags } from '@/autoTag/clean';
 import { settings } from '@/state/settings';
@@ -73,6 +73,13 @@ function cleanScanText(mes: string): string {
 }
 
 /* ============ 世界书 ============ */
+
+class WorldInfoStyleConflictError extends Error {}
+
+/** Only explicitly named style switches are promoted; ordinary lore remains reference material. */
+function isStyleSwitch(entry: WorldInfoEntry): boolean {
+  return /画风\s*[-－—].*[(（]开关[)）]/u.test(entry.comment ?? '');
+}
 
 /** 把去空后的分段去重、join。世界书激活各来源统一收口于此(与柏宝书一致)。 */
 function joinWorldInfoChunks(chunks: string[]): string {
@@ -180,10 +187,20 @@ export async function fetchWorldInfo(
   // 变量时点代表楼:取本批**最后一个 target 楼**。EJS 里 getvar 据此读该楼的历史变量快照。
   const refFloor = targets.length ? targets[targets.length - 1] : undefined;
   try {
-    const check = await getCheckWorldInfo();
-    if (!check) return fetchWorldInfoViaPrompt(scanText, refFloor);
-
-    const res = await check(scanText, HUGE_WI_CONTEXT, true);
+    const dedicated = settings.worldBooks;
+    let res;
+    if (dedicated.enabled && (!dedicated.includeTavern || dedicated.names.length > 0)) {
+      if (!dedicated.names.length) return '';
+      const check = dedicated.includeTavern
+        ? await getCheckWorldInfoWithAdditionalBooks()
+        : await getCheckWorldInfoForBooks();
+      if (!check) throw new Error(`${dedicated.includeTavern ? '叠加' : '专用'}世界书扫描接口不可用，请安装配套兼容补丁并刷新酒馆。`);
+      res = await check(scanText, HUGE_WI_CONTEXT, true, [...dedicated.names]);
+    } else {
+      const check = await getCheckWorldInfo();
+      if (!check) return fetchWorldInfoViaPrompt(scanText, refFloor);
+      res = await check(scanText, HUGE_WI_CONTEXT, true);
+    }
     const activated = res?.allActivatedEntries;
     if (!activated) return '';
     // allActivatedEntries 可能是 Set<entry> 或 Map<key,entry>,统一取 values;
@@ -192,13 +209,25 @@ export async function fetchWorldInfo(
     const entries = sortWorldInfoEntriesLikeST(
       activated instanceof Map ? [...activated.values()] : [...activated],
     );
-    const chunks = await Promise.all(
+    const rendered = await Promise.all(
       entries
         .filter(e => e && !isWorldInfoEntryExcluded(e, settings.excludes))
-        .map(e => renderWorldInfoContent(typeof e.content === 'string' ? e.content : '', e, refFloor)),
+        .map(async entry => ({
+          entry,
+          text: (await renderWorldInfoContent(typeof entry.content === 'string' ? entry.content : '', entry, refFloor)).trim(),
+        })),
+    );
+    const styles = rendered.filter(({ entry, text }) => text && isStyleSwitch(entry));
+    if (styles.length > 1) {
+      throw new WorldInfoStyleConflictError(`多个画风开关同时激活：${styles.map(({ entry }) => entry.comment).join('、')}。请只启用一个；混合画风请使用单个混合画风条目。`);
+    }
+    const chunks = rendered.map(({ entry, text }) =>
+      text && isStyleSwitch(entry) ? `【本轮已激活画风开关：${entry.comment}】\n${text}` : text,
     );
     return joinWorldInfoChunks(chunks);
   } catch (e) {
+    // 独立模式不能偷偷回落到酒馆书单或无书生成，让调用方报告失败。
+    if (e instanceof WorldInfoStyleConflictError || settings.worldBooks.enabled) throw e;
     console.log('[柏宝绘] 世界书激活失败(降级为不带设定):', e);
     return '';
   }
@@ -248,12 +277,20 @@ export function fetchUserPersona(context: STContext): string {
 
 /* ============ 系统消息包装(与柏宝书 prompts.ts 的 build*System 文案一致) ============ */
 
-/** 把世界书设定包成独立 system 消息的内容(空设定时调用方应跳过) */
-export function buildWorldInfoSystem(worldInfo: string): string {
-  return `【世界设定(世界书激活的相关设定,只读参考)】
-务必与以下设定保持一致,不得编造与其矛盾的内容;但设定本身不是本轮发生的事,不要写进输出。
+/** 世界设定与场景描写参考；按正文选用，不把条目示例当成已发生剧情。 */
+export function buildWorldInfoSystem(worldInfo: string, protectForDsh = false): string {
+  const content = protectForDsh ? worldInfo.trim().replace(/<<<STB-\/?KEEP>>>/g, '') : worldInfo.trim();
+  const message = `【世界设定与场景描写参考(世界书激活条目)】
+以下条目可用于理解世界与角色，并按适用条件补充当前场景的材质、光影、环境和描写方式；只采用与目标正文及人物连续性相符的内容。
+条目中的示例、假设与写法说明不代表本轮已经发生的事件，不据此新增人物、动作或对白，也不把说明当成画面文字。
+原文明确事实、宿主输出协议、当前版式清单及规范中的格式、连续性与物理约束优先；将适用参考落实为对应画面描述，不整段复述世界书。
+画风来源单独核对：本轮明确指定的画风优先，其次是下方标记的「本轮已激活画风开关」，没有时使用规范的默认画风。已激活画风开关替换默认媒介；漫画 Layout 只约束分格、排版与字段，不强制二维。只有画风条目负责媒介、线条、上色和材质表现，普通世界书仍按参考资料处理。
+Layout 模式把选定画风落实到 summary.caption，并使人物、背景与材质描述相容；常规模式放在对应的画风描述位置。条目要求英文句子开头时，指画风描述的位置，不在宿主 JSON 外追加文本，也不覆盖事实、格式、槽位与物理约束。
 
-${worldInfo.trim()}`;
+${content}`;
+  // Pin only the post-activation/post-exclusion result. This remains a dynamic
+  // message; KEEP never forces inactive or deliberately excluded entries back in.
+  return protectForDsh ? `<<<STB-KEEP>>>\n${message}\n<<<STB-/KEEP>>>` : message;
 }
 
 /** 把角色卡描述包成独立 system 消息(有些卡人设写在角色描述而非世界书里,tag 生成也需据此理解角色)。 */

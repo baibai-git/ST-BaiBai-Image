@@ -4,6 +4,7 @@ import {
   beginImage,
   beginLlm,
   clearHistory,
+  cacheHitRate,
   failImage,
   failLlm,
   finishLlm,
@@ -32,6 +33,28 @@ function llm(source = 'test'): number {
 
 beforeEach(() => {
   resetHistory();
+});
+
+describe('cache usage', () => {
+  it('retains real cache counters and calculates an input-token ratio', () => {
+    const id = llm();
+    finishLlm(id, { response: 'ok', promptTokens: 1000, completionTokens: 20,
+      cacheReadTokens: 800, tokensEstimated: false });
+    const record = records[0] as LlmRecord;
+    expect(record.cacheReadTokens).toBe(800);
+    expect(cacheHitRate(record)).toBe(80);
+    expect(cacheHitRate({ ...record, cacheReadTokens: 0 })).toBe(0);
+  });
+  it('keeps unknown, zero-input and estimated usage distinct from a zero hit rate', () => {
+    const base = { promptTokens: 100, cacheReadTokens: null, tokensEstimated: false };
+    expect(cacheHitRate(base)).toBeNull();
+    expect(cacheHitRate({ ...base, cacheReadTokens: 80, tokensEstimated: true })).toBeNull();
+    expect(cacheHitRate({ ...base, cacheReadTokens: 0, promptTokens: 0 })).toBeNull();
+    expect(cacheHitRate({ ...base, cacheReadTokens: 101 })).toBeNull();
+    const id = llm();
+    finishLlm(id, { response: 'ok', promptTokens: 100, completionTokens: 5, tokensEstimated: false });
+    expect((records[0] as LlmRecord).cacheReadTokens).toBeNull();
+  });
 });
 
 describe('环形缓冲', () => {
@@ -220,3 +243,12 @@ describe('safeHistory', () => {
     expect(safeHistory(() => 42)).toBe(42);
   });
 });
+
+ it('retains a validation failure response and upstream usage using the existing history limit',()=> {
+  const id=llm();
+  failLlm(id,'bad JSON',false,{response:'x'.repeat(MAX_CONTENT+100),promptTokens:100,completionTokens:20,cacheReadTokens:80,tokensEstimated:false});
+  const record=records[0] as LlmRecord;
+  expect(record.status).toBe('error'); expect(record.error).toBe('bad JSON');
+  expect(record.response).toBe(truncate('x'.repeat(MAX_CONTENT+100)));
+  expect(record.promptTokens).toBe(100); expect(record.completionTokens).toBe(20); expect(record.cacheReadTokens).toBe(80);
+ });

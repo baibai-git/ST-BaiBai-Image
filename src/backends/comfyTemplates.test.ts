@@ -162,6 +162,36 @@ describe('buildSimpleWorkflow - anima', () => {
   });
 });
 
+describe('buildSimpleWorkflow - moss', () => {
+  const simple: ComfySimpleConfig = {
+    ...simpleDefaults('moss'),
+    model: 'moss_image_sft.safetensors',
+    vae: 'flux2-vae.safetensors',
+    clip1: 'qwen3.5_9b.safetensors',
+  };
+
+  it('MOSS 使用 moss_image 编码器和 Flux2 潜空间，正负面及 LoRA 接入同一采样链', () => {
+    const wf = buildSimpleWorkflow({...simple,loras:[{name:'style.safetensors',strength:.7}]}, {...VALUES,negative:'blurry'});
+    expect(node(wf,'2').inputs).toEqual({clip_name:'qwen3.5_9b.safetensors',type:'moss_image'});
+    expect(node(wf,'3').inputs.vae_name).toBe('flux2-vae.safetensors');
+    expect(node(wf,'7')).toEqual({class_type:'EmptyFlux2LatentImage',inputs:{width:VALUES.width,height:VALUES.height,batch_size:1}});
+    expect(node(wf,'6').inputs).toEqual({shift:5,model:['300',0]});
+    expect(node(wf,'4').inputs.clip).toEqual(['2',0]);
+    expect(node(wf,'5').inputs).toEqual({text:'blurry',clip:['2',0]});
+    expect(node(wf,'8').inputs).toMatchObject({steps:50,cfg:3,sampler_name:'euler',scheduler:'sgm_uniform',model:['6',0],positive:['4',0],negative:['5',0],latent_image:['7',0]});
+  });
+
+  it('MOSS 配置持久化后保留模板，仍按 VAE 与 Qwen3.5 逐项校验，不改变默认模板', () => {
+    expect(simpleDefaults().template).toBe('checkpoint');
+    expect(normalizeSimpleConfig(undefined).template).toBe('checkpoint');
+    expect(normalizeSimpleConfig(JSON.parse(JSON.stringify(simple)))).toEqual(simple);
+    expect(validateSimpleConfig({...simple,vae:''})).toContain('Flux2 VAE');
+    expect(validateSimpleConfig({...simple,clip1:''})).toContain('Qwen3.5-9B');
+    expect(validateSimpleConfig(simple)).toBeNull();
+    expect(templateSupportsNegative('moss')).toBe(true);
+  });
+});
+
 describe('buildSimpleWorkflow - 尺寸', () => {
   it('尺寸无效时报错(简易模式的画布节点是必建的,没有「工作流写死尺寸」的豁免)', () => {
     const simple = config({ model: 'm.safetensors' });

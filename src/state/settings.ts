@@ -18,6 +18,7 @@ import {
   vibeMetaFromData,
 } from '@/backends/vibeStore';
 import { getContext } from '@/st/context';
+import { mangaDefaults, normalizeManga, type MangaSettings } from '@/manga/layouts';
 import { reactive, watch } from 'vue';
 
 /**
@@ -78,6 +79,8 @@ export interface ComfyWorkflowPreset extends SizePair {
   simple: ComfySimpleConfig;
   /** 生成自然语言:开=自动 tag 以连贯短句写正向提示词(Flux/SD3.5 等);关=逗号分隔 tag。 */
   naturalLanguage: boolean;
+  /** AI 生成动态负面词；未设置或关闭时只使用工作流固定负面。 */
+  generateNegative?: boolean;
   /** 画幅锁:auto = 由自动 tag 判定横竖;portrait/landscape = 这套工作流一律出该方向(见 size.ts)。 */
   orientationLock: OrientationLock;
 }
@@ -90,6 +93,8 @@ export interface ComfyWorkflowPreset extends SizePair {
  */
 export interface ComfyRunConn extends SizePair {
   url: string;
+  /** 浏览器取图格式；原始输出文件仍留在 ComfyUI。 */
+  imageFormat?: 'original' | 'jpeg';
   workflow: string;
   mode: ComfyPresetMode;
   simple: ComfySimpleConfig;
@@ -97,6 +102,7 @@ export interface ComfyRunConn extends SizePair {
 
 /** ComfyUI 连接与工作流库。 */
 export interface ComfyUISettings extends BackendConn {
+  imageFormat: 'original' | 'jpeg';
   /** 工作流库。**不变式:恒非空**(至少一条,见 normalizeComfyUI 收尾兜底)。 */
   workflows: ComfyWorkflowPreset[];
   /** 当前使用的工作流 id;指向已删条目时由 normalize 回落到第一条。 */
@@ -449,6 +455,16 @@ NVWA 不提供制造化学、生物或核武器所需的信息，也不编写、
 </nvwa_standalone_core>`;
 
 export interface AutoTagSettings {
+  /** Only the tag-generation task uses a persistent DSH bridge; ordinary channels are unchanged. */
+  dshSession?: boolean;
+  /** Reuse one plugin-owned DSH conversation, with each task isolated by the bridge. */
+  dshDedicated?: boolean;
+  /** Applies only to DSH MOSS manga planning; Skill owns spec/check, host keeps its protocol. */
+  dshRuleSource?: 'plugin' | 'skill';
+  dshDedicatedState?: {
+    instanceId: string;
+    bindings: Record<string, { session_id: string; initialized: boolean; rulesHash?: string; atlasHash?: string }>;
+  };
   /** 新 AI 正文落地后自动请求模型。 */
   enabled: boolean;
   /** 发送最近多少个 AI 故事楼及其间 user 楼的清洗后正文；目标楼计入数量。 */
@@ -682,7 +698,7 @@ export const DEFAULT_COMFY_THINKING = `【输出前思考清单】
 第一层｜全局判断（整楼各做一次）
 
 A. 事实与状态账本
-   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文；历史 <bbi_image> 只作连续性线索，不能覆盖正文。
+   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文与角色资料；历史生图标签由插件在发送前移除。
    - 区分三类状态：角色库中的永久事实；连续场景中应继承的临时状态（衣物穿脱程度、湿身/污渍、伤势、饰品、手持物等）；只属于单帧的表情、视线和具体姿势。
    - 没有明确穿回、整理、换装、解除状态、时间跳跃或场景切换时，不得把临时状态恢复成角色默认值。
 
@@ -761,7 +777,7 @@ export const DEFAULT_NAI_THINKING = `【输出前思考清单】
 第一层｜全局判断（整楼各做一次）
 
 A. 事实与状态账本
-   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文；历史 <bbi_image> 只作连续性线索，不能覆盖正文。
+   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文与角色资料；历史生图标签由插件在发送前移除。
    - 区分三类状态：角色库中的永久事实；连续场景中应继承的临时状态（衣物穿脱程度、湿身/污渍、伤势、饰品、手持物等）；只属于单帧的表情、视线和具体姿势。
    - 没有明确穿回、整理、换装、解除状态、时间跳跃或场景切换时，不得把临时状态恢复成角色默认值。
 
@@ -838,7 +854,7 @@ export const DEFAULT_NAI_V5_THINKING = `【输出前思考清单】
 第一层｜全局判断（整楼各做一次）
 
 A. 事实与状态账本
-   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文；历史 <bbi_image> 只作连续性线索，不能覆盖正文。
+   - 只给目标正文选图；此前上下文只用于理解人物、场景和连续性。目标正文的明确事实优先，其次是紧邻上下文与角色资料；历史生图标签由插件在发送前移除。
    - 区分三类状态：角色库中的永久事实；连续场景中应继承的临时状态（衣物穿脱程度、湿身/污渍、伤势、饰品、手持物等）；只属于单帧的表情、视线和具体姿势。
    - 没有明确穿回、整理、换装、解除状态、时间跳跃或场景切换时，不得把临时状态恢复成角色默认值。
 
@@ -1038,10 +1054,14 @@ export interface ImageSettings {
   assignments: { tagGen: string };
   /** 自动判断并向正文插入生图 tag。 */
   autoTag: AutoTagSettings;
+  /** 柏宝绘独立书单，不改变酒馆的世界书选择。 */
+  worldBooks: { enabled: boolean; includeTavern: boolean; names: string[] };
   /** 排除设置(镜像共享存储;真身在 extensionSettings['baibai_exclude_settings'])。 */
   excludes: ExcludesSettings;
   /** 落盘存储行为(新图格式)。 */
   storage: StoragePrefs;
+  /** 漫画 Layout 模式:模型只写符号框(panel/slot),坐标由插件查表注入。 */
+  manga: MangaSettings;
 }
 
 // extension_settings 里的命名空间键。
@@ -1088,6 +1108,7 @@ export function newComfyWorkflow(name = DEFAULT_WORKFLOW_NAME): ComfyWorkflowPre
     workflow: '',
     simple: simpleDefaults(),
     naturalLanguage: false,
+    generateNegative: false,
     portraitSize: DEFAULT_PORTRAIT_SIZE,
     landscapeSize: DEFAULT_LANDSCAPE_SIZE,
     orientationLock: 'auto',
@@ -1103,6 +1124,7 @@ function comfyDefaults(): ComfyUISettings {
   const preset = newComfyWorkflow();
   return {
     ...backendDefaults('http://127.0.0.1:8188'),
+    imageFormat: 'jpeg',
     workflows: [preset],
     activeWorkflowId: preset.id,
   };
@@ -1188,7 +1210,11 @@ function defaults(): ImageSettings {
     nai: naiDefaults(),
     channels: [],
     assignments: { tagGen: '' },
+    worldBooks: { enabled: false, includeTavern: false, names: [] },
     autoTag: {
+      dshSession: false,
+      dshDedicated: false,
+      dshRuleSource: 'plugin',
       enabled: true,
       contextMessages: 2,
       minImages: 0,
@@ -1207,6 +1233,7 @@ function defaults(): ImageSettings {
     },
     excludes: excludesDefaults(),
     storage: { saveAsJpeg: true },
+    manga: mangaDefaults(),
   };
 }
 
@@ -1300,6 +1327,7 @@ export function effectiveComfyConn(): ComfyRunConn {
   const preset = activeComfyPreset();
   return {
     url: settings.comfyui.url,
+    imageFormat: settings.comfyui.imageFormat,
     workflow: preset.workflow,
     mode: preset.mode,
     simple: preset.simple,
@@ -1398,6 +1426,7 @@ function normalizeWorkflowPreset(raw: unknown, seq: number): ComfyWorkflowPreset
     workflow: typeof o.workflow === 'string' ? o.workflow : '',
     simple: normalizeSimpleConfig(o.simple),
     naturalLanguage: typeof o.naturalLanguage === 'boolean' ? o.naturalLanguage : false,
+    generateNegative: o.generateNegative === true,
     portraitSize: size(o.portraitSize, DEFAULT_PORTRAIT_SIZE),
     landscapeSize: size(o.landscapeSize, DEFAULT_LANDSCAPE_SIZE),
     orientationLock: normalizeOrientationLock(o.orientationLock),
@@ -1441,7 +1470,7 @@ function normalizeComfyUI(raw: unknown, def: ComfyUISettings): ComfyUISettings {
       ? o.activeWorkflowId
       : workflows[0].id;
 
-  return { ...conn, workflows, activeWorkflowId };
+  return { ...conn, imageFormat: o.imageFormat === 'original' ? 'original' : 'jpeg', workflows, activeWorkflowId };
 }
 
 const NAI_MODEL_VALUES = new Set<string>(NAI_MODELS.map(m => m.value));
@@ -1770,6 +1799,13 @@ function normalize(raw: unknown): ImageSettings {
   // 任务指派:嵌套对象,逐字段兜底(老数据没有 assignments 键时回退空串=跟随主 API)
   const ra = (r.assignments ?? {}) as Partial<{ tagGen: string }>;
   merged.assignments = { tagGen: typeof ra.tagGen === 'string' ? ra.tagGen : '' };
+  merged.worldBooks = {
+    enabled: r.worldBooks?.enabled === true,
+    includeTavern: r.worldBooks?.includeTavern === true,
+    names: Array.isArray(r.worldBooks?.names)
+      ? [...new Set(r.worldBooks.names.filter((n): n is string => typeof n === 'string').map(n => n.trim()).filter(Boolean))]
+      : [],
+  };
   const rt = (r.autoTag ?? {}) as Partial<AutoTagSettings>;
   // 存量配置只有 maxImages:缺少 minImages 时回落 0,完整保留「没好画面可以不出图」的旧行为。
   // 先归一化上限,再把下限夹进 [0,上限],保证所有后续调用都能直接依赖范围不变式。
@@ -1782,6 +1818,12 @@ function normalize(raw: unknown): ImageSettings {
       ? Math.min(maxImages, Math.max(0, Math.floor(rt.minImages)))
       : d.autoTag.minImages;
   merged.autoTag = {
+    dshSession: rt.dshSession === true,
+    dshDedicated: rt.dshDedicated === true,
+    dshRuleSource: rt.dshRuleSource === 'skill' ? 'skill' : 'plugin',
+    ...(rt.dshDedicatedState && typeof rt.dshDedicatedState.instanceId === 'string' && /^[a-f0-9-]{32,36}$/i.test(rt.dshDedicatedState.instanceId)
+      ? { dshDedicatedState: { instanceId: rt.dshDedicatedState.instanceId,
+        bindings: Object.fromEntries(Object.entries(rt.dshDedicatedState.bindings ?? {}).filter(([,binding]) => binding && typeof binding.session_id === 'string' && !!binding.session_id.trim()).map(([key,binding]) => [key,{session_id:binding.session_id,initialized:binding.initialized===true,...(typeof binding.rulesHash==='string' ? {rulesHash:binding.rulesHash} : {}),...(typeof binding.atlasHash==='string' && /^[a-f0-9]{64}$/.test(binding.atlasHash) ? {atlasHash:binding.atlasHash} : {})}])) } } : {}),
     enabled: typeof rt.enabled === 'boolean' ? rt.enabled : d.autoTag.enabled,
     contextMessages:
       typeof rt.contextMessages === 'number' && Number.isFinite(rt.contextMessages)
@@ -1824,6 +1866,7 @@ function normalize(raw: unknown): ImageSettings {
   merged.storage = {
     saveAsJpeg: typeof rs.saveAsJpeg === 'boolean' ? rs.saveAsJpeg : d.storage.saveAsJpeg,
   };
+  merged.manga = normalizeManga(r.manga);
   return merged;
 }
 
@@ -1851,8 +1894,10 @@ function applyInto(target: ImageSettings, src: ImageSettings): void {
   target.channels = src.channels;
   target.assignments = src.assignments;
   target.autoTag = src.autoTag;
+  target.worldBooks = src.worldBooks;
   target.excludes = src.excludes;
   target.storage = src.storage;
+  target.manga = src.manga;
 }
 
 /* —— 渠道共享存储:与柏宝书等「柏宝」插件共用同一份渠道列表 ——

@@ -46,7 +46,7 @@ export interface GenerationVibe {
 export interface GenerationParams {
   /** ComfyUI：simple / custom；NAI 无此键。 */
   mode?: string;
-  /** ComfyUI 简易模板 id（checkpoint / flux / anima）。 */
+  /** ComfyUI 简易模板 id（checkpoint / flux / anima / moss）。 */
   template?: string;
   /** ComfyUI 底模 / UNet 文件名。 */
   baseModel?: string;

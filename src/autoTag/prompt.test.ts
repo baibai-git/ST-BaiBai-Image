@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { autoTagProfile, buildAutoTagMessages, expandNlSections } from '@/autoTag/prompt';
+import * as promptContext from '@/autoTag/context';
+
+import { autoTagProfile, buildAutoTagMessages, buildAutoTagFixedMessages, expandNlSections, usesMossLayout } from '@/autoTag/prompt';
 import {
   activeComfyPreset,
   DEFAULT_NAI_V5_SPEC,
@@ -10,6 +12,8 @@ import {
   type AutoTagSettings,
 } from '@/state/settings';
 import type { STContext } from '@/st/context';
+import { applyMangaFrames, mangaDefaults } from '@/manga/layouts';
+import { createLayoutSelection } from '@/autoTag/layoutCooldown';
 
 /**
  * 提示词集:全部留空(= 回落内置默认),只把本用例关心的那几项覆盖掉。
@@ -58,6 +62,206 @@ function context(): STContext {
 }
 
 describe('auto tag prompt', () => {
+  it('builds only fixed rules for manual synchronization without any Tavern conversation',()=>{
+    const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
+    const fixed=buildAutoTagFixedMessages(options);
+    expect(fixed.length).toBeGreaterThan(0);
+    expect(fixed.every(message=>message.role==='system'&&!!message.purpose)).toBe(true);
+    expect(fixed.some(message=>message.purpose==='contract')).toBe(true);
+    expect(fixed.some(message=>message.content.includes('目标第一行'))).toBe(false);
+  });
+
+  it('keeps stable rules fixed and sends the current compatible layout geometry only in the dynamic catalog',async()=> {
+    const oldBackend=settings.defaultBackend,oldManga=settings.manga;
+    try {
+      settings.defaultBackend='comfyui';
+      settings.manga={...mangaDefaults(),enabled:true,spec:'MANGA_RULES',thinking:'MANGA_CHECK',selectionNotes:'LIVE_NOTES',custom:[
+        {id:'geometry-current',canvas:{width:1000,height:2000},portrait:[{position:'panel-2',slots:{F:[-1000,-500,1000,0]}}]},
+        {id:'wrong-size',canvas:{width:800,height:1200},portrait:[{position:'one',slots:{F:[-600,-400,600,400]}}]},
+      ]};
+      const ctx=context();
+      const selection=createLayoutSelection(ctx,settings.manga,{portrait:{width:1000,height:2000},landscape:null},'portrait');
+      const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
+      const messages=await buildAutoTagMessages(ctx,1,options,null,undefined,undefined,undefined,{layout:true,nl:false,naiCharPrompts:false,lockedSize:'portrait'},selection);
+      const fixed=messages.find(m=>m.purpose==='spec')!.content;
+      const dynamic=messages.find(m=>m.content.startsWith('【本轮版式选择范围】'))!;
+      expect(fixed).toContain('MANGA_RULES');
+      expect(fixed).not.toContain('【本轮候选版式空间目录】');
+      expect(fixed).not.toContain('LIVE_NOTES');
+      expect(dynamic.purpose).toBeUndefined();
+      expect(dynamic.content).toContain('- geometry-current｜1 格｜画布 1000×2000');
+      expect(dynamic.content).toContain('位置[0,0,50,100]');
+      expect(dynamic.content).toContain('LIVE_NOTES');
+      expect(dynamic.content).not.toContain('- wrong-size｜');
+      expect(messages.filter(m=>m.content.includes('【本轮候选版式空间目录】'))).toHaveLength(1);
+    } finally {settings.defaultBackend=oldBackend;settings.manga=oldManga;}
+  });
+  it('packs a two-page manga example into one outer images array', async()=> {
+    const oldBackend=settings.defaultBackend,oldManga=settings.manga;
+    try {
+      settings.defaultBackend='comfyui'; settings.manga={...mangaDefaults(),enabled:true};
+      const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
+      const messages=await buildAutoTagMessages(context(),1,options,null);
+      const contract=messages.find(m=>m.purpose==='contract')!.content;
+      const result=JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
+      expect(result.images).toHaveLength(2); expect(result.changes).toEqual([]);
+      const ids=new Set<string>();
+      for(const image of result.images) {
+        expect(image.images).toBeUndefined(); expect(image.changes).toBeUndefined();
+        const inner=JSON.parse(image.tag); ids.add(inner.layout);
+        expect(()=>applyMangaFrames(image.tag,settings.manga,{width:1088,height:1920})).not.toThrow();
+      }
+      expect(ids.size).toBe(2); expect(contract).toContain('changes 只在最外层汇总');
+    } finally {settings.defaultBackend=oldBackend;settings.manga=oldManga;}
+  });
+  it('协议示例只选启用版式，不引用已删除的 balanced_1，空清单时阻止请求',async()=>{
+    const oldBackend=settings.defaultBackend, oldManga=settings.manga;
+    const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts({jailbreak:'TEST_PREFIX'})};
+    try {
+      settings.defaultBackend='comfyui';
+      const deleted=(await import('@/manga/layouts')).builtinIds('portrait');
+      settings.manga={...mangaDefaults(),enabled:true,deleted,custom:[{id:'only_enabled',canvas:{width:1088,height:1920},portrait:[{position:'one',slots:{F:[-900,-500,900,500]}}]}]};
+      const messages=await buildAutoTagMessages(context(),1,options,null);
+      const contract=messages.find(m=>m.content.startsWith('你是严谨的'))!.content;
+      const example=JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
+      expect(JSON.parse(example.images[0].tag)).toMatchObject({layout:'only_enabled',items:[{panel:1,slot:'F'}]});
+      expect(contract).not.toContain('balanced_1');
+      settings.manga.custom=[];
+      await expect(buildAutoTagMessages(context(),1,options,null)).rejects.toThrow(/没有启用的版式/);
+    }finally{settings.defaultBackend=oldBackend;settings.manga=oldManga;}
+  });
+  it('漫画关闭时忽略漫画专用规范，开启后输出可编译的符号示例', async () => {
+    const oldBackend = settings.defaultBackend;
+    const oldManga = settings.manga;
+    const options: AutoTagSettings = {
+      enabled: true, contextMessages: 2, minImages: 0, maxImages: 3,
+      retryCount: 1, autoGenerate: true,
+      prompts: prompts({ jailbreak: 'TEST_PREFIX', comfySpec: '[BBI_FORMAT:MOSS_LAYOUT]\nREGULAR_RULES', comfyThinking: 'REGULAR_CHECK' }),
+    };
+    try {
+      settings.defaultBackend = 'comfyui';
+      settings.manga = { ...mangaDefaults(), spec: 'MANGA_RULES {{nl}}', thinking: 'MANGA_CHECK' };
+      const off = (await buildAutoTagMessages(context(), 1, options, null)).map(m => m.content).join('\n');
+      expect(off).toContain('REGULAR_RULES');
+      expect(off).toContain('REGULAR_CHECK');
+      expect(off).not.toContain('MANGA_RULES');
+      expect(off).not.toContain('MANGA_CHECK');
+      settings.manga.enabled = true;
+      const on = await buildAutoTagMessages(context(), 1, options, null);
+      expect(on.map(m => m.content).join('\n')).toContain('MANGA_CHECK');
+      expect(on.map(m => m.content).join('\n')).not.toContain('{{nl}}');
+      const contract = on.find(m => m.content.startsWith('你是严谨的'))!.content;
+      const sample = JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
+      const tag = sample.images[0].tag;
+      expect(JSON.parse(tag)).toMatchObject({ layout: 'balanced_1', items: [{ panel: 1, slot: 'C' }] });
+      expect(JSON.parse(applyMangaFrames(tag, settings.manga, { width: 1088, height: 1920 })).items[0].bbox).toHaveLength(4);
+    } finally {
+      settings.defaultBackend = oldBackend;
+      settings.manga = oldManga;
+    }
+  });
+  it('selects Layout only with the explicit marker and emits a matching nested JSON example', async () => {
+    const oldBackend = settings.defaultBackend;
+    const oldNl = activeComfyPreset().naturalLanguage;
+    const preset = activeComfyPreset();
+    try {
+      settings.defaultBackend = 'comfyui';
+      preset.naturalLanguage = true;
+      expect(usesMossLayout('Discuss Layout and tag fields.')).toBe(false);
+      const options: AutoTagSettings = {
+        enabled: true, contextMessages: 2, minImages: 0, maxImages: 3,
+        retryCount: 1, autoGenerate: true,
+        prompts: prompts({ jailbreak: 'TEST_PREFIX',
+          comfySpec: '[BBI_FORMAT:MOSS_LAYOUT]\nMOSS_RULES {{nl}}' }),
+      };
+      const messages = await buildAutoTagMessages(context(), 1, options, null);
+      const spec = messages.find(m => m.content.includes('MOSS_RULES'))!.content;
+      expect(spec).not.toContain('[BBI_FORMAT:MOSS_LAYOUT]');
+      expect(spec).not.toContain('{{nl}}');
+      expect(spec.trim()).toBe('MOSS_RULES');
+      const contract = messages.find(m => m.content.startsWith('你是严谨的'))!.content;
+      expect(contract).toContain('MOSS Layout 模式');
+      expect(contract).not.toContain('tag 是 danbooru 短 tag');
+      expect(contract).not.toContain('同一张图里这套外貌只写一遍');
+      expect(contract).toContain('跨格重现必须分别绑定可见身份锚点');
+      expect(contract).toContain('同页各格允许按原文推进动作');
+      const sample = JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
+      expect(sample.images[0].nl).toBe('');
+      const inner = JSON.parse(sample.images[0].tag);
+      expect(inner.bbox_format).toBe('yxyx');
+      expect(inner.bbox_coord_space).toBe('abs_centralized');
+      expect(inner.items[0].label).toBe('character');
+      expect(messages.some(m => m.content.includes('tag 为完整 Layout JSON 字符串，nl 留空'))).toBe(true);
+    } finally {
+      settings.defaultBackend = oldBackend;
+      preset.naturalLanguage = oldNl;
+    }
+  });
+
+  it('snapshots Layout mode and disables the ordinary nl profile without changing the preset toggle', () => {
+    const oldBackend = settings.defaultBackend;
+    const oldSpec = settings.autoTag.prompts.comfySpec;
+    const preset = activeComfyPreset();
+    const oldNl = preset.naturalLanguage;
+    try {
+      settings.defaultBackend = 'comfyui';
+      preset.naturalLanguage = true;
+      settings.autoTag.prompts.comfySpec = '[BBI_FORMAT:MOSS_LAYOUT]';
+      expect(autoTagProfile()).toMatchObject({ layout: true, nl: false, naiCharPrompts: false });
+      expect(preset.naturalLanguage).toBe(true);
+      settings.defaultBackend = 'nai';
+      expect(autoTagProfile().layout).toBeUndefined();
+    } finally {
+      settings.defaultBackend = oldBackend;
+      settings.autoTag.prompts.comfySpec = oldSpec;
+      preset.naturalLanguage = oldNl;
+    }
+  });
+
+  it('keeps backend rules in a stable prefix when activated world info changes', async () => {
+    const originalBackend = settings.defaultBackend;
+    settings.defaultBackend = 'comfyui';
+    const card = vi.spyOn(promptContext, 'fetchCharCard').mockReturnValue('CARD_MARKER');
+    const persona = vi.spyOn(promptContext, 'fetchUserPersona').mockReturnValue('PERSONA_MARKER');
+    const world = vi.spyOn(promptContext, 'fetchWorldInfo').mockResolvedValue('WORLD_A');
+    try {
+      const options: AutoTagSettings = {
+        enabled: true, contextMessages: 2, minImages: 0, maxImages: 3,
+        retryCount: 1, autoGenerate: true,
+        prompts: prompts({
+          jailbreak: 'PREFIX_MARKER', comfySpec: 'SPEC_MARKER',
+          comfyThinking: 'CHECK_MARKER',
+        }),
+      };
+      const first = await buildAutoTagMessages(context(), 1, options, null);
+      world.mockResolvedValue('WORLD_B');
+      const second = await buildAutoTagMessages(context(), 1, options, null);
+      expect(first.slice(0, 4)).toEqual(second.slice(0, 4));
+      expect(first.slice(0, 4).map(m => m.role)).toEqual(['system', 'system', 'system', 'system']);
+      expect(first.slice(0, 4).map(m => m.purpose)).toEqual(['prefix', 'spec', 'contract', 'check']);
+      expect(first.slice(4).every(m => m.purpose === undefined)).toBe(true);
+      expect(first[0].content).toBe('PREFIX_MARKER');
+      expect(first[1].content).toContain('SPEC_MARKER');
+      expect(first[2].content).toContain('你是严谨的剧情画面规划与生图提示词编写员');
+      expect(first[3].content).toContain('CHECK_MARKER');
+      expect(first[4].content).toContain('CARD_MARKER');
+      expect(first[5].content).toContain('PERSONA_MARKER');
+      expect(first[6].content).toContain('WORLD_A');
+      expect(second[6].content).toContain('WORLD_B');
+      expect(second[6].content).not.toContain('<<<STB-KEEP>>>');
+      const protectedRound = await buildAutoTagMessages(context(), 1, {...options,dshSession:true}, null);
+      const protectedWorld=protectedRound.find(message=>message.content.includes('WORLD_B'))!;
+      expect(protectedWorld.role).toBe('system');expect(protectedWorld.purpose).toBeUndefined();
+      expect(protectedWorld.content).toMatch(/^<<<STB-KEEP>>>[\s\S]*WORLD_B\n<<<STB-\/KEEP>>>$/);
+      expect(protectedRound.slice(0,4)).toEqual(second.slice(0,4));
+      expect(first.at(-1)?.role).toBe('user');
+      expect(first.at(-1)?.content).toContain('目标第一行');
+    } finally {
+      card.mockRestore(); persona.mockRestore(); world.mockRestore();
+      settings.defaultBackend = originalBackend;
+    }
+  });
+
   it('marks only clean target paragraphs without pulling user messages before the earliest selected AI floor', async () => {
     const options: AutoTagSettings = {
       enabled: true,
@@ -146,7 +350,7 @@ describe('auto tag prompt', () => {
     expect(user.content).not.toContain('目标第一行 ⟦P1⟧');
   });
 
-  it('counts context by AI floors, keeps interleaved user floors, and preserves prior image tags', async () => {
+  it('counts context by AI floors and removes prior image payloads only from outgoing content', async () => {
     const ctx = context();
     ctx.chat = [
       { name: 'User', is_user: true, is_system: false, mes: '更早用户楼' },
@@ -163,7 +367,7 @@ describe('auto tag prompt', () => {
 尾部状态`,
       },
       { name: 'User', is_user: true, is_system: false, mes: '中间用户楼' },
-      { name: 'Char', is_user: false, is_system: false, mes: '当前目标楼' },
+      { name: 'Char', is_user: false, is_system: false, mes: '当前目标楼\n<bbi_image><tag>{"layout":"4","summary":{"caption":"OLD_TARGET_LAYOUT"}}</tag></bbi_image>', extra: { bbiImage: { retained: true } } },
     ];
     const options: AutoTagSettings = {
       enabled: true,
@@ -175,6 +379,7 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
 
+    const originalChat = JSON.stringify(ctx.chat);
     const oldTags = [...settings.excludes.customStripTags];
     const messages = await (async () => {
       settings.excludes.customStripTags = ['snow'];
@@ -187,7 +392,10 @@ describe('auto tag prompt', () => {
     const user = messages[messages.length - 1];
     expect(user.content).not.toContain('更早用户楼');
     expect(user.content).toContain('上一个 AI 楼');
-    expect(user.content).toContain('<bbi_image>1girl, long silver hair, red eyes<size>portrait</size></bbi_image>');
+    expect(user.content).not.toContain('<bbi_image>');
+    expect(user.content).not.toContain('1girl, long silver hair, red eyes');
+    expect(user.content).not.toContain('OLD_TARGET_LAYOUT');
+    expect(JSON.stringify(ctx.chat)).toBe(originalChat);
     expect(user.content).toContain('中间用户楼');
     expect(user.content).not.toContain('隐藏思维');
     expect(user.content).not.toContain('状态栏');
@@ -387,6 +595,7 @@ describe('auto tag prompt', () => {
       // negative 键);Comfy spec 无 NSFW 条款,思维链也不加。
       settings.defaultBackend = 'comfyui';
       let text = (await buildAutoTagMessages(context(), 1, options, null))
+        .slice(1) // 本测试只检查后端规则，独立核心提示不属于该断言范围。
         .map(m => m.content)
         .join('\n');
       expect(text).toContain('判定为同人时同一行定出最终身份 tag 词');
@@ -409,6 +618,7 @@ describe('auto tag prompt', () => {
       settings.defaultBackend = 'nai';
       settings.nai.model = 'nai-diffusion-4-5-full';
       text = (await buildAutoTagMessages(context(), 1, options, null))
+        .slice(1) // 本测试只检查后端规则，独立核心提示不属于该断言范围。
         .map(m => m.content)
         .join('\n');
       expect(text).toContain('判定为同人时同一行定出最终身份 tag 词');
@@ -425,6 +635,7 @@ describe('auto tag prompt', () => {
       // contentRule 明令禁止 negative tags,不该有 negative 条件自查。
       settings.nai.model = 'nai-diffusion-5-full';
       text = (await buildAutoTagMessages(context(), 1, options, null))
+        .slice(1) // 本测试只检查后端规则，独立核心提示不属于该断言范围。
         .map(m => m.content)
         .join('\n');
       expect(text).toContain('身份 tag 必须写进档案');
@@ -925,8 +1136,10 @@ describe('auto tag prompt', () => {
     // 工作流改由「当前预设」承载(见 settings.ts 工作流库);默认值恒有一条,直接改它
     const preset = activeComfyPreset();
     const oldWorkflow = preset.workflow;
+    const oldNegative = preset.generateNegative;
     try {
       settings.defaultBackend = 'comfyui';
+      preset.generateNegative = true;
       preset.workflow = JSON.stringify({
         '6': {
           class_type: 'CLIPTextEncode',
@@ -950,6 +1163,7 @@ describe('auto tag prompt', () => {
     } finally {
       settings.defaultBackend = oldBackend;
       preset.workflow = oldWorkflow;
+      preset.generateNegative = oldNegative;
     }
   });
 
@@ -967,8 +1181,10 @@ describe('auto tag prompt', () => {
     const preset = activeComfyPreset();
     const oldMode = preset.mode;
     const oldTemplate = preset.simple.template;
+    const oldNegative = preset.generateNegative;
     try {
       settings.defaultBackend = 'comfyui';
+      preset.generateNegative = true;
       preset.mode = 'simple';
       preset.simple.template = 'checkpoint';
       const messages = await buildAutoTagMessages(context(), 1, options, null);
@@ -981,6 +1197,7 @@ describe('auto tag prompt', () => {
       settings.defaultBackend = oldBackend;
       preset.mode = oldMode;
       preset.simple.template = oldTemplate;
+      preset.generateNegative = oldNegative;
     }
   });
 });
@@ -1217,5 +1434,25 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     } finally {
       state.restore();
     }
+  });
+});
+
+
+describe('ComfyUI AI负面提示词开关', () => {
+  it('工作流有负面占位符但关闭时，协议不要求负面字段且明确禁止AI补写', async () => {
+    const backend = settings.defaultBackend;
+    const preset = activeComfyPreset();
+    const saved = { mode: preset.mode, workflow: preset.workflow, generateNegative: preset.generateNegative };
+    try {
+      settings.defaultBackend = 'comfyui';
+      preset.mode = 'custom';
+      preset.workflow = JSON.stringify({ '6': { class_type: 'CLIPTextEncode', inputs: { text: '%prompt%', negative: '%negative_prompt%' } } });
+      preset.generateNegative = false;
+      const messages = await buildAutoTagMessages(context(), 1, { enabled: true, contextMessages: 2, minImages: 0, maxImages: 2, retryCount: 0, autoGenerate: false, prompts: prompts() }, null);
+      const contract = messages.find(message => message.purpose === 'contract')!.content;
+      expect(contract).not.toContain('"negative":"extra people');
+      expect(contract).not.toContain('negative 是本画面专用');
+      expect(contract).toContain('本次不生成动态负面提示词');
+    } finally { settings.defaultBackend = backend; Object.assign(preset, saved); }
   });
 });

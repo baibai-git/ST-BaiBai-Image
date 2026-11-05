@@ -7,7 +7,7 @@
  *
  * 模板按模型架构分族,不做「一个工作流打天下」——不同架构的加载节点、
  * latent 类型、负面词支持都不一样,硬揉在一起只会处处是特例。
- * 范围刻意收敛:checkpoint 系(SD1.5/SDXL/Pony/Illustrious)、Flux、Anima(Qwen 链路)。
+ * 范围刻意收敛:checkpoint 系(SD1.5/SDXL/Pony/Illustrious)、Flux、Anima 与 MOSS。
  * Chroma/视频系等不见实际使用的一律不做,新架构 = 在 COMFY_TEMPLATES 加一条数据 + 一个组装分支。
  *
  * 本模块刻意不 import settings/comfyui:settings.ts 要拿这里的类型与默认值工厂,
@@ -30,7 +30,7 @@ export type SimpleWorkflow = Record<string, SimpleWorkflowNode>;
 
 export type ComfyPresetMode = 'custom' | 'simple';
 
-export type ComfySimpleTemplateId = 'checkpoint' | 'flux' | 'anima';
+export type ComfySimpleTemplateId = 'checkpoint' | 'flux' | 'anima' | 'moss';
 
 export interface ComfyLoraEntry {
   /** LoRA 文件名(相对 models/loras)。 */
@@ -62,7 +62,7 @@ export interface ComfySimpleConfig {
   scheduler: string;
   /** flux 专用:FluxGuidance 强度;1 = 跳过该节点(直连编码输出)。 */
   guidance: number;
-  /** anima 专用:ModelSamplingAuraFlow 的 shift。 */
+  /** anima/moss:ModelSamplingAuraFlow 的 shift。 */
   shift: number;
   /** 固定正面,拼在 AI 生成内容之前。 */
   positive: string;
@@ -142,6 +142,20 @@ export const COMFY_TEMPLATES: Record<ComfySimpleTemplateId, ComfyTemplateMeta> =
     portraitSize: '1024×1024',
     landscapeSize: '1344×768',
     defaults: { steps: 28, cfg: 4, sampler: 'euler', scheduler: 'simple', guidance: 1, shift: 3 },
+  },
+  moss: {
+    id: 'moss',
+    label: 'MOSS-Image(Qwen3.5-9B)',
+    modelKind: 'unet',
+    modelLabel: '模型',
+    vaeRequired: true,
+    vaeLabel: 'Flux2 VAE',
+    vaePlaceholder: 'flux2-vae.safetensors',
+    clips: [{ key: 'clip1', label: 'Qwen3.5-9B' }],
+    supportsNegative: true,
+    portraitSize: '1664×2496',
+    landscapeSize: '2496×1664',
+    defaults: { steps: 50, cfg: 3, sampler: 'euler', scheduler: 'sgm_uniform', guidance: 1, shift: 5 },
   },
 };
 
@@ -429,12 +443,13 @@ function buildFluxWorkflow(simple: ComfySimpleConfig, values: SimpleGenValues): 
   return nodes;
 }
 
-function buildAnimaWorkflow(simple: ComfySimpleConfig, values: SimpleGenValues): SimpleWorkflow {
+function buildQwenWorkflow(simple: ComfySimpleConfig, values: SimpleGenValues): SimpleWorkflow {
+  const moss = simple.template === 'moss';
   const nodes: SimpleWorkflow = {};
   nodes['1'] = unetLoader(simple);
   nodes['2'] = {
     class_type: 'CLIPLoader',
-    inputs: { clip_name: simple.clip1.trim(), type: 'qwen_image' },
+    inputs: { clip_name: simple.clip1.trim(), type: moss ? 'moss_image' : 'qwen_image' },
   };
   nodes['3'] = { class_type: 'VAELoader', inputs: { vae_name: simple.vae.trim() } };
 
@@ -453,7 +468,7 @@ function buildAnimaWorkflow(simple: ComfySimpleConfig, values: SimpleGenValues):
     inputs: { shift: simple.shift, model: chain.model },
   };
   nodes['7'] = {
-    class_type: 'EmptySD3LatentImage',
+    class_type: moss ? 'EmptyFlux2LatentImage' : 'EmptySD3LatentImage',
     inputs: { width: values.width, height: values.height, batch_size: 1 },
   };
   nodes['8'] = {
@@ -491,7 +506,8 @@ export function buildSimpleWorkflow(simple: ComfySimpleConfig, values: SimpleGen
     case 'flux':
       return buildFluxWorkflow(simple, values);
     case 'anima':
-      return buildAnimaWorkflow(simple, values);
+    case 'moss':
+      return buildQwenWorkflow(simple, values);
     default:
       return buildCheckpointWorkflow(simple, values);
   }

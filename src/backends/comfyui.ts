@@ -32,6 +32,11 @@ const PLACEHOLDER_PATTERN = /%([a-z][a-z0-9_]*)%/g;
 const SERVER_BASE = '/api/sd/comfy';
 const POLL_INTERVAL_MS = 500;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const READ_RETRIES = 3;
+// Keep submission order separate from image transfers: don't wait for a rendered image to submit the next task.
+const submitSerial = serialQueue();
+// Native /generate hides its download phase, so reserve the transfer slot for that whole call.
+const transferSerial = serialQueue();
 
 /**
  * 生成随机种子（0 ≤ seed < 2^53，与 Python random.randint(0, 2**53 - 1) 同范围）。
@@ -159,15 +164,7 @@ async function responseError(response: Response, label: string): Promise<ComfyUI
   return new ComfyUIError(`${label} (${response.status})${text ? `：${text.slice(0, 500)}` : ''}`, response.status);
 }
 
-/**
- * 请求通道自动选择。策略:
- * 1. 浏览器直连优先(延迟最低,不占 ST 服务端);
- * 2. 仅当请求「根本没送达后端」的网络级失败(fetch TypeError:CORS 拦截/拒连/断网)时,
- *    回退到 ST 后端转发;
- * 3. HTTP 状态错误是服务端真实反馈,不重试——转发过去结果一样;
- * 4. 用户主动取消(AbortError)一律直接抛出。
- * 两个通道都通时「优先浏览器直连」天然成立:直连成功就不试转发,无需探测、无缓存过期问题。
- */
+/** 直连探测失败时才考虑转发；提交后的失败不能证明任务未入队，禁止跨通道重投。 */
 function isNetworkError(error: unknown): boolean {
   if (error instanceof DOMException && error.name === 'AbortError') return false;
   return error instanceof TypeError;
@@ -265,9 +262,71 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function fileFormat(filename: string, mime = ''): string {
+  if (mime === 'image/jpeg') return 'jpg';
+  if (mime.startsWith('image/')) return mime.slice(6).toLowerCase();
   const extension = filename.split('.').pop()?.toLowerCase();
   if (extension && /^[a-z0-9]+$/.test(extension)) return extension;
   return mime.split('/').pop()?.toLowerCase() || 'png';
+}
+
+function serialQueue() {
+  let tail: Promise<void> = Promise.resolve();
+  return async function<T>(signal: AbortSignal | undefined, task: () => Promise<T>): Promise<T> {
+    const previous = tail;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    tail = previous.then(() => gate);
+    // Cancellation while waiting must not let the next transfer overtake the active one.
+    let onAbort: (() => void) | undefined;
+    try {
+      signal?.throwIfAborted();
+      await (signal ? new Promise<void>((resolve, reject) => {
+        onAbort = () => reject(signal.reason ?? new DOMException('已取消', 'AbortError'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        previous.then(resolve, reject);
+      }) : previous);
+      signal?.throwIfAborted();
+      return await task();
+    } finally {
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      release();
+    }
+  };
+}
+
+function transientReadError(error: unknown): boolean {
+  return error instanceof TypeError || error instanceof SyntaxError
+    || error instanceof ComfyUIError && [408, 425, 429, 500, 502, 503, 504].includes(error.status ?? 0);
+}
+
+async function retryRead<T>(promptId: string, signal: AbortSignal | undefined, read: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
+    try { return await read(); }
+    catch (error) {
+      if (signal?.aborted || error instanceof DOMException && error.name === 'AbortError') throw error;
+      if (!transientReadError(error)) throw error;
+      if (attempt >= READ_RETRIES) {
+        throw new ComfyUIError(`取回 ComfyUI 结果失败；原任务 ${promptId} 未重新提交。${error instanceof Error ? error.message : String(error)}`);
+      }
+      await abortableDelay(750 * 2 ** attempt, signal);
+    }
+  }
+}
+
+async function readImage(conn: ComfyRunConn, file: ComfyOutputFile, promptId: string, signal?: AbortSignal): Promise<ComfyImageResult> {
+  const query = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder ?? '', type: file.type ?? 'output' });
+  if (conn.imageFormat === 'jpeg' && !/\.(gif|webm|mp4)$/i.test(file.filename)) query.set('preview', 'jpeg;92');
+  return transferSerial(signal, () => retryRead(promptId, signal, async () => {
+    const response = await fetch(`${endpoint(conn.url, 'view')}?${query}`, { signal });
+    if (!response.ok) throw await responseError(response, '读取 ComfyUI 输出图片失败');
+    const blob = await response.blob();
+    if (!blob.size) throw new TypeError('ComfyUI 返回空图片');
+    const format = fileFormat(file.filename, blob.type);
+    const filename = format === fileFormat(file.filename) ? file.filename : file.filename.replace(/\.[^.]+$/, `.${format}`);
+    const url = URL.createObjectURL(blob);
+    return { url, filename, format, revoke: () => URL.revokeObjectURL(url) };
+  }));
 }
 
 async function generateViaServer(
@@ -275,27 +334,29 @@ async function generateViaServer(
   workflow: ComfyWorkflow,
   signal?: AbortSignal,
 ): Promise<ComfyImageResult> {
-  const context = requireContext();
-  const response = await fetch(`${SERVER_BASE}/generate`, {
-    method: 'POST',
-    headers: context.getRequestHeaders(),
-    body: JSON.stringify({
-      url: conn.url.trim(),
-      prompt: JSON.stringify({ prompt: workflow }),
-    }),
-    signal,
-  });
-  if (!response.ok) throw await responseError(response, 'ComfyUI 生图失败');
+  return transferSerial(signal, async () => {
+    const context = requireContext();
+    const response = await fetch(`${SERVER_BASE}/generate`, {
+      method: 'POST',
+      headers: context.getRequestHeaders(),
+      body: JSON.stringify({
+        url: conn.url.trim(),
+        prompt: JSON.stringify({ prompt: workflow }),
+      }),
+      signal,
+    });
+    if (!response.ok) throw await responseError(response, 'ComfyUI 生图失败');
 
-  const data = (await response.json()) as { format?: unknown; data?: unknown };
-  if (typeof data.data !== 'string' || !data.data) throw new ComfyUIError('ST 后端未返回图片数据');
-  const format = typeof data.format === 'string' && data.format ? data.format.toLowerCase() : 'png';
-  return {
-    url: `data:image/${format === 'jpg' ? 'jpeg' : format};base64,${data.data}`,
-    filename: `comfy-${Date.now()}.${format}`,
-    format,
-    revoke() {},
-  };
+    const data = (await response.json()) as { format?: unknown; data?: unknown };
+    if (typeof data.data !== 'string' || !data.data) throw new ComfyUIError('ST 后端未返回图片数据');
+    const format = typeof data.format === 'string' && data.format ? data.format.toLowerCase() : 'png';
+    return {
+      url: `data:image/${format === 'jpg' ? 'jpeg' : format};base64,${data.data}`,
+      filename: `comfy-${Date.now()}.${format}`,
+      format,
+      revoke() {},
+    };
+  });
 }
 
 async function queueDirect(
@@ -435,10 +496,12 @@ async function pollDirectResult(
     // 一旦观察到自己在执行就不再查队列:位置信息已无意义,省掉每轮一次请求
     let watchQueue = !!hooks?.onQueue;
     while (!file) {
-      if (Date.now() - startedAt > POLL_TIMEOUT_MS) throw new ComfyUIError('等待 ComfyUI 结果超时（10 分钟）');
-      const historyResponse = await fetch(endpoint(conn.url, `history/${encodeURIComponent(promptId)}`), { signal });
-      if (!historyResponse.ok) throw await responseError(historyResponse, '读取 ComfyUI 任务状态失败');
-      const history = (await historyResponse.json()) as JsonObject;
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) throw new ComfyUIError(`等待 ComfyUI 结果超时（10 分钟）；原任务 ${promptId} 未重新提交。`);
+      const history = await retryRead(promptId, signal, async () => {
+        const historyResponse = await fetch(endpoint(conn.url, `history/${encodeURIComponent(promptId)}`), { signal });
+        if (!historyResponse.ok) throw await responseError(historyResponse, '读取 ComfyUI 任务状态失败');
+        return await historyResponse.json() as JsonObject;
+      });
       const item = history[promptId];
       const error = executionError(item);
       if (error) throw new ComfyUIError(error);
@@ -455,24 +518,30 @@ async function pollDirectResult(
       await abortableDelay(POLL_INTERVAL_MS, signal);
     }
 
-    const query = new URLSearchParams({
-      filename: file.filename,
-      subfolder: file.subfolder ?? '',
-      type: file.type ?? 'output',
-    });
-    const imageResponse = await fetch(`${endpoint(conn.url, 'view')}?${query}`, { signal });
-    if (!imageResponse.ok) throw await responseError(imageResponse, '读取 ComfyUI 输出图片失败');
-    const blob = await imageResponse.blob();
-    const url = URL.createObjectURL(blob);
-    return {
-      url,
-      filename: file.filename,
-      format: fileFormat(file.filename, blob.type),
-      revoke: () => URL.revokeObjectURL(url),
-    };
+    return await readImage(conn, file, promptId, signal);
   } finally {
     signal?.removeEventListener('abort', onAbort);
   }
+}
+
+/** Recover only a read-only endpoint on the configured ComfyUI origin/path. Never call /generate here. */
+async function recoverServerResult(conn: ComfyRunConn, error: unknown, signal?: AbortSignal, hooks?: ComfyProgressHooks): Promise<ComfyImageResult> {
+  if (!(error instanceof ComfyUIError) || signal?.aborted) throw error;
+  const base = new URL(conn.url);
+  const prefix = base.pathname.replace(/\/+$/, '');
+  for (const candidate of error.message.match(/https?:\/\/[^\s"'<>()[\]]+/g) ?? []) {
+    let url: URL;
+    try { url = new URL(candidate); } catch { continue; }
+    if (url.origin !== base.origin) continue;
+    const rest = url.pathname.slice(prefix.length);
+    if (!url.pathname.startsWith(prefix)) continue;
+    const history = /^\/history\/([a-zA-Z0-9_-]{1,128})$/.exec(rest);
+    if (history) return pollDirectResult(conn, history[1], signal, hooks);
+    if (rest === '/view' && url.searchParams.get('filename')) return readImage(conn, {
+      filename: url.searchParams.get('filename')!, subfolder: url.searchParams.get('subfolder') ?? '', type: url.searchParams.get('type') ?? 'output',
+    }, `file:${url.searchParams.get('filename')}`, signal);
+  }
+  throw error;
 }
 
 export async function generateComfyImage(
@@ -508,15 +577,23 @@ export async function generateComfyImage(
     workflow = renderWorkflowTemplate(conn.workflow, { ...values, ...size });
   }
 
-  // 通道自动选择:浏览器直连优先;仅当请求根本没送达 ComfyUI(网络级失败)时回退 ST 后端转发。
-  // 回退只发生在「排队」之前——拿到 prompt_id 后任务已入队,轮询阶段的任何失败都不重发,避免重复生图。
-  let queued = false;
-  try {
-    const promptId = await queueDirect(conn, workflow, signal);
-    queued = true;
-    return await pollDirectResult(conn, promptId, signal, hooks);
-  } catch (error) {
-    if (queued || signal?.aborted || !isNetworkError(error)) throw error;
-    return generateViaServer(conn, workflow, signal);
+  // Reserve FIFO order BEFORE the probe: later, faster probes must not overtake earlier cards.
+  const submitted = await submitSerial(signal, async () => {
+    // A failed POST does not prove it was not accepted; never include it in fallback handling.
+    try {
+      const response = await fetch(endpoint(conn.url, 'system_stats'), { signal });
+      if (!response.ok) throw await responseError(response, '浏览器连接 ComfyUI 失败');
+    } catch (error) {
+      if (signal?.aborted || !isNetworkError(error)) throw error;
+      if (conn.imageFormat === 'jpeg') throw new ComfyUIError('JPG 轻量取图需要浏览器直连 ComfyUI；请启用 --enable-cors-header 后测试连接。未通过转发重新提交。');
+      // Register native transfers in the same order, but don't hold the submission queue while they run.
+      return { server: generateViaServer(conn, workflow, signal) };
+    }
+    return { promptId: await queueDirect(conn, workflow, signal) };
+  });
+  if (submitted.server) {
+    try { return await submitted.server; }
+    catch (serverError) { return recoverServerResult(conn, serverError, signal, hooks); }
   }
+  return pollDirectResult(conn, submitted.promptId!, signal, hooks);
 }

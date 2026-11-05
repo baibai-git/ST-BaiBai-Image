@@ -25,10 +25,13 @@ const props = withDefaults(
     ariaLabel?: string;
     /** 过滤结果展示上限,避免超长列表卡顿 */
     maxShown?: number;
+    /** Keep an explicit picker available while its remote options are loading/unavailable. */
+    alwaysDropdown?: boolean;
+    emptyText?: string;
   }>(),
-  { placeholder: '', ariaLabel: undefined, maxShown: 200 },
+  { placeholder: '', ariaLabel: undefined, maxShown: 200, alwaysDropdown: false, emptyText: '无匹配项' },
 );
-const emit = defineEmits<{ (e: 'update:modelValue', v: string): void }>();
+const emit = defineEmits<{ (e: 'update:modelValue', v: string): void; (e: 'open'): void }>();
 
 const open = ref(false);
 /** 聚焦后用户输入的过滤词;聚焦/关闭时清空(清空=显示全部候选) */
@@ -51,7 +54,7 @@ const VIEWPORT_MARGIN = 8;
 
 function openMenu() {
   const el = trigger.value;
-  if (!el || open.value || !props.options.length) return;
+  if (!el || open.value || (!props.options.length && !props.alwaysDropdown)) return;
   const rect = el.getBoundingClientRect();
   // 估算菜单高度决定朝向:下方不够且上方更宽裕就向上翻
   const estimated = Math.min(MENU_MAX_HEIGHT, props.options.length * 30 + 10);
@@ -68,6 +71,7 @@ function openMenu() {
   };
   activeIndex.value = Math.max(0, filtered.value.indexOf(props.modelValue));
   open.value = true;
+  emit('open');
   document.addEventListener('keydown', onDocKeydown, true);
   // 菜单是视口级 fixed,不随内容滚动;滚动/缩放时直接关掉,比重算位置干净
   document.addEventListener('scroll', closeOnViewportChange, true);
@@ -90,6 +94,15 @@ function closeOnViewportChange() {
 function onFocus() {
   query.value = '';
   openMenu();
+}
+
+function toggleMenu() {
+  if (open.value) closeMenu();
+  else {
+    query.value = '';
+    trigger.value?.focus();
+    openMenu();
+  }
 }
 
 function onInput(event: Event) {
@@ -159,6 +172,7 @@ onBeforeUnmount(() => closeMenu());
     <input
       ref="trigger"
       class="bbi-input bbi-combo-input"
+      :class="{ 'has-toggle': alwaysDropdown }"
       type="text"
       :value="modelValue"
       :placeholder="placeholder"
@@ -170,9 +184,19 @@ onBeforeUnmount(() => closeMenu());
       @blur="closeMenu"
       @keydown="onTriggerKeydown"
     />
-    <!-- 下拉三角(装饰):仅在有候选时显示;pointer-events:none → 点击穿透照常聚焦展开 -->
+    <button
+      v-if="alwaysDropdown"
+      class="bbi-combo-toggle"
+      type="button"
+      :aria-label="`选择${ariaLabel || '选项'}`"
+      :aria-expanded="open"
+      @mousedown.prevent
+      @click="toggleMenu"
+    >
+      <Icon name="chevron" :class="{ 'is-open': open }" :size="12" />
+    </button>
     <Icon
-      v-if="options.length"
+      v-else-if="options.length"
       name="chevron"
       class="bbi-combo-caret"
       :class="{ 'is-open': open }"
@@ -187,7 +211,7 @@ onBeforeUnmount(() => closeMenu());
         :style="menuStyle"
         @mousedown.prevent="keepFocus"
       >
-        <li v-if="!filtered.length" class="bbi-combo-empty">无匹配项</li>
+        <li v-if="!filtered.length" class="bbi-combo-empty">{{ query ? '无匹配项' : emptyText }}</li>
         <li
           v-for="(option, i) in filtered"
           :key="option"
@@ -215,6 +239,9 @@ onBeforeUnmount(() => closeMenu());
   width: 100%;
   padding-right: 26px; /* 给右侧三角让位 */
 }
+.bbi-combo-input.has-toggle {
+  padding-right: 38px;
+}
 .bbi-combo-caret {
   position: absolute;
   top: 50%;
@@ -226,6 +253,21 @@ onBeforeUnmount(() => closeMenu());
 }
 .bbi-combo-caret.is-open {
   transform: translateY(-50%) rotate(180deg);
+}
+.bbi-combo-toggle {
+  position: absolute;
+  inset: 1px 1px 1px auto;
+  width: 34px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--bbi-radius, 8px);
+  background: transparent;
+  color: var(--bbi-ink-soft);
+  cursor: pointer;
+}
+.bbi-combo-toggle .is-open {
+  transform: rotate(180deg);
 }
 
 /* 菜单 Teleport 到 modalHost(scoped 样式在同 shadow root 内照常生效) */
