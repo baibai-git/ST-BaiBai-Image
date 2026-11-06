@@ -457,6 +457,8 @@ NVWA 不提供制造化学、生物或核武器所需的信息，也不编写、
 export interface AutoTagSettings {
   /** Only the tag-generation task uses a persistent DSH bridge; ordinary channels are unchanged. */
   dshSession?: boolean;
+  /** Send DSH request messages as user without changing their fixed/dynamic grouping. */
+  dshUserMessages?: boolean;
   /** Reuse one plugin-owned DSH conversation, with each task isolated by the bridge. */
   dshDedicated?: boolean;
   /** Applies only to DSH MOSS manga planning; Skill owns spec/check, host keeps its protocol. */
@@ -1214,6 +1216,7 @@ function defaults(): ImageSettings {
     autoTag: {
       dshSession: false,
       dshDedicated: false,
+      dshUserMessages: false,
       dshRuleSource: 'plugin',
       enabled: true,
       contextMessages: 2,
@@ -1820,6 +1823,7 @@ function normalize(raw: unknown): ImageSettings {
   merged.autoTag = {
     dshSession: rt.dshSession === true,
     dshDedicated: rt.dshDedicated === true,
+    dshUserMessages: rt.dshUserMessages === true,
     dshRuleSource: rt.dshRuleSource === 'skill' ? 'skill' : 'plugin',
     ...(rt.dshDedicatedState && typeof rt.dshDedicatedState.instanceId === 'string' && /^[a-f0-9-]{32,36}$/i.test(rt.dshDedicatedState.instanceId)
       ? { dshDedicatedState: { instanceId: rt.dshDedicatedState.instanceId,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildSimpleWorkflow,
+  comfySimpleParams,
   normalizeSimpleConfig,
   simpleDefaults,
   templateSupportsNegative,
@@ -216,15 +217,43 @@ describe('normalizeSimpleConfig', () => {
     expect(normalized.model).toBe('');
     expect(normalized.steps).toBe(28);
     expect(normalized.loras).toEqual([
-      { name: 'a.safetensors', strength: 0.7 },
-      { name: '', strength: 1 },
-      { name: '', strength: 1 },
+      { name: 'a.safetensors', strength: 0.7, enabled: true },
+      { name: '', strength: 1, enabled: true },
+      { name: '', strength: 1, enabled: true },
     ]);
   });
 
   it('合法 template 的采样参数按该模板默认值兜底', () => {
     expect(normalizeSimpleConfig({ template: 'flux' })).toEqual(simpleDefaults('flux'));
     expect(normalizeSimpleConfig({ template: 'anima' }).shift).toBe(3);
+  });
+});
+
+describe('LoRA enablement and order', () => {
+  it('round-trips disabled rows and order, and enables legacy rows by default', () => {
+    const raw={loras:[{name:'c.safetensors',strength:.4,enabled:false},{name:'a.safetensors',strength:1}]};
+    const normalized=normalizeSimpleConfig(raw);
+    expect(normalized.loras).toEqual([{name:'c.safetensors',strength:.4,enabled:false},{name:'a.safetensors',strength:1,enabled:true}]);
+    expect(normalizeSimpleConfig(JSON.parse(JSON.stringify(normalized)))).toEqual(normalized);
+  });
+  it.each(['checkpoint','flux','anima','moss'] as const)('loads only enabled rows in list order for %s', template => {
+    const simple={...simpleDefaults(template),model:'model.safetensors',vae:'vae.safetensors',clip1:'qwen.safetensors',clip2:'clip.safetensors',
+      loras:[{name:'legacy.safetensors',strength:1},{name:'disabled.safetensors',strength:.8,enabled:false},{name:'style.safetensors',strength:.4,enabled:true}]};
+    const before=JSON.stringify(simple);
+    const wf=buildSimpleWorkflow(simple,VALUES);
+    expect(node(wf,'300').inputs).toMatchObject({lora_name:'legacy.safetensors',strength_model:1,model:['1',0]});
+    expect(node(wf,'301').inputs).toMatchObject({lora_name:'style.safetensors',strength_model:.4,model:['300',0]});
+    expect(JSON.stringify(wf)).not.toContain('disabled.safetensors');
+    expect(comfySimpleParams(simple).loras).toBe('legacy.safetensors×1、style.safetensors×0.4');
+    expect(JSON.stringify(simple)).toBe(before);
+    const reordered={...simple,loras:[simple.loras[2],simple.loras[1],simple.loras[0]]};
+    const moved=buildSimpleWorkflow(reordered,VALUES);
+    expect(node(moved,'300').inputs.lora_name).toBe('style.safetensors');
+    expect(node(moved,'301').inputs).toMatchObject({lora_name:'legacy.safetensors',model:['300',0]});
+    expect(comfySimpleParams(reordered).loras).toBe('style.safetensors×0.4、legacy.safetensors×1');
+    const off={...simple,loras:simple.loras.map(lora=>({...lora,enabled:false}))};
+    expect(Object.values(buildSimpleWorkflow(off,VALUES)).some(n=>n.class_type.startsWith('LoraLoader'))).toBe(false);
+    expect(comfySimpleParams(off).loras).toBe('');
   });
 });
 

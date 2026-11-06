@@ -33,6 +33,8 @@ export type ComfyPresetMode = 'custom' | 'simple';
 export type ComfySimpleTemplateId = 'checkpoint' | 'flux' | 'anima' | 'moss';
 
 export interface ComfyLoraEntry {
+  /** Missing in old configs means enabled. Disabled entries retain their name and weight. */
+  enabled?: boolean;
   /** LoRA 文件名(相对 models/loras)。 */
   name: string;
   /** 强度;checkpoint 模板同时作用于 model 与 clip,Flux/Anima 只作用于 model。 */
@@ -217,6 +219,7 @@ export function normalizeSimpleConfig(raw: unknown): ComfySimpleConfig {
     clip2: asText(o.clip2),
     loras: Array.isArray(o.loras)
       ? o.loras.map(entry => ({
+          enabled: (entry as Partial<ComfyLoraEntry> | null)?.enabled !== false,
           name: asText((entry as Partial<ComfyLoraEntry> | null)?.name),
           strength: asNumber((entry as Partial<ComfyLoraEntry> | null)?.strength, 1),
         }))
@@ -283,7 +286,7 @@ export function composeNegative(simple: ComfySimpleConfig, values: SimpleGenValu
  */
 export function comfySimpleParams(simple: ComfySimpleConfig): GenerationParams {
   const loras = simple.loras
-    .filter(lora => lora.name.trim())
+    .filter(lora => lora.enabled !== false && lora.name.trim())
     .map(lora => `${lora.name.trim()}×${lora.strength}`)
     .join('、');
   return {
@@ -317,7 +320,7 @@ function applyLoras(
   let model = startModel;
   let clip = startClip;
   loras
-    .filter(lora => lora.name.trim())
+    .filter(lora => lora.enabled !== false && lora.name.trim())
     .forEach((lora, index) => {
       const id = `30${index}`;
       if (modelOnly) {

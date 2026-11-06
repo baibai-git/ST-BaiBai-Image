@@ -41,7 +41,7 @@ describe('快捷版式坐标与保存', () => {
     expect(editablePanel(panelRect(panels[0],canvas),canvas,panels[0]).layer).toBe(1);
     const settings={...mangaDefaults(),enabled:true,custom:[layout]};
     expect(normalizeManga(settings).custom[0].portrait?.map(p=>p.layer)).toEqual([1,0]);
-    const output=JSON.parse(applyMangaFrames(JSON.stringify({layout:'layers',items:[{panel:1,slot:'F',caption:'First.'},{panel:2,slot:'F',caption:'Second.'}]}),settings,canvas));
+    const output=JSON.parse(applyMangaFrames(JSON.stringify({layout:'layers',items:[{panel:1,slot:'F',label:'object',caption:'First.'},{panel:2,slot:'F',label:'object',caption:'Second.'}]}),settings,canvas));
     expect(output.items[0].caption).toContain('First.');
     expect(output.items[1].caption).toContain('Second.');
     expect(output.summary.caption).toContain('panel 1 is in front of panel 2');
@@ -67,7 +67,7 @@ describe('快捷版式坐标与保存', () => {
     expect(quadPoints(loaded,'T')[0]).toEqual([100,100]);
     const saved=saveEditedPanel(loaded,canvas,'one');
     const settings={...mangaDefaults(),enabled:true,custom:[parseCustomLayout(JSON.stringify({id:'quad',canvas,portrait:[saved]}))]};
-    const output=JSON.parse(applyMangaFrames(JSON.stringify({layout:'quad',items:[{panel:1,slot:'T',caption:'A text bubble.'}]}),settings,canvas));
+    const output=JSON.parse(applyMangaFrames(JSON.stringify({layout:'quad',items:[{panel:1,slot:'T',label:'text',caption:'A text bubble.',text:'Hello.'}]}),settings,canvas));
     expect(output.items[0].bbox).toEqual(saved.slots.T);
     expect(output.items[0].caption).toContain('slanted quadrilateral contour');
     expect(output.items[0].caption).toContain('A text bubble.');
@@ -97,7 +97,7 @@ describe('快捷版式坐标与保存', () => {
     expect(loaded.slots.S).toBeUndefined();
     expect(saveEditedPanel(loaded,canvas,'panel-1')).toEqual(saved);
     const settings = { ...mangaDefaults(), enabled:true, custom:[parseCustomLayout(JSON.stringify({id:'slots',canvas,portrait:[saved]}))] };
-    const tag = (slot:string) => JSON.stringify({layout:'slots',items:[{panel:1,slot}]});
+    const tag = (slot:string) => JSON.stringify({layout:'slots',items:[{panel:1,slot,label:'object',caption:'A room.'}]});
     expect(JSON.parse(applyMangaFrames(tag('T'),settings,canvas)).items[0].bbox).toEqual(saved.slots.T);
     expect(() => applyMangaFrames(tag('S'),settings,canvas)).toThrow(/没有 S 槽位/);
   });
@@ -119,7 +119,7 @@ describe('快捷版式坐标与保存', () => {
     expect(panelRect(panel, canvas)).toEqual(rect);
     const custom = parseCustomLayout(JSON.stringify({ id: 'square', canvas, portrait: [panel] }));
     const settings = normalizeManga({ ...mangaDefaults(), enabled: true, custom: [custom] });
-    const tag = JSON.stringify({ layout: 'square', items: [{ panel: 1, slot: 'F' }, { panel: 1, slot: 'X' }] });
+    const tag = JSON.stringify({ layout: 'square', items: [{ panel: 1, slot: 'F', label: 'object', caption: 'A room.' }, { panel: 1, slot: 'X', label: 'character', caption: 'An adult traveler.' }] });
     const compiled = JSON.parse(applyMangaFrames(tag, settings, canvas));
     expect(compiled.items[0].bbox).toEqual([-312, -412, 88, 188]);
     expect(compiled.items[1].bbox).toEqual([-402, -502, 178, 278]);

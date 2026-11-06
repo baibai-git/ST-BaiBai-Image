@@ -101,6 +101,8 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
   const operationKey = JSON.stringify([scopeKey,origin ?? null]);
   const operation=options.operation ?? {};
   let effectiveMessages=skillMode ? messages.filter(message=>message.purpose!=='spec' && message.purpose!=='check') : messages;
+  // Preserve purpose/order/attachments; an ambiguous retry still uses pending.messages verbatim.
+  if (settings.autoTag.dshUserMessages===true) effectiveMessages=effectiveMessages.map(message=>({...message,role:'user'}));
   let parts=splitDshMessages(effectiveMessages);
   const rulesHash=dedicated && parts.fixed.length ? await digest(JSON.stringify(parts.fixed)) : undefined;
   const read=():Binding|undefined => dedicated ? state!.bindings[key] : bindings(context)[key];

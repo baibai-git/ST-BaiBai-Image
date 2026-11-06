@@ -716,6 +716,11 @@ async function confirmUpdate() {
         </label>
         <template v-if="settings.autoTag.dshSession">
           <label class="bbi-switch-row">
+            <span class="bbi-field-label">以 USER 消息发送</span>
+            <input v-model="settings.autoTag.dshUserMessages" type="checkbox" class="bbi-checkbox" aria-label="以 USER 消息发送" />
+          </label>
+          <p class="bbi-field-hint">开启后，柏宝绘发往 DSH 的消息统一使用 user，保留内容、顺序和图片，便于在会话中查看资料。固定规范仍按原来的会话同步规则由桥接管理；普通 API 不受影响。默认关闭。</p>
+          <label class="bbi-switch-row">
             <span class="bbi-field-label">柏宝绘专属会话</span>
             <input v-model="settings.autoTag.dshDedicated" type="checkbox" class="bbi-checkbox" aria-label="柏宝绘专属会话" />
           </label>

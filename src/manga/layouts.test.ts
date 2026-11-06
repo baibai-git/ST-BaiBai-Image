@@ -37,7 +37,7 @@ describe('applyMangaFrames', () => {
     for (const slot of ['BL','BR']) {
       const manga=settingsWith();
       const layout=resolveLayouts(manga,'portrait').find(l=>l.id==='main_then_strip')!;
-      const out=JSON.parse(applyMangaFrames(JSON.stringify({layout:'main_then_strip',items:[{panel:'panel-2',slot,caption:'Dialogue.'}]}),manga,PORTRAIT));
+      const out=JSON.parse(applyMangaFrames(JSON.stringify({layout:'main_then_strip',items:[{panel:'panel-2',slot,label:'object',caption:'Dialogue.'}]}),manga,PORTRAIT));
       expect(out.items[0].bbox).toEqual(layout.panels[1].slots[slot]);
       expect(out.items[0].bbox).not.toEqual(layout.panels[1].slots.B);
       expect(layout.panels[1].slots.BL[3]).toBeLessThan(layout.panels[1].slots.BR[1]);
@@ -102,7 +102,7 @@ describe('applyMangaFrames', () => {
   it('删除 T 后只使用现有顶部字区，避开明确引用的槽位，不重建已删除区域',()=>{
     const panel={position:'p',slots:{F:[-900,-500,900,500],TL:[-800,-400,-600,-50],TR:[-800,50,-600,400]}};
     const manga=settingsWith({custom:[{id:'without_t',portrait:[panel]}]});
-    const tag=JSON.stringify({layout:'without_t',items:[{panel:1,slot:'T',caption:'A.'},{panel:1,slot:'TL',caption:'B.'}]});
+    const tag=JSON.stringify({layout:'without_t',items:[{panel:1,slot:'T',label:'object',caption:'A.'},{panel:1,slot:'TL',label:'object',caption:'B.'}]});
     const output=JSON.parse(applyMangaFrames(tag,manga,PORTRAIT));
     expect(output.items[0].bbox).toEqual(panel.slots.TR);
     expect(output.items[1].bbox).toEqual(panel.slots.TL);
@@ -115,7 +115,7 @@ describe('applyMangaFrames', () => {
     const builtin=resolveLayouts(settingsWith(),'portrait').find(layout=>layout.id==='two_then_large')!;
     const panels=builtin.panels.map((panel,i)=>({...panel,position:`panel-${i+1}`}));
     const settings=settingsWith({custom:[{id:'two_then_large',portrait:panels}]});
-    const compile=(panel:string,manga=settings)=>JSON.parse(applyMangaFrames(JSON.stringify({layout:'two_then_large',items:[{panel,slot:'F'}]}),manga,PORTRAIT));
+    const compile=(panel:string,manga=settings)=>JSON.parse(applyMangaFrames(JSON.stringify({layout:'two_then_large',items:[{panel,slot:'F',label:'object',caption:'A room.'}]}),manga,PORTRAIT));
     expect(compile('top-left').items[0].bbox).toEqual(panels[0].slots.F);
     expect(compile('top-right').items[0].bbox).toEqual(panels[1].slots.F);
     expect(compile('bottom-main').items[0].bbox).toEqual(panels[2].slots.F);
@@ -124,7 +124,7 @@ describe('applyMangaFrames', () => {
     expect(()=>compile('top-left',settingsWith({custom:[{id:'two_then_large',portrait:panels.slice(0,2)}]}))).toThrow(/没有第/);
   });
   it('拒绝尺寸不匹配及遗漏槽位，补全原生坐标声明', () => {
-    const tag = JSON.stringify({ layout: 'balanced_1', items: [{ panel: 1, slot: 'C' }] });
+    const tag = JSON.stringify({ layout: 'balanced_1', items: [{ panel: 1, slot: 'C', label: 'object', caption: 'A room.' }] });
     expect(() => applyMangaFrames(tag, settingsWith(), { width: 1080, height: 1920 })).toThrow(/画布/);
     expect(() => applyMangaFrames(tag, settingsWith(), null)).toThrow(/画布/);
     expect(() => applyMangaFrames(JSON.stringify({ layout: 'balanced_1', items: [{ panel: 1 }] }), settingsWith(), PORTRAIT)).toThrow(/槽位/);
@@ -158,7 +158,7 @@ describe('applyMangaFrames', () => {
   });
 
   it('横竖两套画布取不同坐标表', () => {
-    const tag = JSON.stringify({ layout: 'balanced_1', items: [{ label: 'character', panel: 1, slot: 'F' }] });
+    const tag = JSON.stringify({ layout: 'balanced_1', items: [{ label: 'character', panel: 1, slot: 'F', caption: 'An adult traveler.' }] });
     const portrait = JSON.parse(applyMangaFrames(tag, settingsWith(), PORTRAIT));
     const landscape = JSON.parse(applyMangaFrames(tag, settingsWith(), LANDSCAPE));
     expect(portrait.items[0].bbox).toEqual([-924, -504, 924, 504]);
@@ -166,7 +166,7 @@ describe('applyMangaFrames', () => {
   });
 
   it('按位置代号定位格,不必记格号', () => {
-    const tag = JSON.stringify({ layout: 'balanced_2', items: [{ label: 'object', panel: 'bottom', slot: 'F' }] });
+    const tag = JSON.stringify({ layout: 'balanced_2', items: [{ label: 'object', panel: 'bottom', slot: 'F', caption: 'A room.' }] });
     const out = JSON.parse(applyMangaFrames(tag, settingsWith(), PORTRAIT));
     expect(out.items[0].bbox).toEqual([12, -504, 924, 504]);
   });
@@ -183,7 +183,7 @@ describe('applyMangaFrames', () => {
   });
 
   it('X 槽按格数分档现算，并裁到画布内', () => {
-    const tag = JSON.stringify({ layout: 'main_then_two', items: [{ label: 'character', panel: 2, slot: 'X' }] });
+    const tag = JSON.stringify({ layout: 'main_then_two', items: [{ label: 'character', panel: 2, slot: 'X', caption: 'An adult traveler.' }] });
     // main_then_two 是 3 格 → 基准 72；bottom-left F=[204,-504,924,-12] 外扩后裁到 ±544/±960
     const out = JSON.parse(applyMangaFrames(tag, settingsWith(), PORTRAIT));
     expect(out.items[0].bbox).toEqual([132, -544, 960, 60]);
@@ -201,7 +201,7 @@ describe('applyMangaFrames', () => {
     expect(applyMangaFrames(plain, settingsWith({enabled:false}), PORTRAIT)).toBe(plain);
   });
   it('内区内容框仍注入整页外框说明，避免模型只看到 C 框',()=>{
-    const result=JSON.parse(applyMangaFrames(JSON.stringify({layout:'main_with_inset',items:[{panel:1,slot:'C'}]}),settingsWith(),PORTRAIT));
+    const result=JSON.parse(applyMangaFrames(JSON.stringify({layout:'main_with_inset',items:[{panel:1,slot:'C',label:'object',caption:'A room.'}]}),settingsWith(),PORTRAIT));
     expect(result.summary.caption).toContain('exactly 2 distinct comic panels');
     expect(result.summary.caption).toContain('inset panels');
   });
@@ -252,7 +252,7 @@ describe('applyMangaFrames', () => {
 
   it('非重叠版式不生成虚构的遮挡或嵌入关系', () => {
     const out = JSON.parse(applyMangaFrames(JSON.stringify({
-      layout:'balanced_2', items:[{panel:1,slot:'C'},{panel:2,slot:'C'}],
+      layout:'balanced_2', items:[{panel:1,slot:'C',label:'object',caption:'A room.'},{panel:2,slot:'C',label:'object',caption:'A room.'}],
     }),settingsWith(),PORTRAIT));
     expect(out.summary.caption).toContain('full-width upper');
     expect(out.summary.caption).toContain('full-width lower');
@@ -268,7 +268,7 @@ describe('applyMangaFrames', () => {
     }]}]});
     for (const slot of ['C','F']) {
       const out = JSON.parse(applyMangaFrames(JSON.stringify({
-        layout:'outline',items:[{panel:1,slot,caption:'A room.'},{panel:1,slot,caption:'A vase.'}],
+        layout:'outline',items:[{panel:1,slot,label:'object',caption:'A room.'},{panel:1,slot,label:'object',caption:'A vase.'}],
       }),manga,canvas));
       expect(out.summary.caption).toContain(`clockwise corners xy ${JSON.stringify(shape)}`);
       expect(JSON.stringify(out).split('clockwise corners')).toHaveLength(2);

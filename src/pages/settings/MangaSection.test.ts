@@ -139,6 +139,20 @@ describe('可视化编辑保存',()=>{
     expect(settings.manga).toEqual(before);
     close();
   });
+  it('批量尺寸在输入完成及直接应用时对齐16倍数，横竖同步缩放且可撤销',()=>{
+    const {state,close}=section();
+    const original=JSON.parse(JSON.stringify(settings.manga));
+    state.batchWidth.value=1080;state.batchHeight.value=1911;state.alignBatchCanvasInput();
+    expect([state.batchWidth.value,state.batchHeight.value]).toEqual([1088,1904]);
+    expect(settings.manga).toEqual(original);
+    state.batchWidth.value=1090;state.batchHeight.value=1922;state.resizeAllCanvases();
+    expect([state.batchWidth.value,state.batchHeight.value]).toEqual([1088,1920]);
+    expect(state.batchError.value).toBe('');
+    expect(resolveLayouts(settings.manga,'portrait').every(layout=>layout.canvas.width===1088 && layout.canvas.height===1920)).toBe(true);
+    expect(resolveLayouts(settings.manga,'landscape').every(layout=>layout.canvas.width===1920 && layout.canvas.height===1088)).toBe(true);
+    state.undoResize();expect(settings.manga).toEqual(original);
+    close();
+  });
   it('宽高输入自动匹配横竖方向，连续调整按当前坐标缩放，方形可用于两个方向',()=>{
     const {state,close}=section();
     state.batchWidth.value=2496;state.batchHeight.value=1664;state.resizeAllCanvases();
@@ -154,8 +168,8 @@ describe('可视化编辑保存',()=>{
   it('无效尺寸整体保持原设置；后续编辑使批量撤销失效',()=>{
     const {state,close}=section();
     const original=JSON.stringify(settings.manga);
-    state.batchWidth.value=1663;state.resizeAllCanvases();
-    expect(state.batchError.value).toContain('偶数');
+    state.batchWidth.value=NaN;state.resizeAllCanvases();
+    expect(state.batchError.value).toContain('画布');
     expect(JSON.stringify(settings.manga)).toBe(original);
     state.batchWidth.value=1664;state.resizeAllCanvases();
     expect(state.canUndoResize.value).toBe(true);

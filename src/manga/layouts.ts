@@ -1,3 +1,4 @@
+import { cleanMossFields, validateMossContent } from '@/manga/mossSchema';
 import { MANGA_TABLE } from '@/manga/table';
 import type { FrameBox, MangaLayoutDef, MangaOrientation, MangaPanel } from '@/manga/table';
 
@@ -264,6 +265,8 @@ export function applyMangaFrames(
   if (!Array.isArray(root.items) || !root.items.length) {
     throw new Error('漫画 Layout:items 必须是非空数组。');
   }
+  const cleaned = cleanMossFields(root, canvas);
+  if (cleaned.length) console.warn('[柏宝绘] MOSS 字段无损清理：', cleaned.join(', '));
   const items = root.items;
   const usedSubjects = new Set<string>();
   const textUsage = new Map<MangaPanel, Map<string,number>>();
@@ -277,7 +280,7 @@ export function applyMangaFrames(
       counts.set(slot,(counts.get(slot) ?? 0)+1); textUsage.set(panel,counts);
     }
   }
-  for (const rawItem of items) {
+  for (const [itemIndex, rawItem] of items.entries()) {
     if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) {
       throw new Error('漫画 Layout:每个 item 必须是对象。');
     }
@@ -305,6 +308,7 @@ export function applyMangaFrames(
           `漫画 Layout:版式 ${layout.id} 的 ${panel.position} 格没有 ${slot} 槽位(可用 ${slotLine(panel)})。`,
         );
       }
+      validateMossContent(item, itemIndex);
       item.bbox = box;
       if (item.label==='character' && ['S','L','R'].includes(slotType(resolvedSlot))) usedSubjects.add(`${layout.panels.indexOf(panel)}:${resolvedSlot}`);
       // Keep panel membership after removing symbolic fields. Inner boxes are

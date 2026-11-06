@@ -146,13 +146,18 @@ function loadSource(): void {
   selectPanel(doc.value.panels.length ? 0 : -1);
 }
 function resizeCanvas(): void {
+  alignCanvasInput();
   const size = normalizeCanvas({ width: canvasWidth.value, height: canvasHeight.value });
-  if (!size) { error.value = '画布宽高须为 64～8192 的偶数。'; return; }
+  if (!size) { error.value = '画布宽高须为 64～8192 的数值，输入完成后自动对齐到最近的 16 倍数。'; return; }
   edit(() => {
     const old = canvas.value;
     doc.value.panels = doc.value.panels.map(p => ({ ...fitRect({ x: p.x * size.width / old.width, y: p.y * size.height / old.height, width: p.width * size.width / old.width, height: p.height * size.height / old.height }, size), slots: p.slots, corners:p.corners, layer:p.layer, position:p.position, ...(p.slotNotes ? { slotNotes:p.slotNotes } : {}) }));
     Object.assign(doc.value, size);
   });
+}
+function alignCanvasInput(): void {
+  const align=(value: number): number => Number.isFinite(value) ? Math.max(64,Math.min(8192,Math.round(value/16)*16)) : value;
+  canvasWidth.value=align(canvasWidth.value);canvasHeight.value=align(canvasHeight.value);
 }
 function preset(width: number, height: number): void { canvasWidth.value = width; canvasHeight.value = height; resizeCanvas(); }
 function add(): void {
@@ -341,8 +346,8 @@ onMounted(() => {
         </div>
       </header>
       <div class="canvas-controls">
-        <label>画布宽 <input v-model.number="canvasWidth" aria-label="画布宽" type="number" min="64" max="8192" step="2" /></label>
-        <label>画布高 <input v-model.number="canvasHeight" aria-label="画布高" type="number" min="64" max="8192" step="2" /></label>
+        <label>画布宽 <input v-model.number="canvasWidth" aria-label="画布宽" type="number" min="64" max="8192" step="16" @change="alignCanvasInput" /></label>
+        <label>画布高 <input v-model.number="canvasHeight" aria-label="画布高" type="number" min="64" max="8192" step="16" @change="alignCanvasInput" /></label>
         <button type="button" @click="resizeCanvas">应用尺寸</button>
         <button type="button" @click="preset(1088,1920)">1088×1920</button><button type="button" @click="preset(1920,1088)">1920×1088</button><button type="button" @click="preset(1024,1024)">1024×1024</button>
       </div>

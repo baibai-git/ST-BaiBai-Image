@@ -6,6 +6,7 @@ import {
   simpleDefaults,
   validateSimpleConfig,
   type ComfyPresetMode,
+  type ComfyLoraEntry,
 } from '@/backends/comfyTemplates';
 import {
   FALLBACK_SAMPLERS,
@@ -33,7 +34,7 @@ import {
   ORIENTATION_LOCKS,
   settings,
 } from '@/state/settings';
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 
 const testing = ref(false);
 const configuring = ref(false);
@@ -238,12 +239,68 @@ function onTemplateChange(id: string) {
 }
 
 function addLora() {
-  active.value.simple.loras.push({ name: '', strength: 1 });
+  active.value.simple.loras.push({ name: '', strength: 1, enabled: true });
 }
 
 function removeLora(index: number) {
   active.value.simple.loras.splice(index, 1);
 }
+
+const allLorasEnabled = computed(() => active.value.simple.loras.length > 0 && active.value.simple.loras.every(lora => lora.enabled !== false));
+const someLorasEnabled = computed(() => active.value.simple.loras.some(lora => lora.enabled !== false));
+function toggleAllLoras(event: Event) {
+  for (const lora of active.value.simple.loras) lora.enabled = (event.target as HTMLInputElement).checked;
+}
+
+// Object identity keeps each input/dropdown attached to its LoRA after moving rows.
+const loraKeys = new WeakMap<ComfyLoraEntry, number>();
+let nextLoraKey = 0;
+function loraKey(lora: ComfyLoraEntry) {
+  if (!loraKeys.has(lora)) loraKeys.set(lora, ++nextLoraKey);
+  return loraKeys.get(lora)!;
+}
+function moveLora(from: number, to: number) {
+  const rows = active.value.simple.loras;
+  if (from < 0 || to < 0 || from >= rows.length || to >= rows.length || from === to) return;
+  rows.splice(to, 0, rows.splice(from, 1)[0]);
+}
+const draggingLora = shallowRef<ComfyLoraEntry | null>(null);
+let loraPointer: number | undefined;
+let loraDragGroup: Element | null = null;
+function startLoraDrag(event: PointerEvent, lora: ComfyLoraEntry) {
+  if (event.button !== 0) return;
+  endLoraDrag();
+  draggingLora.value = lora;
+  loraPointer = event.pointerId;
+  loraDragGroup = (event.currentTarget as HTMLElement).closest('.wf-group');
+  document.addEventListener('pointermove', dragLora, true);
+  document.addEventListener('pointerup', endLoraDrag, true);
+  document.addEventListener('pointercancel', endLoraDrag, true);
+  event.preventDefault();
+}
+function dragLora(event: PointerEvent) {
+  if (!draggingLora.value || event.pointerId !== loraPointer) return;
+  const from = active.value.simple.loras.indexOf(draggingLora.value);
+  if (from < 0) { endLoraDrag(); return; }
+  const rows = loraDragGroup?.querySelectorAll<HTMLElement>('.wf-lora-row');
+  if (!rows?.length) return;
+  let to = from, distance = Infinity;
+  rows.forEach((row, index) => {
+    const rect = row.getBoundingClientRect(), d = Math.abs(event.clientY - (rect.top + rect.height / 2));
+    if (d < distance) { to = index; distance = d; }
+  });
+  moveLora(from, to);
+}
+function endLoraDrag() {
+  draggingLora.value = null;
+  loraPointer = undefined;
+  loraDragGroup = null;
+  document.removeEventListener('pointermove', dragLora, true);
+  document.removeEventListener('pointerup', endLoraDrag, true);
+  document.removeEventListener('pointercancel', endLoraDrag, true);
+}
+watch(() => active.value.id, endLoraDrag);
+onBeforeUnmount(endLoraDrag);
 
 /** 简易模式状态药丸:与出图组装同一口径(validateSimpleConfig)。 */
 const simpleState = computed(() => {
@@ -635,6 +692,10 @@ function applyAssist() {
           <section class="wf-group">
             <div class="wf-group-head">
               <span class="bbi-field-label">LoRA</span>
+              <label class="wf-lora-all">
+                <input type="checkbox" class="bbi-checkbox" :checked="allLorasEnabled" :indeterminate="someLorasEnabled && !allLorasEnabled" :disabled="!active.simple.loras.length" @change="toggleAllLoras" />
+                全部启用
+              </label>
               <button
                 class="bbi-icon-btn wf-op"
                 type="button"
@@ -645,7 +706,13 @@ function applyAssist() {
                 <Icon name="plus" :size="14" />
               </button>
             </div>
-            <div v-for="(lora, index) in active.simple.loras" :key="index" class="wf-lora-row">
+            <div v-for="(lora, index) in active.simple.loras" :key="loraKey(lora)" class="wf-lora-row" :class="{ 'is-disabled': lora.enabled === false, 'is-dragging': draggingLora === lora }">
+              <button
+                type="button" class="bbi-icon-btn wf-lora-grip" title="拖动排序；方向键上下移动" aria-label="拖动 LoRA 排序，方向键上下移动"
+                @pointerdown="startLoraDrag($event, lora)"
+                @keydown.up.prevent="moveLora(index, index - 1)" @keydown.down.prevent="moveLora(index, index + 1)"
+              ><span aria-hidden="true">⠿</span></button>
+              <input type="checkbox" class="bbi-checkbox wf-lora-enabled" :checked="lora.enabled !== false" :aria-label="`启用 LoRA：${lora.name || '未命名'}`" @change="lora.enabled = ($event.target as HTMLInputElement).checked" />
               <BbiCombo
                 v-model="lora.name"
                 :options="loraOptions"
@@ -676,7 +743,7 @@ function applyAssist() {
               </button>
             </div>
             <p v-if="active.simple.loras.length" class="bbi-field-hint wf-lora-hint">
-              LoRA 的触发词要自己写进固定正面或 tag 里。
+              启用的 LoRA 按列表从上到下加载；拖动左侧手柄排序。关闭保留名称和权重。触发词要自己写进固定正面或 tag 里。
             </p>
           </section>
 
@@ -943,14 +1010,20 @@ function applyAssist() {
   white-space: nowrap;
   cursor: pointer;
 }
-/* LoRA 行:文件名吃满、强度定宽、删除收尾(与字段行同节奏) */
+/* Only the handle captures touch gestures; inputs and the page still scroll normally. */
+.wf-lora-all { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--bbi-ink-soft); }
 .wf-lora-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 76px 30px;
+  grid-template-columns: 24px 22px minmax(0, 1fr) 76px 30px;
   align-items: center;
   gap: 10px;
   padding: 3px 0;
 }
+.wf-lora-grip { width: 24px; min-width: 24px; height: 38px; padding: 0; cursor: grab; touch-action: none; user-select: none; font-size: 22px; }
+.wf-lora-grip:active { cursor: grabbing; }
+.wf-lora-row.is-dragging { background: var(--bbi-surface-soft, rgba(100, 140, 180, .12)); outline: 1px dashed currentColor; border-radius: 6px; }
+.wf-lora-row.is-disabled :deep(.bbi-combo-box), .wf-lora-row.is-disabled .wf-lora-str { opacity: .55; }
+.wf-lora-enabled { justify-self: center; }
 .wf-lora-hint {
   margin: 4px 0 2px;
 }
@@ -974,6 +1047,7 @@ function applyAssist() {
   gap: 8px;
 }
 @media (max-width: 640px) {
+  .wf-lora-row { grid-template-columns: 24px 22px minmax(0, 1fr) 60px 30px; gap: 5px; }
   .wf-params {
     grid-template-columns: repeat(2, 1fr);
   }

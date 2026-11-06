@@ -72,7 +72,7 @@ describe('backendStatus', () => {
     try {
       settings.manga = { ...mangaDefaults(), enabled: true };
       preset.portraitSize = '1088x1920';
-      const prompt = JSON.stringify({ layout: 'balanced_1', items: [{ panel: 1, slot: 'C' }] });
+      const prompt = JSON.stringify({ layout: 'balanced_1', items: [{ panel: 1, slot: 'C', label: 'object', caption: 'A quiet room.' }] });
       await generateImage({ prompt, nl: 'stale nl', seed: 1 });
       const sent = vi.mocked(generateComfyImage).mock.calls[0][1];
       expect(sent.nl).toBe('');

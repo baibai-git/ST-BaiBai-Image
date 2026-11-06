@@ -30,7 +30,57 @@ function server(run:(body:any)=>Response|Promise<Response>=body=>response(body))
     const body=JSON.parse(init.body);calls.push(body);return run(body);
   }));
 }
-beforeEach(()=>{settings.autoTag.dshDedicated=false;settings.autoTag.dshRuleSource='plugin';delete settings.autoTag.dshDedicatedState;vi.clearAllMocks();calls=[];imageLimit=4;clientEndpoints=[{id:'baibaohui',enabled:true,skillId:'moss-layout-spec'}];h.context=context();server();});
+beforeEach(()=>{settings.autoTag.dshDedicated=false;settings.autoTag.dshUserMessages=false;settings.autoTag.dshRuleSource='plugin';delete settings.autoTag.dshDedicatedState;vi.clearAllMocks();calls=[];imageLimit=4;clientEndpoints=[{id:'baibaohui',enabled:true,skillId:'moss-layout-spec'}];h.context=context();server();});
+
+describe('DSH user-message switch',()=>{
+  const endpoint={...channel,url:'http://127.0.0.1:43121/clients/baibaohui/v1'};
+  it('keeps original roles when disabled',async()=>{
+    await requestDshCompletion(endpoint,messages,h.context!);
+    expect(calls[0].messages.map((m:any)=>m.role)).toEqual(messages.map(m=>m.role));
+  });
+  it.each([[false,'plugin'],[true,'plugin'],[false,'skill'],[true,'skill']] as const)(
+    'sends user roles without changing fixed grouping, dynamic content or images: dedicated=%s source=%s',async(dedicated,source)=>{
+      settings.autoTag.dshDedicated=dedicated;settings.autoTag.dshRuleSource=source;settings.autoTag.dshUserMessages=true;
+      const batch:ChatMsg[]=[...messages,{role:'system',content:'<<<STB-KEEP>>>\nCURRENT SLOTS\n<<<STB-/KEEP>>>'},
+        {role:'assistant',content:'quoted previous context'},{role:'user',content:'atlas',images:['data:image/png;base64,AAAA']}];
+      const original=JSON.stringify(batch);
+      await requestDshCompletion(endpoint,batch,h.context!,{protocolKey:'manga'});
+      expect(calls.every(call=>call.messages.every((m:any)=>m.role==='user'))).toBe(true);
+      const types=source==='skill'?['prefix','contract']:['prefix','spec','contract','check'];
+      expect(payload(calls[0]).fixed_message_types).toEqual(types);
+      const generated=calls.find(call=>payload(call).action==='generate');
+      const contents=generated.messages.map((m:any)=>m.content);
+      expect(contents).toContain('world');expect(contents).toContain('target');
+      expect(contents).toContain('quoted previous context');
+      expect(contents).toContain('<<<STB-KEEP>>>\nCURRENT SLOTS\n<<<STB-/KEEP>>>');
+      expect(contents.at(source==='skill'?-2:-1)).toEqual([{type:'text',text:'atlas'},{type:'image_url',image_url:{url:'data:image/png;base64,AAAA',detail:'high'}}]);
+      expect(JSON.stringify(batch)).toBe(original);
+      await requestDshCompletion(endpoint,batch,h.context!,{protocolKey:'manga',action:'sync_rules'});
+      expect(payload(calls.at(-1)).action).toBe('sync_rules');
+      expect(calls.at(-1).messages.map((m:any)=>m.role)).toEqual(types.map(()=>'user'));
+      await requestDshCompletion(endpoint,[],h.context!,{protocolKey:'manga',action:'reset'});
+      expect(calls.at(-1).messages).toEqual([]);
+    });
+  it.each([false,true])('freezes roles for a retry even if the switch changes, initially=%s',async(enabled)=>{
+    settings.autoTag.dshUserMessages=enabled;const operation:DshOperation={};let count=0;
+    server(body=>{if(!count++) throw new TypeError('network');return response(body);});
+    await expect(requestDshCompletion(endpoint,messages,h.context!,{operation})).rejects.toThrow('network');
+    const first=structuredClone(calls[0]);settings.autoTag.dshUserMessages=!enabled;
+    await requestDshCompletion(endpoint,messages,h.context!,{operation});
+    expect(calls[1]).toEqual(first);
+  });
+  it.each([false,true])('keeps atlas reuse working with user messages, dedicated=%s',async(dedicated)=>{
+    settings.autoTag.dshDedicated=dedicated;settings.autoTag.dshUserMessages=true;
+    const batch=[...messages,...layoutAtlasMessages(['data:image/png;base64,AAAA'],['portrait'],4,'a'.repeat(64),'FULL CATALOG')];
+    await requestDshCompletion(endpoint,batch,h.context!);
+    await requestDshCompletion(endpoint,batch,h.context!);
+    const generations=calls.filter(call=>payload(call).action==='generate');
+    expect(generations).toHaveLength(2);
+    expect(generations[0].messages.some((m:any)=>Array.isArray(m.content))).toBe(true);
+    expect(generations[1].messages.some((m:any)=>Array.isArray(m.content))).toBe(false);
+    expect(generations[1].messages.some((m:any)=>typeof m.content==='string' && m.content.includes('FULL CATALOG'))).toBe(false);
+  });
+});
 
 describe('DSH Skill rule source',()=>{
   const alias={...channel,url:'http://127.0.0.1:43121/clients/baibaohui/v1'};

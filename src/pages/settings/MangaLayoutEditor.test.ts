@@ -29,6 +29,25 @@ function editor(props: Record<string,unknown> = {}) {
 }
 
 describe('版式编辑器 Ctrl 角点交互',()=>{
+  it('输入完成后尺寸对齐最近16倍数，应用和撤销保留框、形变与说明',()=>{
+    const {state,close}=editor();
+    state.changeSlotNote({target:{value:'整格描述'}});
+    const original=JSON.parse(JSON.stringify(state.doc.value));
+    state.canvasWidth.value=1080;state.canvasHeight.value=1911;state.alignCanvasInput();
+    expect([state.canvasWidth.value,state.canvasHeight.value]).toEqual([1088,1904]);
+    expect(state.doc.value).toEqual(original);
+    state.resizeCanvas();
+    expect([state.doc.value.width,state.doc.value.height]).toEqual([1088,1904]);
+    expect(state.doc.value.panels[0].x).toBe(Math.round(original.panels[0].x*1088/1024));
+    expect(state.doc.value.panels[0].slotNotes.F).toBe('整格描述');
+    expect(state.doc.value.panels[0].corners).toEqual(original.panels[0].corners);
+    state.undo();expect(state.doc.value).toEqual(original);
+    state.canvasWidth.value=72;state.canvasHeight.value=9000;state.alignCanvasInput();
+    expect([state.canvasWidth.value,state.canvasHeight.value]).toEqual([80,8192]);
+    state.canvasWidth.value=1090;state.canvasHeight.value=1922;state.resizeCanvas();
+    expect([state.doc.value.width,state.doc.value.height]).toEqual([1088,1920]);
+    close();
+  });
   it('编辑时允许改为新 ID，并阻止覆盖已有 ID',()=>{
     const {state,events,close}=editor({editingId:'original',existingIds:['original','occupied']});
     state.doc.value.id='occupied'; state.save();

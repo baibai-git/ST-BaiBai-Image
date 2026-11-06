@@ -81,7 +81,12 @@ async function previewAtlases(): Promise<void> {
 }
 const resizeBackup = ref<{ before: MangaCustomLayout[]; after: string }>();
 const canUndoResize = computed(() => resizeBackup.value?.after === JSON.stringify(settings.manga.custom));
+function alignBatchCanvasInput(): void {
+  const align=(value: number): number => Number.isFinite(value) ? Math.max(64,Math.min(8192,Math.round(value/16)*16)) : value;
+  batchWidth.value=align(batchWidth.value);batchHeight.value=align(batchHeight.value);
+}
 function resizeAllCanvases(): void {
+  alignBatchCanvasInput();
   batchError.value = '';
   try {
     const resized = resizeMangaCanvases(settings.manga, batchWidth.value, batchHeight.value);
@@ -391,8 +396,8 @@ function resetBuiltin(id: string): void {
     <div class="bbi-manga-editor bbi-manga-item">
       <strong>批量修改画布大小</strong>
       <div class="bbi-manga-item-actions">
-        <label>宽度 <input v-model.number="batchWidth" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="2" /></label>
-        <label>高度 <input v-model.number="batchHeight" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="2" /></label>
+        <label>宽度 <input v-model.number="batchWidth" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="16" @change="alignBatchCanvasInput" /></label>
+        <label>高度 <input v-model.number="batchHeight" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="16" @change="alignBatchCanvasInput" /></label>
         <button type="button" class="bbi-manga-btn" :disabled="quickOpen || !!editing || !rows.length" @click="resizeAllCanvases">一键应用到全部版式（{{ rows.length }}）</button>
         <button v-if="resizeBackup" type="button" class="bbi-manga-btn" :disabled="!canUndoResize" @click="undoResize">撤销本次调整</button>
       </div>

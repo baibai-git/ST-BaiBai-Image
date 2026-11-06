@@ -4,6 +4,13 @@ const h=vi.hoisted(()=>({context:null as Record<string,any>|null}));
 vi.mock('@/st/context',()=>({getContext:()=>h.context}));
 describe('DSH rule source persistence',()=>{
   beforeEach(()=>{vi.resetModules();vi.stubGlobal('toastr',{info:vi.fn(),success:vi.fn(),error:vi.fn()});vi.stubGlobal('window',{addEventListener:vi.fn(),dispatchEvent:vi.fn()});});
+  it.each([undefined,false,true,'true'])('persists the user-message switch with a safe default: %s',async(value)=>{
+    h.context={extensionSettings:{baibai_image:{autoTag:{dshUserMessages:value}}},saveSettingsDebounced:vi.fn()};
+    const {settings,hydrateSettings}=await import('./settings');await hydrateSettings();
+    expect(settings.autoTag.dshUserMessages).toBe(value===true);
+    settings.autoTag.dshUserMessages=value!==true;await nextTick();
+    expect(h.context!.extensionSettings.baibai_image.autoTag.dshUserMessages).toBe(value!==true);
+  });
   it.each([undefined,'invalid','skill'])('normalizes %s and preserves custom prompts when switching',async(source)=>{
     h.context={extensionSettings:{baibai_image:{autoTag:{dshRuleSource:source,prompts:{comfySpec:'my rules',comfyThinking:'my checks'}}}},saveSettingsDebounced:vi.fn()};
     const {settings,hydrateSettings}=await import('./settings');await hydrateSettings();
