@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import overlapCases from './frame-overlap-cases.json';
 import {
   applyMangaFrames,
+  isFullPagePanel,
   buildMangaSpec,
   mangaDefaults,
   normalizeManga,
@@ -405,5 +406,53 @@ describe('buildMangaSpec', () => {
     );
     const spec = buildMangaSpec(settingsWith({ custom: [added] }));
     expect(spec).toContain('my_two');
+  });
+});
+
+
+describe('版式独立框线说明开关',()=>{
+  const size={width:832,height:1216};
+  const panels:MangaPanel[]=[
+    {position:'main',layer:0,slots:{F:[-608,-416,608,416],S:[-500,-350,550,350]}},
+    {position:'detail',layer:1,slots:{F:[-540,100,-300,360],T:[-530,110,-470,350]}},
+  ];
+  const make=(options={})=>settingsWith({custom:[{id:'frame_test',canvas:size,...options,portrait:panels}]});
+  const input={summary:{canvas:'multi_panel',caption:'A color illustration.'},layout:'frame_test',items:[
+    {panel:1,slot:'S',label:'character',caption:'panel 1, A traveler holding a book.'},
+    {panel:2,slot:'F',label:'object',caption:'panel 2, A close view of the book.'},
+    {panel:2,slot:'T',label:'text',text:'你好。',caption:'Printed Chinese lettering.'},
+  ]};
+  it.each([[false,false],[true,false],[false,true],[true,true]])('主框省略=%s、小格省略=%s，独立控制说明且内容坐标不变',(full,small)=>{
+    const original=JSON.stringify(input);
+    const baseline=JSON.parse(applyMangaFrames(original,make(),size));
+    const out=JSON.parse(applyMangaFrames(original,make({omitFullPageFrame:full,omitSmallFrames:small}),size));
+    expect(out.summary.caption.includes('panel 1 (nearly full-page), outer frame')).toBe(!full);
+    expect(out.summary.caption.includes('panel 2 (')).toBe(!small);
+    expect(out.items).toEqual(baseline.items);
+    expect(out.summary.caption).toContain('panel 2 is in front of panel 1');
+    expect(out.summary.caption).toContain('Reading sequence: panel 1 then panel 2');
+    expect(out.summary.caption).toContain('Visible lettering');
+    expect(out.summary.caption).toContain(input.summary.caption);
+    expect(JSON.stringify(input)).toBe(original);
+    if(!full && !small) expect(out).toEqual(baseline);
+  });
+  it('整页单幅省略框线与单格读序，不加入延伸至四边或否定描述',()=>{
+    const manga=make({omitFullPageFrame:true});manga.custom[0].portrait=[panels[0]];
+    const single={summary:{canvas:'single',caption:'A color illustration.'},layout:'frame_test',items:[input.items[0]]};
+    const out=JSON.parse(applyMangaFrames(JSON.stringify(single),manga,size));
+    expect(out.summary).toEqual(single.summary);
+    expect(out.items[0]).toEqual({label:'character',caption:'A traveler holding a book.',bbox:panels[0].slots.S});
+    expect(out.bbox_format).toBe('yxyx');expect(out.bbox_coord_space).toBe('abs_centralized');
+  });
+  it('按实际四角识别整页，外接矩形铺满的斜框仍归为小格',()=>{
+    expect(isFullPagePanel(panels[0],size)).toBe(true);
+    const slanted={...panels[0],shapes:{F:[[-416,-608],[416,-608],[300,608],[-416,608]]}};
+    expect(isFullPagePanel(slanted,size)).toBe(false);
+    expect(isFullPagePanel(panels[1],size)).toBe(false);
+    expect(isFullPagePanel({position:'empty',slots:{}},size)).toBe(false);
+    const manga=make({omitFullPageFrame:true});manga.custom[0].portrait=[slanted];
+    const out=JSON.parse(applyMangaFrames(JSON.stringify({...input,items:[input.items[0]]}),manga,size));
+    expect(out.summary.caption).toContain('outer frame');
+    expect(out.summary.caption).toContain('clockwise corners');
   });
 });

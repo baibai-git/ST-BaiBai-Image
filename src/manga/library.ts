@@ -1,8 +1,9 @@
-import { parseCustomLayout, resolveLayouts, type MangaCustomLayout, type MangaSettings } from './layouts';
+import { parseCustomLayout, resolveLayouts, orderMangaLayouts, type MangaCustomLayout, type MangaSettings } from './layouts';
 
-const FORMAT='bbi-manga-layouts';
+import { readLayoutFile, writeLayoutFile, LAYOUT_FORMAT, portableLayout } from './portable';
+const FORMAT=LAYOUT_FORMAT;
 interface SavedLayout extends MangaCustomLayout { enabled?: boolean }
-interface LayoutFile { format: typeof FORMAT; version: 1; layouts: SavedLayout[]; deleted: string[] }
+interface LayoutFile { format: typeof FORMAT; version: 1; layouts: SavedLayout[]; deleted: string[]; order?: string[] }
 
 /** Snapshot the geometry actually used, including disabled entries and built-in fallbacks. */
 function snapshots(manga:MangaSettings): SavedLayout[] {
@@ -13,42 +14,44 @@ function snapshots(manga:MangaSettings): SavedLayout[] {
       const saved=byId.get(layout.id) ?? {
         id:layout.id,label:layout.label,usage:layout.usage,readingOrder:layout.readingOrder,
         canvas:layout.canvas,enabled:!manga.disabled.includes(layout.id),
+        ...(layout.description!==undefined ? {description:layout.description} : {}),
+        ...(layout.promptCaption!==undefined ? {promptCaption:layout.promptCaption} : {}),
+        ...(layout.promptMode!==undefined ? {promptMode:layout.promptMode} : {}),
+        ...(layout.useBboxCorners!==undefined ? {useBboxCorners:layout.useBboxCorners} : {}),
+        ...(layout.omitFullPageFrame!==undefined ? {omitFullPageFrame:layout.omitFullPageFrame} : {}),
+        ...(layout.omitSmallFrames!==undefined ? {omitSmallFrames:layout.omitSmallFrames} : {}),
       };
       saved[orientation]=layout.panels;
       byId.set(layout.id,saved);
     }
   }
-  return [...byId.values()];
+  return orderMangaLayouts([...byId.values()],manga.order);
 }
 
 /** Layout-only files deliberately exclude prompt rules, accounts, API keys and chat state. */
-export function exportMangaLayouts(manga:MangaSettings, id?:string): string {
+export function exportMangaLayouts(manga:MangaSettings, id?:string, legacy=false): string {
   const layouts=snapshots(manga);
   if (id!==undefined) {
     const layout=layouts.find(item=>item.id===id);
     if (!layout) throw new Error(`版式「${id}」不存在或已删除。`);
-    return JSON.stringify(layout,null,2);
+    return JSON.stringify(legacy ? layout : portableLayout(layout),null,2);
   }
-  const file:LayoutFile={format:FORMAT,version:1,layouts,deleted:[...manga.deleted]};
-  return JSON.stringify(file,null,2);
+  return writeLayoutFile(layouts,{deleted:[...manga.deleted],order:layouts.map(layout=>layout.id),legacy});
 }
 
 /** Validate every entry before returning a new state; never partially apply a damaged file. */
 export function importMangaLayouts(manga:MangaSettings, text:string): {
-  custom:MangaCustomLayout[]; disabled:string[]; deleted:string[];
+  custom:MangaCustomLayout[]; disabled:string[]; deleted:string[]; order:string[];
   count:number; replaced:number; hidden:number;
 } {
   let raw:unknown;
   try { raw=JSON.parse(text.replace(/^\uFEFF/,'')); }
   catch (issue) { throw new Error(`JSON 解析失败：${issue instanceof Error ? issue.message : String(issue)}`); }
   const root=raw && typeof raw==='object' && !Array.isArray(raw) ? raw as Record<string,unknown> : undefined;
-  if (root?.format!==undefined && root.format!==FORMAT) throw new Error('不支持的版式文件格式。');
-  if (root?.format===FORMAT && root.version!==1) throw new Error('不支持的版式文件版本，请更新插件。');
-  const entries=Array.isArray(raw) ? raw : root?.layouts!==undefined ? root.layouts : [raw];
-  if (!Array.isArray(entries) || !entries.length && root?.format!==FORMAT) throw new Error('版式文件需要非空版式数组或单套版式。');
-  const removed=root?.format===FORMAT ? root.deleted ?? [] : [];
-  if (!Array.isArray(removed) || removed.some(id=>typeof id!=='string' || !id.trim())) throw new Error('已删除版式清单需要非空 ID 字符串数组。');
-  const deletedIds=(removed as string[]).map(id=>id.trim());
+  const file=readLayoutFile(raw), entries=file.layouts;
+  const order=root?.order===undefined ? undefined : file.order;
+  const deletedIds=file.deleted;
+  if(!entries.length && !root?.format) throw new Error('需要非空版式数组。');
   const incoming=new Map<string,{layout:MangaCustomLayout; enabled?:boolean}>();
   entries.forEach((entry,index)=>{
     try {
@@ -71,6 +74,6 @@ export function importMangaLayouts(manga:MangaSettings, text:string): {
     if (enabled===false) disabled.add(id);
     else if (enabled===true) disabled.delete(id);
   }
-  return {custom:[...custom.values()],disabled:[...disabled],deleted:[...deleted],
+  return {custom:[...custom.values()],disabled:[...disabled],deleted:[...deleted],order:order ? [...new Set((order as string[]).map(id=>id.trim())),...(manga.order ?? []).filter(id=>!order.includes(id))] : [...(manga.order ?? [])],
     count:incoming.size,replaced,hidden:deletedIds.filter(id=>visible.has(id)).length};
 }

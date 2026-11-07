@@ -331,7 +331,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
     // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一
     const profile = autoTagProfile();
     const layoutSelection = autoTagLayoutSelection(context, profile);
-    if (layoutSelection) {
+    if (layoutSelection && !layoutSelection.singleImageMode) {
       const needed = Math.max(1, promptOptions.minImages);
       const count = () => new Set(Object.values(layoutCandidates(layoutSelection)).flat().map(layout => layout.id)).size;
       while (count() < needed && relaxLayoutSelection(layoutSelection)) { /* release oldest rounds only */ }
@@ -362,7 +362,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
     let selectedLayouts: string[] = [];
     const recordAdoptedLayouts = () => {
       const active = getContext();
-      if (layoutSelection && active && dshChatId(active) === dshIdentity) recordLayoutRound(active, selectedLayouts);
+      if (layoutSelection && !layoutSelection.singleImageMode && active && dshChatId(active) === dshIdentity) recordLayoutRound(active, selectedLayouts);
     };
     for (let attempt = 0; attempt <= retries && !plan; attempt++) {
       if (controller.signal.aborted) {
@@ -442,7 +442,9 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
           return;
         }
         lastError = error instanceof Error ? error.message : String(error);
-        if (layoutSelection) messages.push({ role: 'system', content: `上一轮未通过验收：${lastError}。请遵守本轮版式冷却白名单与同轮去重要求；只有全部候选均不适用且允许放宽时才请求 layout_fallback。` });
+        if (layoutSelection) messages.push({ role: 'system', content: layoutSelection.singleImageMode
+          ? `上一轮未通过验收：${lastError}。按当前全页单格白名单修正；同轮可复用ID，不执行布局冷却或同轮去重，不以layout_fallback绕过本轮要求。`
+          : `上一轮未通过验收：${lastError}。请遵守本轮版式冷却白名单与同轮去重要求；只有全部候选均不适用且允许放宽时才请求 layout_fallback。` });
         console.warn(`[柏宝绘] 第 ${floor} 楼第 ${attempt + 1}/${retries + 1} 次生成 tag 失败`, error);
       }
     }

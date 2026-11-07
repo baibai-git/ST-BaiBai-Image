@@ -34,7 +34,7 @@ import {
   DEFAULT_NAI_V5_THINKING,
   settings,
 } from '@/state/settings';
-import { buildMangaSpec, resolveLayouts } from '@/manga/layouts';
+import { buildMangaSpec, planningLayouts } from '@/manga/layouts';
 
 /**
  * 本次自动 tag 的协议形态。按默认后端与其开关算**一次**,写协议(本模块)与验收/收尾
@@ -43,6 +43,8 @@ import { buildMangaSpec, resolveLayouts } from '@/manga/layouts';
 export interface AutoTagProfile {
   /** 显式声明的 MOSS 原生 Layout 协议，tag 承载 JSON、nl 留空。 */
   layout?: boolean;
+  /** Freeze the single-image branch for one planning operation. */
+  singleImageMode?: boolean;
   /** NAI 4.5/V5:Base + 原生 Character Prompts(characters[])。 */
   naiCharPrompts: boolean;
   /**
@@ -64,13 +66,13 @@ export function autoTagProfile(): AutoTagProfile {
       ? activeComfyPreset().naturalLanguage
       : naiCharPrompts && settings.nai.naturalLanguage);
   const lock = activeOrientationLock();
-  return { naiCharPrompts, nl, ...(layout ? { layout: true } : {}), lockedSize: lock === 'auto' ? null : lock };
+  return { naiCharPrompts, nl, ...(layout ? { layout: true, singleImageMode: settings.manga.singleImageMode === true } : {}), lockedSize: lock === 'auto' ? null : lock };
 }
 
 export function autoTagLayoutSelection(context: STContext, profile: AutoTagProfile): LayoutSelection | undefined {
   if (settings.defaultBackend !== 'comfyui' || !settings.manga.enabled) return;
   const conn = effectiveComfyConn();
-  return createLayoutSelection(context, settings.manga, {
+  return createLayoutSelection(context, { ...settings.manga, singleImageMode: profile.singleImageMode ?? settings.manga.singleImageMode }, {
     portrait: parseSize(pickSize(conn, 'portrait')),
     landscape: parseSize(pickSize(conn, 'landscape')),
   }, profile.lockedSize);
@@ -173,6 +175,8 @@ export function buildAutoTagFixedMessages(
   // 动态负面词同样取自当前预设:切工作流即同时切走自然语言与动态负面词的口径。
   const comfyOn = settings.defaultBackend === 'comfyui';
   const layoutOn = comfyOn && (settings.manga.enabled || profile.layout === true || usesMossLayout(options.prompts?.comfySpec));
+  const singleImageMode = layoutOn && settings.manga.enabled && (profile.singleImageMode ?? settings.manga.singleImageMode) === true;
+  const mangaConfig = { ...settings.manga, singleImageMode };
   const naiCharPromptsOn = profile.naiCharPrompts;
   const comfyPreset = comfyOn ? activeComfyPreset() : null;
   const nlOn = !layoutOn && profile.nl;
@@ -226,7 +230,7 @@ export function buildAutoTagFixedMessages(
     if (settings.manga.enabled) {
       const inner = JSON.parse(sampleImage.tag as string);
       const orientations: Orientation[] = profile.lockedSize ? [profile.lockedSize] : ['portrait','landscape'];
-      const example = orientations.flatMap(orientation=>resolveLayouts(settings.manga,orientation).map(layout=>({layout,orientation}))).find(({layout})=>layout.panels.length>0);
+      const example = orientations.flatMap(orientation=>planningLayouts(mangaConfig,orientation).map(layout=>({layout,orientation}))).find(({layout})=>layout.panels.length>0);
       if (!example) throw new Error('漫画 Layout:当前方向没有启用的版式，请先启用至少一个版式。');
       inner.layout = example.layout.id;
       inner.summary.canvas = example.layout.panels.length>1 ? 'multi_panel' : 'single';
@@ -243,8 +247,8 @@ export function buildAutoTagFixedMessages(
   const sampleImages = [sampleImage];
   if (layoutOn && settings.manga.enabled && Number(options.maxImages) >= 2) {
     const layouts = (profile.lockedSize ? [profile.lockedSize] : ['portrait','landscape'] as const)
-      .flatMap(orientation => resolveLayouts(settings.manga, orientation).map(layout => ({layout,orientation})));
-    const second = layouts.find(({layout}) => layout.id !== JSON.parse(sampleImage.tag as string).layout && layout.panels.length);
+      .flatMap(orientation => planningLayouts(mangaConfig, orientation).map(layout => ({layout,orientation})));
+    const second = layouts.find(({layout}) => (singleImageMode || layout.id !== JSON.parse(sampleImage.tag as string).layout) && layout.panels.length);
     if (second) {
       const inner = JSON.parse(sampleImage.tag as string);
       inner.layout = second.layout.id;
@@ -293,8 +297,8 @@ export function buildAutoTagFixedMessages(
         : `5. size 是画幅方向，只能填 "portrait"（竖构图）或 "landscape"（横构图），判定口径见后端规范；拿不准就填 "portrait"。`;
 
   const libraryReferenceRule = naiCharPromptsOn
-    ? `- If a visible character exists in the fixed appearance library or is created in this changes array, copy the fixed fields into that character own characters[].tag; keep appearance wording verbatim but convert 1girl/1boy to girl/boy. The fandom identity tag (fields.fandom) goes first, verbatim. Do not put them in Base or assign them to another character.${nlOn ? ' Library natural-language notes may inform that character nl.' : ''} Use the library entry name verbatim for characters[].name and for any name inside ${nlOn ? 'tag/nl' : 'tag'} — never transliterate, translate, or vary it.`
-    : '- 画面中的角色只要已在【角色固定外貌库】，或在本次 changes 中建了档，tag 与 nl 就必须照抄库中/刚建档的字段值，用词一字不改，不得自行改写或增删其固定外貌。fandom 字段只作档案记录，ComfyUI 画图时不照抄它，同人身份 tag 按下发的 ComfyUI 规范现场判定并按规范转义括号。\n   - 同一角色的固定外貌在一张图里只写一遍：同一图内再次提到他时用简短指代（the boy、the silver-haired girl）承接，禁止把整串外貌重复第二遍——重复会让模型以为画面里有多个同样的人，把一个人画成互不相连的几块。';
+    ? `- If a visible character exists in the fixed appearance library or is created in this changes array, copy the visible stable identity fields into that character own characters[].tag; keep appearance wording verbatim but convert 1girl/1boy to girl/boy. The fandom identity tag (fields.fandom) goes first, verbatim. Do not put them in Base or assign them to another character.${nlOn ? ' Library natural-language notes may inform that character nl.' : ''} Use the library entry name verbatim for characters[].name and for any name inside ${nlOn ? 'tag/nl' : 'tag'} — never transliterate, translate, or vary it.`
+    : '- 画面中的角色只要已在【角色固定外貌库】，或在本次 changes 中建了档，身份特征须取当前有效的库中/刚建档字段并保持原词，只选本镜头可见部分；默认衣着仅在当前状态未覆盖时取用，按实际穿脱、开合、移位或临时换装描述，不为照抄库恢复默认穿戴。Layout模式写入对应character.caption，已确认tags另按规范原样保留，nl仍为空；其他模式按各自tag/nl协议填写。fandom 字段只作档案记录，ComfyUI 画图时不照抄它，同人身份 tag 按下发的 ComfyUI 规范现场判定并按规范转义括号。\n   - 同一角色的固定外貌在一张图里只写一遍：同一图内再次提到他时用简短指代（the boy、the silver-haired girl）承接，禁止把整串外貌重复第二遍——重复会让模型以为画面里有多个同样的人，把一个人画成互不相连的几块。';
   // 建档 nl 只在协议含 nl 时要求(runner 的验收同一口径,见 autoTagProfile)
   const newCharacterNlRule = !naiCharPromptsOn
     ? ''
@@ -319,7 +323,7 @@ export function buildAutoTagFixedMessages(
    ${multiCharacterBindingRule}
    - 库中已有角色发生**永久外貌变化**（染发、剪发、留疤、长大、永久变身、固定造型改变等）时，必须通过 changes 报告：{"name":"角色名","field":"hair","value":"short red hair","position":"P4","reason":"在此处染发并剪短"}；field 只能是 sex/hair/eyes/skin/body/extra/outfit/fandom。
    - 已建档角色被判定为同人、但档案里没有 fandom 的，必须补一条 changes：{"name":"角色名","field":"fandom","value":"character name (copyright name)","reason":"判定为同人，补身份 tag"}；档案已有 fandom 的直接照抄，不重复报告。
-   - 库中带 [locked] 标记的角色是全局锁定档案：无论剧情如何发展，其固定外貌永不变化，**不得为其报告任何 changes**（报了也会被丢弃），画面中始终照抄锁定字段值。
+   - 库中带 [locked] 标记的角色是全局锁定档案：无论剧情如何发展，其固定外貌永不变化，**不得为其报告任何 changes**（报了也会被丢弃），可见身份特征仍保持锁定字段原词；锁定档案不要求补画不可见特征或恢复默认衣着，临时穿着状态依正文与确认前态。
    - 永久变化的 position 是新状态开始生效的位置：该位置之前的图片使用旧档案，该位置及之后使用新档案；多次变化按正文先后分别报告。
    - 假发、美瞳、湿身/污渍、临时发型、包扎、光照导致的颜色变化、姿势等临时状态不写 changes，但连续场景中仍须保持，直到正文明确解除或发生时间/场景跳跃。静态角色卡/世界书中的初始设定不得覆盖角色库里已经发生的后期变化。
    - 即使 images 为空也要完成建档与变化检查；没有任何变化时省略 changes 或返回空数组。`;
@@ -347,7 +351,7 @@ ${characterRule}
       : '';
   const baseSpec = mangaSpec || backendPromptSpec(options, nlOn, naiCharPromptsOn);
   // Stable rules stay cached; compatible, uncooled geometry and notes travel in the dynamic selection.
-  const mangaSection = layoutOn && settings.manga.enabled ? buildMangaSpec(settings.manga,false) : '';
+  const mangaSection = layoutOn && settings.manga.enabled ? buildMangaSpec(mangaConfig,false) : '';
   const spec = mangaSection ? `${baseSpec}${baseSpec ? "\n\n" : ""}${mangaSection}` : baseSpec;
 
   // 稳定规则前置，角色/世界资料后置，避免动态世界书打断后端规范的可缓存前缀。
@@ -357,7 +361,7 @@ ${characterRule}
   if (jailbreak) messages.push({ role: 'system', content: jailbreak, purpose: 'prefix' });
   // 后端书写规范(ComfyUI/NAI)压在固定协议之前;无适用规范时不占消息位。
   if (spec) messages.push({ role: 'system', content: spec, purpose: 'spec' });
-  const contract = layoutOn ? fixedContract
+  let contract = layoutOn && !singleImageMode ? fixedContract
     .replaceAll('单一瞬间', '短事件漫画页（每格一个瞬间）')
     .replace('不要返回同一事件的相邻动作或换镜头版本。', '不同页不重复同一事件；同页各格允许按原文推进动作、切换镜头或呈现反应。')
     .replace('表示把图片 tag 插在该段之后；选择让画面所需事实刚刚完整成立、且尚未切换到下一场景的位置。', '表示把漫画页插在该段之后；页级位置不得早于页内最后一个事件，不提前描绘之后的剧情。')
@@ -367,6 +371,8 @@ ${characterRule}
     .replace('在图片 tag 中照抄这套外貌', '在各出场格对应的 character.caption 中写入可见外貌')
     .replace('同一张图里这套外貌只写一遍', '跨格重现必须分别绑定可见身份锚点与当前状态；已有辅助框可描述同一角色的局部，不重复整串外貌；有意的多尺度展示明确为同一身份的独立呈现')
     : fixedContract;
+  contract += '\n身份特征、默认衣着与当前穿着分别处理：固定人物字段保持原词并按可见范围取用；outfit是默认或标志性穿戴，当前明确状态优先。临时穿脱、换装、开合、破损及移位不更新永久档案；[locked]锁档案，不锁临时穿着状态。原创角色的固定身份称呼不以可更换衣着作唯一锚，每张图片提示词独立写齐本图必要的可见特征。';
+  if (singleImageMode) contract += '\n【本轮单图模式】每个images项是一张独立全页单图，固定canvas:"single"、panel:1；只选当前启用的全页单格layout。同轮可复用同一ID，不执行布局冷却，不为去重强改横竖方向，不生成多格、嵌入格或跨格出血。使用Skill时读取单图分支（read_rules.py --spec single）。人物与字区允许重叠，气泡写明相对位置，必要时用semi-transparent bubble fill，字形清晰不透明并避让脸和关键动作。响应按开头一个简短规划结果摘要块、随后一个外层JSON交付，不输出逐步推理。';
   messages.push({ role: 'system', content: contract, purpose: 'contract' });
   // 思维链:压在任务协议之后,要求模型先在 <thinking> 里过检查点再输出 JSON。
   // 解析端(protocol.ts)会先剥掉 think 块再取 JSON,二者配套;按后端取对应的那一份。

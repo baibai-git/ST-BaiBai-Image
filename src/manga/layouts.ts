@@ -1,8 +1,9 @@
 import { cleanMossFields, validateMossContent } from '@/manga/mossSchema';
+import { directionalLayout } from './portable';
 import { MANGA_TABLE } from '@/manga/table';
-import type { FrameBox, MangaLayoutDef, MangaOrientation, MangaPanel } from '@/manga/table';
+import type { FrameBox, MangaLayoutDef, MangaOrientation, MangaPanel, ManualContent } from '@/manga/table';
 
-export type { FrameBox, MangaLayoutDef, MangaOrientation, MangaPanel };
+export type { FrameBox, MangaLayoutDef, MangaOrientation, MangaPanel, ManualContent };
 
 /** Numbered instances retain the base role, but never alias another slot's coordinates. */
 export function slotType(key: string): string { return key.replace(/_[1-9]\d*$/, ''); }
@@ -35,6 +36,8 @@ function crossingSubjects(panel: MangaPanel): string[] {
 export interface MangaSettings {
   /** 漫画模式总开关。关闭后不注入坐标、不追加漫画协议。 */
   enabled: boolean;
+  /** 全页单图分支；关闭时沿用多格漫画选版与冷却。 */
+  singleImageMode?: boolean;
   /** 最近多少次成功采纳的自动 tag 请求不得重复选版；0 关闭跨轮冷却。 */
   cooldownRounds: number;
   /** Planning geometry presentation; image mode requires a vision-capable API. */
@@ -47,6 +50,8 @@ export interface MangaSettings {
   spec: string;
   /** 漫画模式专用思考清单:非空时取代常规思考清单。 */
   thinking: string;
+  /** 列表与图册顺序；未记录的新版式保留原顺序排在后面。 */
+  order?: string[];
   /** 被停用的版式 id(内置或自定义)。 */
   disabled: string[];
   /** 已删除的内置版式；保留记录以便恢复，不再进入可选清单。 */
@@ -57,9 +62,25 @@ export interface MangaSettings {
   textSlotsVersion?: number;
 }
 
+/** 每套版式独立保存的编译说明选项。 */
+export interface FrameGuideOptions {
+  description?: string;
+  promptCaption?: string;
+  promptMode?: 'llm'|'manual';
+  useBboxCorners?: boolean;
+  /** 省略编译器对整页 F 主框追加的框线说明。 */
+  omitFullPageFrame?: boolean;
+  /** 省略编译器对非整页 F 小格追加的框线说明。 */
+  omitSmallFrames?: boolean;
+}
+
 /** 设置页可管理的一条版式;两个方向可以各自缺省。 */
-export interface MangaCustomLayout {
+export interface MangaCustomLayout extends FrameGuideOptions {
   id: string;
+  description?: string;
+  promptCaption?: string;
+  promptMode?: 'llm'|'manual';
+  useBboxCorners?: boolean;
   label?: string;
   /** 选择引导：这套版式适合什么节拍，拼进提示词清单。 */
   usage?: string;
@@ -70,13 +91,13 @@ export interface MangaCustomLayout {
   canvas?: { width: number; height: number };
 }
 
-export interface ResolvedLayout extends MangaLayoutDef {
+export interface ResolvedLayout extends MangaLayoutDef, FrameGuideOptions {
   id: string;
   canvas: { width: number; height: number };
 }
 
 export function mangaDefaults(): MangaSettings {
-  return { enabled: false, cooldownRounds: 3, catalogMode: 'text', disabled: [], deleted: [], selectionNotes: '', bleed: 72, spec: '', thinking: '', custom: [], textSlotsVersion:1 };
+  return { enabled: false, singleImageMode: false, cooldownRounds: 3, catalogMode: 'text', order: [], disabled: [], deleted: [], selectionNotes: '', bleed: 72, spec: '', thinking: '', custom: [], textSlotsVersion:1 };
 }
 
 export function normalizeCooldownRounds(value: unknown): number {
@@ -159,6 +180,11 @@ export function resizeMangaCanvases(manga: MangaSettings, width: number, height:
  * 合并内置与自定义,按内置顺序优先,自定义新 id 追加在后。
  * 停用的 id 不出现——提示词清单与坐标注入用的是同一份结果,不会出现「模型能选但查不到框」。
  */
+export function orderMangaLayouts<T extends {id:string}>(layouts:T[], order:string[]=[]):T[] {
+  const rank=new Map(order.map((id,index)=>[id,index]));
+  return [...layouts].sort((a,b)=>(rank.get(a.id) ?? Infinity)-(rank.get(b.id) ?? Infinity));
+}
+
 export function resolveLayouts(manga: MangaSettings, orientation: MangaOrientation): ResolvedLayout[] {
   const base = MANGA_TABLE.layouts[orientation] ?? {};
   const pending = new Map<string, MangaCustomLayout>();
@@ -171,6 +197,12 @@ export function resolveLayouts(manga: MangaSettings, orientation: MangaOrientati
     out.push({
       id,
       canvas: layoutCanvas(override, orientation),
+      ...(typeof override?.description==='string' ? {description:override.description} : {}),
+      ...(typeof override?.promptCaption==='string' ? {promptCaption:override.promptCaption} : {}),
+      ...(override?.promptMode ? {promptMode:override.promptMode} : {}),
+      ...(typeof override?.useBboxCorners==='boolean' ? {useBboxCorners:override.useBboxCorners} : {}),
+      ...(override?.omitFullPageFrame !== undefined ? {omitFullPageFrame:override.omitFullPageFrame} : {}),
+      ...(override?.omitSmallFrames !== undefined ? {omitSmallFrames:override.omitSmallFrames} : {}),
       label: override?.label?.trim() || def.label,
       usage: override?.usage?.trim() || def.usage,
       readingOrder: override?.readingOrder?.trim() || def.readingOrder,
@@ -183,6 +215,12 @@ export function resolveLayouts(manga: MangaSettings, orientation: MangaOrientati
     out.push({
       id: entry.id,
       canvas: layoutCanvas(entry, orientation),
+      ...(typeof entry?.description==='string' ? {description:entry.description} : {}),
+      ...(typeof entry?.promptCaption==='string' ? {promptCaption:entry.promptCaption} : {}),
+      ...(entry?.promptMode ? {promptMode:entry.promptMode} : {}),
+      ...(typeof entry?.useBboxCorners==='boolean' ? {useBboxCorners:entry.useBboxCorners} : {}),
+      ...(entry.omitFullPageFrame !== undefined ? {omitFullPageFrame:entry.omitFullPageFrame} : {}),
+      ...(entry.omitSmallFrames !== undefined ? {omitSmallFrames:entry.omitSmallFrames} : {}),
       label: entry.label?.trim() || entry.id,
       usage: entry.usage?.trim(),
       readingOrder: entry.readingOrder?.trim() || '',
@@ -190,7 +228,7 @@ export function resolveLayouts(manga: MangaSettings, orientation: MangaOrientati
     });
   }
   const disabled = new Set([...manga.disabled, ...(manga.deleted ?? [])]);
-  return out.filter(layout => !disabled.has(layout.id));
+  return orderMangaLayouts(out.filter(layout => !disabled.has(layout.id)), manga.order);
 }
 
 export function resolveLayout(
@@ -199,6 +237,12 @@ export function resolveLayout(
   id: string,
 ): ResolvedLayout | null {
   return resolveLayouts(manga, orientation).find(layout => layout.id === id) ?? null;
+}
+
+/** Generation candidates only; keep the editor's full layout library intact. */
+export function planningLayouts(manga: MangaSettings, orientation: MangaOrientation): ResolvedLayout[] {
+  return resolveLayouts(manga, orientation).filter(layout => !manga.singleImageMode
+    || layout.panels.length === 1 && isFullPagePanel(layout.panels[0], layout.canvas));
 }
 
 function panelRefIndex(layout: ResolvedLayout, ref: unknown): MangaPanel | null {
@@ -258,6 +302,15 @@ export function applyMangaFrames(
     );
   }
   const canvas = layout.canvas;
+  if (manga.singleImageMode && (layout.panels.length !== 1 || !isFullPagePanel(layout.panels[0], canvas))) {
+    throw new Error('单图模式仅允许全页单格版式，请选择当前启用的单图版式。');
+  }
+  if (manga.singleImageMode && ((root.summary as {canvas?:unknown} | undefined)?.canvas !== 'single'
+    || !Array.isArray(root.items) || root.items.some(item => !item || item.panel !== 1))) {
+    throw new Error('单图模式要求 canvas="single"，每个 item.panel 必须为整数 1。');
+  }
+  const omittedFrames = new Set(layout.panels.flatMap((panel,index) =>
+    (isFullPagePanel(panel,canvas) ? layout.omitFullPageFrame : layout.omitSmallFrames) ? [index] : []));
   if (size?.width !== canvas.width || size?.height !== canvas.height) {
     throw new Error(`漫画 Layout:版式 ${layoutId} 需要 ${canvas.width}×${canvas.height} 画布，请将工作流和预设尺寸设为相同值。`);
   }
@@ -314,9 +367,10 @@ export function applyMangaFrames(
       // Keep panel membership after removing symbolic fields. Inner boxes are
       // content regions, not additional comic frames.
       const caption = typeof item.caption === 'string' ? item.caption.replace(/^\s*panel\s+\d+\s*[,;:]\s*/i,'') : '';
-      item.caption = `Content of panel ${layout.panels.indexOf(panel)+1}: ${caption}`.trim();
-      if (item.label==='text' && typeof item.text==='string' && item.text.trim() && (TEXT_REGIONS[slotType(resolvedSlot)] || gridBox)) {
-        item.caption += ` Placement: ${TEXT_REGIONS[slotType(resolvedSlot)] ?? 'selected grid'} text region.`;
+      item.caption = layout.panels.length===1 && omittedFrames.has(0)
+        ? caption : `Content of panel ${layout.panels.indexOf(panel)+1}: ${caption}`.trim();
+      if (item.label==='text' && typeof item.text==='string' && item.text.trim() && (TEXT_REGIONS[slotType(resolvedSlot)] || gridBox || manga.singleImageMode && slotType(resolvedSlot)==='C')) {
+        if (slotType(resolvedSlot) !== 'C') item.caption += ` Placement: ${TEXT_REGIONS[slotType(resolvedSlot)] ?? 'selected grid'} text region.`;
         const key=`${layout.panels.indexOf(panel)}:${resolvedSlot}`;
         const group=textGroups.get(key) ?? {box,items:[],shaped:!!panel.shapes?.[resolvedSlot]};
         group.items.push(item); textGroups.set(key,group);
@@ -352,29 +406,41 @@ export function applyMangaFrames(
   // One authoritative page guide, before style prose; never repeat pairwise
   // occlusion or outer-frame coordinates in each character/text caption.
   const hasText = items.some(item => item.label === 'text' && typeof item.text === 'string' && item.text.trim());
-  summary.caption = `${pageFrameGuide(layout, hasText, usedSubjects)} ${typeof summary.caption==='string' ? summary.caption : ''}`.trim();
+  summary.caption = `${pageFrameGuide(layout, hasText, usedSubjects, omittedFrames)} ${typeof summary.caption==='string' ? summary.caption : ''}`.trim();
   root.summary=summary;
   root.bbox_coord_space = 'abs_centralized';
   root.bbox_format = 'yxyx';
   return JSON.stringify(root);
 }
 
-function pageFrameGuide(layout: ResolvedLayout, hasText: boolean, usedSubjects: Set<string>): string {
-  const frames = layout.panels.map((panel,index) => {
+/** The actual F polygon must match all canvas corners; a slanted bounding box is insufficient. */
+export function isFullPagePanel(panel: MangaPanel, canvas: {width:number; height:number}): boolean {
+  const outline = panel.slots.F && regionOutline(panel,'F');
+  if (!outline || outline.length!==4) return false;
+  const x=canvas.width/2, y=canvas.height/2;
+  return [[-x,-y],[x,-y],[x,y],[-x,y]].every(([cx,cy]) =>
+    outline.some(([px,py]) => Math.abs(px-cx)<=1 && Math.abs(py-cy)<=1));
+}
+
+function pageFrameGuide(layout: ResolvedLayout, hasText: boolean, usedSubjects: Set<string>, omitted: Set<number>): string {
+  const frames = layout.panels.flatMap((panel,index) => {
+    if (omitted.has(index)) return [];
     const box = panel.slots.F ?? panel.slots.C;
     const shape = panel.shapes?.F;
     const crossing = crossingSubjects(panel).filter(key=>usedSubjects.has(`${index}:${key}`)).map(key=>`; ${key} is a continuous foreground subject region extending across the outer border, yxyx ${JSON.stringify(panel.slots[key])}; keep its subject continuous across the crossed borders`).join('');
     const contour = (shape ? `; clockwise corners xy ${JSON.stringify(shape)}` : '') + crossing;
-    return `panel ${index+1}${box ? ` (${framePosition(box,layout.canvas)}), outer frame yxyx [${box.join(', ')}]` : ' (no outer frame specified)'}${contour}`;
+    return [`panel ${index+1}${box ? ` (${framePosition(box,layout.canvas)}), outer frame yxyx [${box.join(', ')}]` : ' (no outer frame specified)'}${contour}`];
   });
   const layering = panelLayerGuides(layout.panels);
   return [
-    `Page frame guide: exactly ${layout.panels.length} distinct comic panels; preserve the specified frames without additional subdivisions.`,
-    'All frame coordinates below are centered pixels.',
-    `${frames.join('; ')}.`,
-    ...(layering.length ? [`Stacking: ${layering.join('; ')}. Front frames occlude rear frames only in their overlap; the rear scene continues behind them. Overlays and inset panels do not split the rear frame into extra panels.`] : []),
-    `Reading sequence: ${layout.panels.map((_,i)=>`panel ${i+1}`).join(' then ')}; stacking does not change this sequence.`,
-    'Each item belongs to its named panel; its bbox is a content region, not another comic frame. Only explicitly described border overlaps may extend outside that panel. Panel references and layout instructions are not visible lettering.',
+    ...(frames.length ? [
+      omitted.size ? 'Frame guide for the listed regions:' : `Page frame guide: exactly ${layout.panels.length} distinct comic panels; preserve the specified frames without additional subdivisions.`,
+      'All frame coordinates below are centered pixels.',
+      `${frames.join('; ')}.`,
+    ] : []),
+    ...(layering.length ? [`Stacking: ${layering.join('; ')}. ${omitted.size ? 'Foreground content occludes background content only in their overlap.' : 'Front frames occlude rear frames only in their overlap; the rear scene continues behind them. Overlays and inset panels do not split the rear frame into extra panels.'}`] : []),
+    ...(!omitted.size || layout.panels.length>1 ? [`Reading sequence: ${layout.panels.map((_,i)=>`panel ${i+1}`).join(' then ')}; stacking does not change this sequence.`] : []),
+    ...(!omitted.size ? ['Each item belongs to its named panel; its bbox is a content region, not another comic frame. Only explicitly described border overlaps may extend outside that panel. Panel references and layout instructions are not visible lettering.'] : []),
     ...(hasText ? ['Visible lettering follows the supplied text items and their assigned regions. Preserve each item’s exact wording and described container. Text placement can overlap secondary clothing while keeping faces, key hand gestures, contact points and important props clearly visible.'] : []),
   ].join(' ');
 }
@@ -635,6 +701,14 @@ export function buildMangaSpec(manga: MangaSettings, includeCatalog=true): strin
   lines.push('【版式清单与挑选】这一节由插件按当前启用的版式生成，未启用的版式不会出现；坐标由插件按画布查表注入，你不用写。');
   lines.push('- tag 内层 JSON 顶层增加 layout（从对应方向的启用清单选 id）；每个 items 项填写 panel（从 1 起的格号或位置代号）与 slot，不写 bbox。插件发送前删除 layout/panel/slot 并填入原生坐标。示例版式若已停用，必须替换成清单中的启用版式。');
   lines.push('- 每套版式的画布以该行标注尺寸为准，只选择与实际生成尺寸一致的版式。自定义画布不会自动改变 ComfyUI 工作流或预设尺寸。');
+  if (manga.singleImageMode) {
+    lines.push('- 本轮为单图模式：每个images项是独立全页单图，固定N=1、canvas:"single"、panel:1。只选当前方向启用的全页单格版式；同轮可复用同一ID，不做布局ID冷却。');
+    lines.push('- F是整图背景，C是完整内区，二者可同时使用但不重复整套背景。按实际需要取用C，不强填；文字项占用矩形C时可上下分泡。E仅在清单列出时存在，本轮不新增跨格或嵌入格。');
+    lines.push('- 人物与文字区域允许重叠。先确定人物与关键部位，再在合法字区内写明气泡的具体位置；同侧字区不等于空白。必要时使用半透明气泡底色（semi-transparent bubble fill），字形保持清晰不透明；仍须避开脸、关键手势、接触点和重要道具。拟声贴声源，不固定放B。');
+    lines.push('- 矩形字区多泡按实际轮廓上下分区；只有真正的非矩形区域才须分开选区。B与BL/BR的文字避免重复覆盖同一位置。图中标签不进入成品；每张tag独立写齐必要身份与当前状态，不依赖前图提示词。');
+    if (includeCatalog) lines.push(buildMangaCatalog({portrait:planningLayouts(manga,'portrait'),landscape:planningLayouts(manga,'landscape')},manga.selectionNotes));
+    return lines.join('\n');
+  }
   lines.push('- 读取格式:版式 id｜格数｜画布｜用途｜读序；各格以整数格号标识；有语义的位置名括注，内框键即合法槽位，并列实际位置与空间比例。以本轮动态候选目录为准，历史清单不授予权限。');
   lines.push('- 挑法:先按所选事件的时序、信息量、互动关系与文字容量比较版式,再确定格数;不默认选择最少格。内容适合多格推进时选足够的独立格,内容简单时允许少格,不为凑格补编剧情。分配事件与对白严格沿该行给出的读序。');
   lines.push('- 槽位:F 格框 C 完整内区 S 实际主体区域 L/R 左右人物 O 道具音效 T/TL/TR 顶部字区 B 底部字区 BL/BR 左下/右下字区 ML/MR 侧边字区 E 允许小部分越线进格间留白。清单里没列出的槽位在该格不存在,填了会让这次生成失败。');
@@ -672,6 +746,7 @@ export function parseCustomLayout(text: string): MangaCustomLayout {
     throw new Error('portrait 与 landscape 至少要有一个方向的面板');
   }
   const source = parsed as Record<string, unknown>;
+  for (const key of ['omitFullPageFrame','omitSmallFrames','useBboxCorners']) if(source[key]!==undefined && typeof source[key]!=='boolean') throw new Error(`${key} 需要布尔值。`);
   if (source.canvas !== undefined && !normalizeCanvas(source.canvas)) throw new Error('画布宽高必须是 64～8192 的偶数。');
   for (const orientation of ['portrait', 'landscape'] as const) {
     if (source[orientation] === undefined) continue;
@@ -688,6 +763,13 @@ export function parseCustomLayout(text: string): MangaCustomLayout {
       if (panel?.layer !== undefined && !Number.isSafeInteger(panel.layer)) throw new Error(`${orientation}/${position}:层级必须为安全整数。`);
       if (!panel?.slots || typeof panel.slots !== 'object' || !Object.keys(panel.slots).length) {
         throw new Error(`${orientation}/${position}:需要槽位坐标。`);
+      }
+      if (panel?.locked!==undefined && typeof panel.locked!=='boolean') throw new Error(`${orientation}/${position}:锁定状态需要布尔值。`);
+      if (panel?.slotContents!==undefined) {
+        if (!panel.slotContents || typeof panel.slotContents!=='object' || Array.isArray(panel.slotContents)) throw new Error(`${orientation}/${position}:手填内容格式错误。`);
+        for (const [slot,entries] of Object.entries(panel.slotContents)) {
+          if (!panel.slots[slot] || !Array.isArray(entries) || entries.some(item=>!item || !['object','character','text'].includes(item.label) || typeof item.caption!=='string' || (item.text!==undefined && typeof item.text!=='string') || (item.textType!==undefined && !['dialogue','narration','sfx'].includes(item.textType)))) throw new Error(`${orientation}/${position}/${slot}:手填内容或文字类型无效。`);
+        }
       }
       for (const [slot, rawBox] of Object.entries(panel.slots)) {
         const box = normalizeBox(rawBox);
@@ -743,7 +825,13 @@ function normalizePanels(raw: unknown): MangaPanel[] | undefined {
         if (slots[slot] && typeof value === 'string' && value.trim()) slotNotes[slot] = value.trim();
       }
     }
-    if (Object.keys(slots).length) out.push({ position, slots, ...(Number.isSafeInteger(panel.layer) ? { layer:panel.layer } : {}), ...(Object.keys(shapes).length ? { shapes } : {}), ...(Object.keys(slotNotes).length ? { slotNotes } : {}) });
+    const slotContents:NonNullable<MangaPanel['slotContents']> = {};
+    for(const [key,entries] of Object.entries(panel.slotContents ?? {})) {
+      if(!slots[key] || !Array.isArray(entries)) continue;
+      if(entries.some(item=>!item || !['object','character','text'].includes(item.label) || typeof item.caption!=='string' || (item.text!==undefined && typeof item.text!=='string'))) continue;
+      slotContents[key]=JSON.parse(JSON.stringify(entries));
+    }
+    if (Object.keys(slots).length) out.push({ position, slots, ...(Object.keys(slotContents).length ? {slotContents} : {}), ...(panel.locked===true ? {locked:true} : {}), ...(Number.isSafeInteger(panel.layer) ? { layer:panel.layer } : {}), ...(Object.keys(shapes).length ? { shapes } : {}), ...(Object.keys(slotNotes).length ? { slotNotes } : {}) });
   }
   return out.length ? out : undefined;
 }
@@ -751,16 +839,10 @@ function normalizePanels(raw: unknown): MangaPanel[] | undefined {
 /** Flat ComfyUI exports use the same centered yxyx geometry; adapt only the envelope. */
 function customSource(raw: unknown): unknown {
   if (!raw || typeof raw!=='object' || Array.isArray(raw)) return raw;
-  const entry={...raw} as Record<string,unknown>;
-  if (entry.panels!==undefined) {
-    if (entry.portrait!==undefined || entry.landscape!==undefined) throw new Error('panels 与 portrait/landscape 不能同时提供，请保留一种版式格式。');
-    const canvas=normalizeCanvas(entry.canvas);
-    if (!canvas) throw new Error('ComfyUI panels 格式需要有效的 canvas.width 与 canvas.height。');
-    if (!Array.isArray(entry.panels) || !entry.panels.length) throw new Error('panels:需要非空面板数组。');
-    entry[orientationOf(canvas.width,canvas.height)]=entry.panels;
-    delete entry.panels;
-  }
-  if (typeof entry.description==='string') entry.usage=entry.description;
+  const entry=directionalLayout(raw as Record<string,unknown>);
+  // Historical flat exports treated description as usage; keep that fallback
+  // only when no distinct usage field was supplied.
+  if(entry.usage===undefined && typeof entry.description==='string') entry.usage=entry.description;
   return entry;
 }
 
@@ -777,9 +859,17 @@ function normalizeCustom(raw: unknown): MangaCustomLayout | null {
   const usage = typeof entry.usage === 'string' ? entry.usage.trim() : undefined;
   const readingOrder = typeof entry.readingOrder === 'string' ? entry.readingOrder.trim() : undefined;
   // 只改用途或名称、不动坐标的覆盖条目也合法：panels 会回落到内置表
-  if (!portrait && !landscape && !label && !usage && !readingOrder) return null;
+  if (!portrait && !landscape && !label && !usage && !readingOrder && entry.omitFullPageFrame===undefined && entry.omitSmallFrames===undefined) return null;
+  for (const key of ['omitFullPageFrame','omitSmallFrames'] as const) if (entry[key]!==undefined && typeof entry[key]!=='boolean') return null;
   const canvas = normalizeCanvas(entry.canvas);
-  return { id, label, usage, readingOrder, portrait, landscape, ...(canvas ? { canvas } : {}) };
+  return { id, label, usage, readingOrder, portrait, landscape, ...(canvas ? { canvas } : {}),
+    ...(typeof entry.description==='string' ? {description:entry.description} : {}),
+    ...(typeof entry.promptCaption==='string' ? {promptCaption:entry.promptCaption} : {}),
+    ...(entry.promptMode==='llm' || entry.promptMode==='manual' ? {promptMode:entry.promptMode} : {}),
+    ...(typeof entry.useBboxCorners==='boolean' ? {useBboxCorners:entry.useBboxCorners} : {}),
+    ...(typeof entry.omitFullPageFrame==='boolean' ? {omitFullPageFrame:entry.omitFullPageFrame} : {}),
+    ...(typeof entry.omitSmallFrames==='boolean' ? {omitSmallFrames:entry.omitSmallFrames} : {}),
+  };
 }
 
 export function normalizeCanvas(raw: unknown): { width: number; height: number } | null {
@@ -821,8 +911,10 @@ export function normalizeManga(raw: unknown): MangaSettings {
   }
   return {
     enabled: stored.enabled === true,
+    singleImageMode: stored.singleImageMode === true,
     cooldownRounds: normalizeCooldownRounds(stored.cooldownRounds),
     catalogMode: stored.catalogMode === 'image' ? 'image' : 'text',
+    order: Array.isArray(stored.order) ? [...new Set(stored.order.filter((id): id is string => typeof id==='string' && !!id.trim()).map(id=>id.trim()))] : [],
     disabled,
     deleted: Array.isArray(stored.deleted) ? [...new Set(stored.deleted.filter((v): v is string => typeof v === 'string').map(v => v.trim()).filter(id => builtinIds('portrait').includes(id) || builtinIds('landscape').includes(id)))] : [],
     selectionNotes: typeof stored.selectionNotes === 'string' ? stored.selectionNotes : '',

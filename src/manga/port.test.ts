@@ -19,7 +19,7 @@ function setup() {
 describe('ComfyUI 漫画能力迁移',()=>{
   it('平铺导入保留几何、层级、编号和描述；保存读回仍为同一坐标',()=>{
     const {custom,manga}=setup();
-    expect(custom.usage).toBe('共享画面描述');
+    expect(custom.usage).toBe('旧说明');expect(custom.description).toBe('共享画面描述');
     expect(custom.portrait).toEqual(panels);
     const layout=resolveLayout(manga,'portrait','node_export')!;
     const saved=saveEditedPanel(editablePanel(panelRect(layout.panels[0],canvas),canvas,layout.panels[0]),canvas,'upper');
@@ -32,7 +32,8 @@ describe('ComfyUI 漫画能力迁移',()=>{
 
   it('平铺格式缺少画布、重复方向、非法坐标或斜框都报错',()=>{
     expect(()=>parseCustomLayout(JSON.stringify({id:'x',panels}))).toThrow(/canvas/);
-    expect(()=>parseCustomLayout(JSON.stringify({id:'x',canvas,panels,portrait:panels}))).toThrow(/不能同时/);
+    expect(parseCustomLayout(JSON.stringify({id:'x',canvas,panels,portrait:panels})).portrait).toEqual(panels);
+    expect(()=>parseCustomLayout(JSON.stringify({id:'x',canvas,panels,portrait:[{...panels[0],layer:999}]}))).toThrow(/不一致/);
     expect(()=>parseCustomLayout(JSON.stringify({id:'x',canvas,panels:[{position:'p',slots:{F:[-900,0,10,100]}}]}))).toThrow(/超出画布/);
     expect(()=>parseCustomLayout(JSON.stringify({id:'x',canvas,panels:[{...panels[0],shapes:{F:[[0,0],[100,100],[0,100],[100,0]]}}]}))).toThrow(/四边形/);
   });

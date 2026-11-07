@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue';
 import { settings } from '@/state/settings';
+import Collapsible from '@/components/Collapsible.vue';
 import MangaLayoutEditor from '@/pages/settings/MangaLayoutEditor.vue';
 import { buildLayoutAtlases, rasterizeLayoutAtlas } from '@/manga/atlas';
 import { confirmDialog } from '@/components/confirm';
@@ -11,6 +12,8 @@ import {
   builtinIds,
   type MangaSettings,
   resolveLayouts,
+  planningLayouts,
+  orderMangaLayouts,
   type MangaCustomLayout,
   type MangaOrientation,
   canvasOf,
@@ -33,11 +36,11 @@ const batchError = ref('');
 const importInput = ref<HTMLInputElement>();
 const transferBusy = ref(false), transferError = ref(''), transferNote = ref('');
 
-function exportLayouts(id?:string): void {
+function exportLayouts(id?:string,legacy=false): void {
   transferError.value=''; transferNote.value='';
   let url:string|undefined;
   try {
-    const text=exportMangaLayouts(settings.manga,id);
+    const text=exportMangaLayouts(settings.manga,id,legacy);
     const name=id===undefined ? '全部版式' : id.replace(/[<>:"/\\|?*\u0000-\u001f]/g,'_');
     url=URL.createObjectURL(new Blob([text],{type:'application/json;charset=utf-8'}));
     const link=document.createElement('a');
@@ -63,7 +66,7 @@ async function importLayoutFile(event:Event): Promise<void> {
       if (!confirmed) return;
     }
     const result=importMangaLayouts(settings.manga,text);
-    settings.manga.custom=result.custom; settings.manga.disabled=result.disabled; settings.manga.deleted=result.deleted;
+    settings.manga.custom=result.custom; settings.manga.disabled=result.disabled; settings.manga.deleted=result.deleted; settings.manga.order=result.order;
     resizeBackup.value=undefined; atlasPreview.value=[];
     transferNote.value=`已导入 ${result.count} 套版式（覆盖 ${result.replaced} 套），启用状态随文件保留。`;
   } catch (issue) { transferError.value=issue instanceof Error ? issue.message : String(issue); }
@@ -74,7 +77,7 @@ const atlasBusy = ref(false), atlasError = ref('');
 async function previewAtlases(): Promise<void> {
   atlasBusy.value=true; atlasError.value=''; atlasPreview.value=[];
   try {
-    const atlases=buildLayoutAtlases({portrait:resolveLayouts(settings.manga,'portrait'),landscape:resolveLayouts(settings.manga,'landscape')});
+    const atlases=buildLayoutAtlases({portrait:planningLayouts(settings.manga,'portrait'),landscape:planningLayouts(settings.manga,'landscape')});
     for (const atlas of atlases) atlasPreview.value.push({image:await rasterizeLayoutAtlas(atlas.svg),ids:atlas.ids,orientation:atlas.orientation});
   } catch (issue) { atlasError.value=issue instanceof Error ? issue.message : String(issue); }
   finally { atlasBusy.value=false; }
@@ -127,6 +130,7 @@ function storeLayout(layout: MangaCustomLayout, originalId = ''): boolean {
   else settings.manga.custom.push(layout);
   settings.manga.disabled = settings.manga.disabled.filter(id => id !== originalId && id !== layout.id);
   if (disabled) settings.manga.disabled.push(layout.id);
+  settings.manga.order = settings.manga.order?.map(id=>id===originalId ? layout.id : id);
   settings.manga.deleted = settings.manga.deleted.filter(id => id !== layout.id);
   if (originalId && originalId !== layout.id && builtins.has(originalId) && !settings.manga.deleted.includes(originalId)) {
     settings.manga.deleted.push(originalId); // Do not reveal the built-in again under the old ID.
@@ -191,8 +195,50 @@ const rows = computed<Row[]>(() => {
       else row.landscape = layout.panels.length;
     }
   }
-  return order.map(id => ({ ...byId.get(id)!, disabled: settings.manga.disabled.includes(id) }));
+  return orderMangaLayouts(order.map(id => ({ ...byId.get(id)!, disabled: settings.manga.disabled.includes(id) })), settings.manga.order);
 });
+
+const allEnabled = computed(()=>rows.value.length>0 && rows.value.every(row=>!row.disabled));
+function setAllEnabled(enabled:boolean) {
+  const ids=new Set(rows.value.map(row=>row.id));
+  settings.manga.disabled=enabled ? settings.manga.disabled.filter(id=>!ids.has(id)) : [...new Set([...settings.manga.disabled,...ids])];
+}
+function moveLayout(from:number,to:number) {
+  const ids=rows.value.map(row=>row.id);
+  if(from<0 || to<0 || from>=ids.length || to>=ids.length || from===to) return;
+  ids.splice(to,0,ids.splice(from,1)[0]); settings.manga.order=ids;
+}
+const draggingLayout=ref('');
+let layoutPointer:number|undefined, layoutList:Element|null=null;
+function startLayoutDrag(event:PointerEvent,id:string) {
+  if(event.button!==0) return;
+  endLayoutDrag(); draggingLayout.value=id; layoutPointer=event.pointerId;
+  layoutList=(event.currentTarget as HTMLElement).closest('.bbi-manga-layout-list');
+  document.addEventListener('pointermove',dragLayout,true);
+  document.addEventListener('pointerup',endLayoutDrag,true);
+  document.addEventListener('pointercancel',endLayoutDrag,true);
+  event.preventDefault();
+}
+function dragLayout(event:PointerEvent) {
+  if(event.pointerId!==layoutPointer || !draggingLayout.value) return;
+  const from=rows.value.findIndex(row=>row.id===draggingLayout.value);
+  if(from<0) { endLayoutDrag(); return; }
+  let to=from,distance=Infinity;
+  layoutList?.querySelectorAll<HTMLElement>('.bbi-manga-layout-card').forEach((row,index)=>{
+    const r=row.getBoundingClientRect(),d=Math.abs(event.clientY-r.top-r.height/2);
+    if(d<distance) { distance=d;to=index; }
+  });
+  moveLayout(from,to);
+}
+function endLayoutDrag() {
+  const active=layoutPointer!==undefined;
+  draggingLayout.value='';layoutPointer=undefined;layoutList=null;
+  if(!active) return;
+  document.removeEventListener('pointermove',dragLayout,true);
+  document.removeEventListener('pointerup',endLayoutDrag,true);
+  document.removeEventListener('pointercancel',endLayoutDrag,true);
+}
+onBeforeUnmount(endLayoutDrag);
 
 const activeCount = computed(() => rows.value.filter(row => !row.disabled).length);
 const builtins = new Set(ORIENTATIONS.flatMap(builtinIds));
@@ -334,6 +380,11 @@ function resetBuiltin(id: string): void {
       不再带坐标表——新版式加进这里，下一次请求就会出现在清单里，不需要改提示词。
     </p>
     <p class="bbi-manga-hint">当前可用版式 {{ activeCount }} / {{ rows.length }}。</p>
+    <label class="bbi-manga-row">
+      <input v-model="settings.manga.singleImageMode" type="checkbox" class="bbi-checkbox" aria-label="单图模式（全页一格）" />
+      <span>单图模式（全页一格）</span>
+    </label>
+    <p class="bbi-manga-hint">开启后只选全页单格版式，同轮可复用ID，停用布局冷却；关闭后恢复多格漫画规则。人物与字区可重叠，用明确位置及按需半透明气泡避让关键内容。</p>
       <label class="bbi-manga-row">
         <span>版式说明方式</span>
         <select v-model="settings.manga.catalogMode" class="bbi-input" aria-label="版式说明方式">
@@ -354,23 +405,25 @@ function resetBuiltin(id: string): void {
       </details>
     <label class="bbi-manga-row">
       <span>版式冷却轮数</span>
-      <input v-model.number="settings.manga.cooldownRounds" type="number" min="0" max="30" step="1" class="bbi-input"
+      <input v-model.number="settings.manga.cooldownRounds" :disabled="settings.manga.singleImageMode" type="number" min="0" max="30" step="1" class="bbi-input"
         aria-label="版式冷却轮数" style="width: 88px"
         @change="settings.manga.cooldownRounds = normalizeCooldownRounds(settings.manga.cooldownRounds)" />
     </label>
-    <p class="bbi-manga-hint">默认 3，范围 0～30。按同一聊天成功采纳的自动 tag 请求次数计数，0 关闭跨轮冷却；同轮多页仍不重复。修改后下一次请求生效，无需重发固定规范。</p>
+    <p class="bbi-manga-hint">{{ settings.manga.singleImageMode ? '单图模式不执行布局冷却，原冷却设置保留供关闭单图模式后使用。' : '默认3，范围0～30。按已采纳请求计数，0关闭跨轮冷却；同轮多页仍不重复。' }} 修改后下一次请求生效。</p>
     <button v-if="settings.manga.deleted.length" type="button" class="bbi-manga-btn" @click="restoreDeleted">恢复已删除的默认版式（{{ settings.manga.deleted.length }}）</button>
 
-    <div class="bbi-manga-editor">
+    <Collapsible title="漫画规范" :open="false">
       <p class="bbi-manga-hint">
         漫画规范：只在开关打开时生效，留空则沿用「自动生成 tag」里的后端规范框。版式清单由插件自动接在它后面，这里不要写坐标。
       </p>
       <textarea v-model="settings.manga.spec" class="bbi-input bbi-manga-code" spellcheck="false" placeholder="粘贴漫画 1080p 规范全文"></textarea>
+    </Collapsible>
+    <Collapsible title="漫画检查指导" :open="false">
       <p class="bbi-manga-hint">
         漫画检查指导：同样只在开关打开时生效，留空则沿用常规思考清单（或插件内置的 Layout 默认）。
       </p>
       <textarea v-model="settings.manga.thinking" class="bbi-input bbi-manga-notes" spellcheck="false" placeholder="粘贴输出前检查指导全文"></textarea>
-    </div>
+    </Collapsible>
 
     <div class="bbi-manga-row">
       <label for="bbi-manga-bleed">出框基准（px）</label>
@@ -385,13 +438,14 @@ function resetBuiltin(id: string): void {
       />
       <span class="bbi-manga-meta">2 格 ×1.25 · 3 格 ×1 · 4 格 ×0.8 · 5 格以上 ×0.6</span>
     </div>
+    <p class="bbi-manga-hint">仅用于旧版 X 槽的出框兼容；实际 S 等主体框按编辑器坐标，不受此数值影响。</p>
 
-    <div class="bbi-manga-editor">
+    <Collapsible title="版式选择说明" :open="false">
       <p class="bbi-manga-hint">
         版式选择说明：整段拼入提示词末尾，用来补充说明你想要选择的版式。
       </p>
       <textarea v-model="settings.manga.selectionNotes" class="bbi-input bbi-manga-notes" spellcheck="false" placeholder="留空则只输出插件生成的清单"></textarea>
-    </div>
+    </Collapsible>
 
     <div class="bbi-manga-editor bbi-manga-item">
       <strong>批量修改画布大小</strong>
@@ -410,6 +464,7 @@ function resetBuiltin(id: string): void {
       <strong>版式导入 / 导出</strong>
       <div class="bbi-manga-item-actions">
         <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts()">导出全部版式（{{ rows.length }}）</button>
+        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(undefined,true)">导出旧版兼容文件</button>
         <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="importInput?.click()">{{ transferBusy ? '正在导入…' : '导入版式' }}</button>
         <input ref="importInput" type="file" accept=".json,application/json" aria-label="导入版式 JSON 文件" hidden @change="importLayoutFile" />
       </div>
@@ -418,8 +473,12 @@ function resetBuiltin(id: string): void {
       <p v-if="transferError" class="bbi-manga-error" role="alert">{{ transferError }}</p>
     </div>
 
-    <div v-for="row in rows" :key="row.id" class="bbi-manga-item">
+    <label class="bbi-manga-mini"><input type="checkbox" class="bbi-checkbox" :checked="allEnabled" :indeterminate="activeCount>0 && !allEnabled" :disabled="!rows.length" @change="setAllEnabled(($event.target as HTMLInputElement).checked)" />全部启用（{{ activeCount }}/{{ rows.length }}）</label>
+    <p class="bbi-manga-hint">拖动手柄调整列表与图册顺序；手柄也支持上下方向键。此顺序不改变格内读序或遮挡层级，也不强制模型按顺序选版。</p>
+    <div class="bbi-manga-layout-list">
+    <div v-for="(row,index) in rows" :key="row.id" class="bbi-manga-item bbi-manga-layout-card" :class="{'is-dragging':draggingLayout===row.id}">
       <div class="bbi-manga-item-head">
+        <button type="button" class="bbi-manga-btn bbi-manga-grip" aria-label="拖动版式排序，方向键上下移动" title="拖动排序；方向键上下移动" @pointerdown="startLayoutDrag($event,row.id)" @keydown.up.prevent="moveLayout(index,index-1)" @keydown.down.prevent="moveLayout(index,index+1)">⠿</button>
         <code>{{ row.id }}</code>
         <span class="bbi-manga-label">{{ row.label }}</span>
         <span class="bbi-manga-meta">竖 {{ row.portrait }} 格 · 横 {{ row.landscape }} 格{{ row.custom ? ' · 自定义' : '' }}</span>
@@ -459,6 +518,7 @@ function resetBuiltin(id: string): void {
       </div>
     </div>
 
+    </div>
     <div class="bbi-manga-item-actions">
       <button type="button" class="bbi-manga-btn" @click="openQuick()">快捷自定义</button>
       <button type="button" class="bbi-manga-btn" @click="startNew">新增版式（JSON）</button>
@@ -486,6 +546,11 @@ function resetBuiltin(id: string): void {
 </template>
 
 <style scoped>
+.bbi-manga-layout-list { display: grid; gap: 12px; }
+.bbi-manga-grip { cursor: grab; touch-action: none; user-select: none; padding: 4px 8px; }
+.bbi-manga-grip:active { cursor: grabbing; }
+.bbi-manga-layout-card.is-dragging { outline: 1px dashed currentColor; }
+
 .bbi-manga {
   display: flex;
   flex-direction: column;

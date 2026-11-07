@@ -1,10 +1,10 @@
-import type { MangaPanel } from '@/manga/layouts';
+import type { MangaPanel, ManualContent } from '@/manga/layouts';
 import { validQuad } from '@/manga/layouts';
 
 export interface CanvasSize { width: number; height: number }
 export interface PanelRect { x: number; y: number; width: number; height: number }
 /** 槽位按父格比例保存，移动/缩放外框时随父格变动。F 由外框生成，不能单独删除。 */
-export interface EditablePanel extends PanelRect { slots: Record<string, PanelRect>; corners: Record<string, number[][]>; layer?: number; position?: string; slotNotes?: Record<string, string> }
+export interface EditablePanel extends PanelRect { slots: Record<string, PanelRect>; corners: Record<string, number[][]>; layer?: number; position?: string; slotNotes?: Record<string, string>; slotContents?: Record<string, ManualContent[]>; locked?:boolean }
 export const MIN_PANEL = 24;
 export const clamp = (v: number, min: number, max: number): number => Math.max(min, Math.min(max, v));
 
@@ -23,8 +23,9 @@ export function editablePanel(rect: PanelRect, canvas: CanvasSize, source?: Mang
   const result: EditablePanel = { ...rect, slots: {}, corners: {} };
   if (source?.layer !== undefined) result.layer = source.layer;
   if (source?.position) result.position = source.position;
+  if (source?.locked) result.locked=true;
   for (const [key, [y1, x1, y2, x2]] of Object.entries((source ?? panelFromRect(rect, canvas, '')).slots)) {
-    if (key === 'F' || key === 'X') continue;
+    if (key === 'F') continue;
     setSlotRect(result, key, { x: x1 + canvas.width / 2, y: y1 + canvas.height / 2, width: x2 - x1, height: y2 - y1 });
   }
   for (const [key, points] of Object.entries(source?.shapes ?? {})) {
@@ -33,6 +34,7 @@ export function editablePanel(rect: PanelRect, canvas: CanvasSize, source?: Mang
     result.corners[key] = points.map(([x,y]) => [(x + canvas.width/2 - bounds.x)/bounds.width, (y + canvas.height/2 - bounds.y)/bounds.height]);
   }
   if (source?.slotNotes) result.slotNotes = { ...source.slotNotes };
+  if (source?.slotContents) result.slotContents = JSON.parse(JSON.stringify(source.slotContents));
   return result;
 }
 
@@ -68,7 +70,8 @@ export function saveEditedPanel(panel: EditablePanel, canvas: CanvasSize, positi
   };
   const shapes = Object.fromEntries(Object.keys(panel.corners).filter(key => key === 'F' || panel.slots[key]).map(key => [key,quadPoints(panel,key).map(([x,y])=>[clamp(Math.round(x),0,canvas.width)-canvas.width/2,clamp(Math.round(y),0,canvas.height)-canvas.height/2])]));
   const slotNotes = Object.fromEntries(Object.entries(panel.slotNotes ?? {}).filter(([key,note]) => (key === 'F' || panel.slots[key]) && note.trim()).map(([key,note]) => [key,note.trim()]));
-  return { position, ...(panel.layer !== undefined ? { layer:panel.layer } : {}), slots: { F: box(panel), ...Object.fromEntries(Object.keys(panel.slots).map(key => [key, box(slotRect(panel, key))])) }, ...(Object.keys(shapes).length ? { shapes } : {}), ...(Object.keys(slotNotes).length ? { slotNotes } : {}) };
+  const slotContents = Object.fromEntries(Object.entries(panel.slotContents ?? {}).filter(([key,items]) => (key === 'F' || panel.slots[key]) && items.length).map(([key,items]) => [key,JSON.parse(JSON.stringify(items))]));
+  return { position, ...(panel.locked ? {locked:true} : {}), ...(panel.layer !== undefined ? { layer:panel.layer } : {}), slots: { F: box(panel), ...Object.fromEntries(Object.keys(panel.slots).map(key => [key, box(slotRect(panel, key))])) }, ...(Object.keys(shapes).length ? { shapes } : {}), ...(Object.keys(slotNotes).length ? { slotNotes } : {}), ...(Object.keys(slotContents).length ? { slotContents } : {}) };
 }
 
 /** 自动槽位只是框内的候选区域，不划分人物或约束真实文字尺寸。 */

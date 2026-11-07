@@ -11,7 +11,7 @@ export function layoutAtlasMessages(images: string[], labels: string[], perMessa
     messages.push({role:'user',
       content:ATLAS_IMAGE_HEADER+`（第 ${start/perMessage+1}/${Math.ceil(images.length/perMessage)} 组）\n`+
         group.map((label,i)=>`本消息第 ${i+1} 张（总图 ${start+i+1}）：${label}`).join('\n')+
-        '\n图册包含暂时冷却的 ID；实际选版必须服从本轮文字白名单。图中 panel 编号对应 item.panel，箭头连接编号表示读序；紫色虚线为可用 G，灰斜纹与“不可用”标牌表示整项 G 禁用，同处其他合法槽位不受影响。只参考几何，不把图例、箭头或标签画进作品。'+
+        '\n图册不授予本轮选择权限，实际选版必须服从本轮文字白名单。图中 panel 编号对应 item.panel，箭头连接编号表示读序；紫色虚线为可用 G，灰斜纹与“不可用”标牌表示整项 G 禁用，同处其他合法槽位不受影响。只参考几何，不把图例、箭头或标签画进作品。'+
         (start===0 && catalog ? '\n'+catalog : ''),
       images:images.slice(start,start+perMessage),atlasLabels:group,
       ...(revision ? {atlasRevision:revision} : {}),...(start===0 && catalog ? {atlasCatalog:catalog} : {})});
@@ -117,11 +117,17 @@ export function buildLayoutAtlases(layouts: Record<MangaOrientation, ResolvedLay
       const parts=[`<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}" font-family="Arial, Microsoft YaHei, sans-serif">`,
         `<rect width="${WIDTH}" height="${HEIGHT}" fill="#eef2f7"/>`,
         text(28,36,`LAYOUT ATLAS · ${orientation} · ${start/4+1}/${Math.ceil(entries.length/4)}`,25),
-        text(28,66,'panel # = item.panel · arrows = reading order · dashed G = usable · hatched / 不可用 = entire G disabled',16),
+        text(28,66,'F = full frame · panel # = item.panel · arrows = order · dashed G = usable · hatched G = disabled',16),
         `<defs><pattern id="g-disabled" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(40)"><rect width="6" height="6" fill="#dce0e6"/><path d="M0 0V6" stroke="#858e9b" stroke-width="1.7"/></pattern><marker id="reading-head" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="16" markerHeight="16" orient="auto"><path d="M1 1L9 5L1 9L3 5Z" fill="${COLORS.reading}"/></marker></defs>`,
       ];
-      const legend=[['subject','Subject S / L / R'],['text','Text T / TL / TR / B / ML / MR'],['auxiliary','Auxiliary O'],['background','Background C / E']] as const;
-      legend.forEach(([role,label],i)=>parts.push(text(28+i*352,96,label,16,COLORS[role])));
+      const present=new Set(batch.flatMap(layout=>layout.panels.flatMap(panel=>Object.keys(panel.slots).map(slotType))));
+      const legend: [keyof typeof COLORS,string][]=[
+        ['subject',`Subject ${['S','L','R'].filter(key=>present.has(key)).join(' / ')}`],
+        ['text',`Text ${['T','TL','TR','B','BL','BR','ML','MR'].filter(key=>present.has(key)).join(' / ')}`],
+        ['auxiliary',present.has('O') ? 'Auxiliary O' : ''],
+        ['background',[present.has('C') ? 'Inner content C' : '',present.has('E') ? 'Edge overlap E' : ''].filter(Boolean).join(' / ')],
+      ];
+      legend.filter(([,label])=>label && !/^(Subject|Text) $/.test(label)).forEach(([role,label],i)=>parts.push(text(28+i*352,96,label,Math.min(16,Math.floor(510/label.length)),COLORS[role])));
       batch.forEach((layout,cell)=>{
         const x=20+(cell%2)*(CARD_W+16), y=120+Math.floor(cell/2)*(CARD_H+16);
         parts.push(`<rect x="${x}" y="${y}" width="${CARD_W}" height="${CARD_H}" rx="12" fill="white" stroke="#cbd5e1"/>`,

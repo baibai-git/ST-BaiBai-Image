@@ -17,6 +17,16 @@ function effective(manga:MangaSettings) {
 }
 
 describe('layout file transfer',()=>{
+  it('导出导入保留跨方向的列表顺序，旧版文件不覆盖当前顺序',()=>{
+    const manga=source();manga.order=['wide','mine','balanced_3'];
+    const file=JSON.parse(exportMangaLayouts(manga));
+    expect(file.layouts.slice(0,3).map((layout:any)=>layout.id)).toEqual(manga.order);
+    const imported={...mangaDefaults(),...importMangaLayouts(mangaDefaults(),JSON.stringify(file))};
+    expect(JSON.parse(exportMangaLayouts(imported)).order).toEqual(file.order);
+    delete file.order;
+    expect(importMangaLayouts(manga,JSON.stringify(file)).order).toEqual(manga.order);
+    expect(()=>importMangaLayouts(manga,JSON.stringify({...file,order:[null]}))).toThrow(/顺序/);
+  });
   it('round-trips the actual visible library, disabled entries and deleted defaults without private rules',()=>{
     const original=source(), before=JSON.stringify(original), text=exportMangaLayouts(original);
     expect(text).not.toContain('PRIVATE_');
@@ -81,4 +91,20 @@ describe('layout file transfer',()=>{
     expect(JSON.parse(text).layouts).toEqual([]);
     expect(effective({...mangaDefaults(),...result})).toEqual({portrait:[],landscape:[]});
   });
+});
+
+
+it('框线说明开关随版式解析、存储和文件往返保留',()=>{
+  const manga=source();
+  Object.assign(manga.custom[0],{omitFullPageFrame:true,omitSmallFrames:false});
+  const parsed=parseCustomLayout(JSON.stringify(manga.custom[0]));
+  expect(parsed.omitFullPageFrame).toBe(true);expect(parsed.omitSmallFrames).toBe(false);
+  const restored=normalizeManga(JSON.parse(JSON.stringify(manga)));
+  const file=exportMangaLayouts(restored);
+  const single=JSON.parse(exportMangaLayouts(restored,'mine'));
+  expect(single.omitFullPageFrame).toBe(true);expect(single.omitSmallFrames).toBe(false);
+  const result={...mangaDefaults(),...importMangaLayouts(mangaDefaults(),file)};
+  const resolved=resolveLayouts({...result,disabled:[]},'portrait').find(layout=>layout.id==='mine')!;
+  expect(resolved.omitFullPageFrame).toBe(true);expect(resolved.omitSmallFrames).toBe(false);
+  expect(()=>parseCustomLayout(JSON.stringify({...parsed,omitSmallFrames:'true'}))).toThrow();
 });

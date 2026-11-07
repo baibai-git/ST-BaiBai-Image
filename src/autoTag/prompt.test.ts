@@ -931,8 +931,9 @@ describe('auto tag prompt', () => {
     expect(messages.some(m => m.content.includes('"tag":"1girl, long silver hair, red eyes, white dress"'))).toBe(true);
     expect(messages.some(m => m.content.includes('@小雪'))).toBe(false);
     expect(messages.some(m => m.content.includes('系统会替换成库中最新 tag'))).toBe(false);
-    // 照抄库中字段 + 一张图只写一遍,是本次回退的两条核心措辞
-    expect(messages.some(m => m.content.includes('照抄库中/刚建档的字段值'))).toBe(true);
+    // 身份字段保持原词；可见取用和默认衣着不再被整套照抄覆盖。
+    expect(messages.some(m => m.content.includes('身份特征须取当前有效的库中/刚建档字段并保持原词'))).toBe(true);
+    expect(messages.some(m => m.content.includes('只选本镜头可见部分'))).toBe(true);
     expect(messages.some(m => m.content.includes('只写一遍'))).toBe(true);
     expect(messages[messages.length - 1].content).toContain(library);
     expect(messages[messages.length - 1].content).not.toContain('currently empty');

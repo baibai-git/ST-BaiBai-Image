@@ -29,6 +29,45 @@ function section() {
 
 describe('可视化编辑保存',()=>{
   beforeEach(()=>{ settings.manga=mangaDefaults(); });
+  it('版式排序持久化且影响候选顺序，不改变分格坐标、读序和层级',()=>{
+    const {state,close}=section();
+    const ids=state.rows.value.map((row:any)=>row.id);
+    const original=resolveLayouts(settings.manga,'portrait');
+    state.moveLayout(1,0);
+    expect(state.rows.value.slice(0,2).map((row:any)=>row.id)).toEqual([ids[1],ids[0]]);
+    const restored=normalizeManga(JSON.parse(JSON.stringify(settings.manga)));
+    const resolved=resolveLayouts(restored,'portrait');
+    expect(resolved.slice(0,2).map(row=>row.id)).toEqual([ids[1],ids[0]]);
+    for(const layout of original) expect(resolved.find(row=>row.id===layout.id)).toEqual(layout);
+    state.moveLayout(-1,0);state.moveLayout(0,ids.length);
+    expect(settings.manga.order).toEqual(restored.order);
+    close();
+  });
+  it('一键开关所有可见版式，保留删除状态和隐藏项的设置',()=>{
+    settings.manga.deleted=['balanced_2'];
+    settings.manga.disabled=['hidden_layout','balanced_1'];
+    const {state,close}=section();
+    const ids=state.rows.value.map((row:any)=>row.id);
+    expect(state.allEnabled.value).toBe(false);
+    state.setAllEnabled(true);
+    expect(state.allEnabled.value).toBe(true);
+    expect(settings.manga.disabled).toEqual(['hidden_layout']);
+    state.setAllEnabled(false);
+    expect(state.activeCount.value).toBe(0);
+    expect(new Set(settings.manga.disabled)).toEqual(new Set(['hidden_layout',...ids]));
+    expect(settings.manga.deleted).toEqual(['balanced_2']);
+    close();
+  });
+  it('可视化保存框线说明开关，关闭后可恢复且另一方向复用同一设置',()=>{
+    const manga=mangaDefaults();
+    settings.manga={...manga,custom:[{id:'mine',portrait:[{position:'single',slots:{F:[-960,-544,960,544]}}],landscape:[{position:'wide',slots:{F:[-544,-960,544,960]}}]}]};
+    const {state,close}=section();state.openQuick('mine');
+    state.saveQuick({...settings.manga.custom[0],omitFullPageFrame:true,omitSmallFrames:true,canvas:{width:1088,height:1920}});
+    expect(state.quickSources.value.filter((s:any)=>s.id==='mine').every((s:any)=>s.omitFullPageFrame && s.omitSmallFrames)).toBe(true);
+    state.openQuick('mine');state.saveQuick({...settings.manga.custom[0],omitFullPageFrame:false,omitSmallFrames:false,canvas:{width:1088,height:1920}});
+    expect(settings.manga.custom[0].omitFullPageFrame).toBe(false);expect(settings.manga.custom[0].omitSmallFrames).toBe(false);
+    close();
+  });
   it('修改自定义 ID 原地改名，保留另一方向与停用状态',()=>{
     const portrait=[{position:'old',slots:{F:[-900,-500,900,500]}}];
     const landscape=[{position:'wide',slots:{F:[-500,-900,500,900]}}];

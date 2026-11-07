@@ -12,6 +12,8 @@ export type MangaOrientation = 'portrait' | 'landscape';
 /** 单槽位坐标,[y_min, x_min, y_max, x_max],画布中心为原点。 */
 export type FrameBox = number[];
 
+export interface ManualContent { label:'object'|'character'|'text'; caption:string; text?:string; textType?:'dialogue'|'narration'|'sfx' }
+
 export interface MangaPanel {
   /** 该格在版式里的位置代号,如 single / top-left / right-main。 */
   position: string;
@@ -21,6 +23,8 @@ export interface MangaPanel {
   slots: Record<string, FrameBox>;
   /** 各框用途，F 说明整格，其余键说明对应内框；只发送给规划 LLM。 */
   slotNotes?: Record<string, string>;
+  slotContents?: Record<string, ManualContent[]>;
+  locked?: boolean;
   /** 自定义四边形轮廓：[x,y]，以画布中心为原点；bbox 仍为其外接矩形。 */
   shapes?: Record<string, number[][]>;
 }

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue';
 import ModalMask from '@/components/ModalMask.vue';
-import { canvasOf, normalizeCanvas, orientationOf, parseCustomLayout, slotType, type MangaCustomLayout, type ResolvedLayout } from '@/manga/layouts';
+import { canvasOf, normalizeCanvas, orientationOf, parseCustomLayout, slotType, isFullPagePanel, type FrameGuideOptions, type MangaCustomLayout, type ResolvedLayout } from '@/manga/layouts';
 import { clamp, deformCorner, editablePanel, fitRect, MIN_PANEL, panelRect, quadPoints, saveEditedPanel, setSlotRect, slotRect, snapRect, type EditablePanel, type PanelRect } from '@/manga/editor';
 
 const props = defineProps<{ sources: (ResolvedLayout & { key: string })[]; existingIds: string[]; initialKey?: string; editingId?: string }>();
 const emit = defineEmits<{ close: []; save: [layout: MangaCustomLayout] }>();
-interface LayoutDocument { id: string; label: string; usage: string; width: number; height: number; panels: EditablePanel[] }
+interface LayoutDocument extends FrameGuideOptions { metadata?:Record<string,any>; id: string; label: string; usage: string; width: number; height: number; panels: EditablePanel[] }
 function unusedId(base: string): string {
   let id = base, suffix = 2;
   while (props.existingIds.includes(id)) id = `${base}_${suffix++}`;
@@ -98,6 +98,12 @@ function visibleSlots(panel: EditablePanel, index: number): { key: string; rect:
     .sort((a,b) => Number(index === selected.value && a === selectedSlot.value) - Number(index === selected.value && b === selectedSlot.value)).map(key => ({ key, rect: slotRect(panel,key) }));
 }
 const canvas = computed(() => ({ width: doc.value.width, height: doc.value.height }));
+const hasFullPage = computed(() => doc.value.panels.some(panel => isFullPagePanel(saveEditedPanel(panel,canvas.value,'probe'),canvas.value)));
+const hasSmallFrames = computed(() => doc.value.panels.some(panel => !isFullPagePanel(saveEditedPanel(panel,canvas.value,'probe'),canvas.value)));
+function toggleFrameGuide(key: 'omitFullPageFrame' | 'omitSmallFrames', event: Event): void {
+  const checked=(event.target as HTMLInputElement).checked;
+  edit(() => { doc.value[key]=checked; });
+}
 const drawn = computed(() => doc.value.panels.map((rect, index) => ({ rect, index })).sort((a, b) => (a.rect.layer ?? a.index) - (b.rect.layer ?? b.index) || a.index-b.index));
 const selectedLayer = computed(() => drawn.value.findIndex(item => item.index === selected.value));
 function moveLayer(delta: number): void {
@@ -140,7 +146,7 @@ function loadSource(): void {
   if (!source) return;
   edit(() => {
     const editing = source.id === props.editingId;
-    doc.value = { id: editing ? source.id : unusedId(`${source.id}_copy`), label: editing ? source.label : `${source.label}（副本）`, usage: source.usage ?? '', ...source.canvas, panels: source.panels.map((panel,index) => ({...editablePanel(panelRect(panel, source.canvas), source.canvas, panel), layer:panel.layer ?? index})) };
+    doc.value = { metadata: JSON.parse(JSON.stringify(source)), id: editing ? source.id : unusedId(`${source.id}_copy`), label: editing ? source.label : `${source.label}（副本）`, usage: source.usage ?? '', omitFullPageFrame:source.omitFullPageFrame===true, omitSmallFrames:source.omitSmallFrames===true, ...source.canvas, panels: source.panels.map((panel,index) => ({...editablePanel(panelRect(panel, source.canvas), source.canvas, panel), layer:panel.layer ?? index})) };
   });
   canvasWidth.value = doc.value.width; canvasHeight.value = doc.value.height;
   selectPanel(doc.value.panels.length ? 0 : -1);
@@ -323,7 +329,11 @@ function save(): void {
     })) {
       error.value = '此版式含另一画布方向。请保持标准画布尺寸，或从“快捷自定义”新建独立版式后再调整非标准尺寸。'; return;
     }
-    const layout = parseCustomLayout(JSON.stringify({ id: doc.value.id.trim(), label: doc.value.label.trim() || doc.value.id.trim(), usage: doc.value.usage.trim(), canvas: canvas.value, readingOrder: positions.value.join(' → '), [orientation]: doc.value.panels.map((r, i) => saveEditedPanel(r, canvas.value, positions.value[i])) }));
+    const metadata={...doc.value.metadata};
+    delete metadata.panels; delete metadata.key;
+    const other=props.sources.find(source=>source.id===doc.value.metadata?.id && orientationOf(source.canvas.width,source.canvas.height)!==orientation);
+    if(other) metadata[orientation==='portrait'?'landscape':'portrait']=other.panels;
+    const layout = parseCustomLayout(JSON.stringify({ ...metadata, id:doc.value.id.trim(), label:doc.value.label.trim() || doc.value.id.trim(), usage:doc.value.usage.trim(), omitFullPageFrame:doc.value.omitFullPageFrame, omitSmallFrames:doc.value.omitSmallFrames, canvas:canvas.value, readingOrder:positions.value.join(' → '), [orientation]:doc.value.panels.map((r,i)=>saveEditedPanel(r,canvas.value,positions.value[i])) }));
     emit('save', layout);
   } catch (e) { error.value = e instanceof Error ? e.message : String(e); }
 }
@@ -363,6 +373,8 @@ onMounted(() => {
           <div class="inline"><button type="button" :disabled="!undoStack.length" @click="undo">撤销</button><button type="button" :disabled="!redoStack.length" @click="redo">重做</button></div>
           <label class="check"><input v-model="snap" type="checkbox" />对齐吸附</label>
           <label class="check"><input v-model="slotsPreview" type="checkbox" />显示可编辑槽位</label>
+          <label class="check" :title="hasFullPage ? '省略编译器追加的整页 F 框线说明，保留内容与坐标。' : '需要覆盖整个画布的矩形 F 框。'"><input type="checkbox" :checked="doc.omitFullPageFrame===true" :disabled="!hasFullPage" @change="toggleFrameGuide('omitFullPageFrame',$event)" />省略整页主框说明</label>
+          <label class="check" :title="hasSmallFrames ? '省略编译器追加的小格外框说明，保留内容与坐标。' : '需要非整页的小格 F 框。'"><input type="checkbox" :checked="doc.omitSmallFrames===true" :disabled="!hasSmallFrames" @change="toggleFrameGuide('omitSmallFrames',$event)" />省略小格框线说明</label>
           <p class="hint">拖动外框移动整格；拖动黄色/绿色小框单独编辑槽位。直接拖动四角或边中点缩放；按住 Ctrl 再拖四角才形变。Alt 暂停吸附，方向键微调，Delete 删除选中项，Ctrl+Z 撤销。</p>
           <strong>读序（先读 1）</strong>
           <button v-for="(_, i) in doc.panels" :key="i" type="button" :class="{ active: selected === i }" @click="selectPanel(i)">第 {{ i + 1 }} 格</button>

@@ -72,6 +72,20 @@ beforeEach(() => {
 });
 
 describe('runner layout adoption', () => {
+  it('single-image mode accepts two portraits with one full-page ID, including retry, without consuming cooldown history', async () => {
+    h.settings.autoTag.minImages = 2;
+    h.settings.manga.singleImageMode = true;
+    h.settings.manga.custom = [{id:'a',canvas:{width:1152,height:1728},portrait:[{position:'one',slots:{F:[-864,-576,864,576]}}]}];
+    h.context.chatMetadata[LAYOUT_HISTORY_KEY] = [['a']];
+    h.responses = [new Error('network'),response('a','a')];
+    await requestFloorTags(0);
+    expect(h.messages).toHaveLength(2);
+    expect(h.messages[1].at(-1)?.content).toContain('同轮可复用ID');
+    expect(h.messages[1].at(-1)?.content).not.toContain('请遵守本轮版式冷却白名单与同轮去重要求');
+    expect(h.context.chatMetadata[LAYOUT_HISTORY_KEY]).toEqual([['a']]);
+    expect(h.saves).toBe(1);
+  });
+
   it('counts a successful accepted request once after a network retry', async () => {
     h.responses = [new Error('network'), response('a')];
     await requestFloorTags(0);
