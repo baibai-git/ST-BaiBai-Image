@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, requestCompletion, type ChatMsg } from './client';
 import { dshChatId, requestDshCompletion, splitDshMessages, type DshOperation } from './dsh';
-import { settings, type ApiChannel } from '@/state/settings';
+import { DEFAULT_DSH_SKILL_REQUEST, settings, type ApiChannel } from '@/state/settings';
 import type { STContext } from '@/st/context';
 import { buildMangaSpec, mangaDefaults } from '@/manga/layouts';
 import { createLayoutSelection, setLayoutSelectionMessage } from '@/autoTag/layoutCooldown';
@@ -30,7 +30,45 @@ function server(run:(body:any)=>Response|Promise<Response>=body=>response(body))
     const body=JSON.parse(init.body);calls.push(body);return run(body);
   }));
 }
-beforeEach(()=>{settings.autoTag.dshDedicated=false;settings.autoTag.dshUserMessages=false;settings.autoTag.dshRuleSource='plugin';delete settings.autoTag.dshDedicatedState;vi.clearAllMocks();calls=[];imageLimit=4;clientEndpoints=[{id:'baibaohui',enabled:true,skillId:'moss-layout-spec'}];h.context=context();server();});
+beforeEach(()=>{settings.autoTag.dshDedicated=false;settings.autoTag.dshUserMessages=false;settings.autoTag.dshRuleSource='plugin';settings.autoTag.dshSkillRequest=DEFAULT_DSH_SKILL_REQUEST;delete settings.autoTag.dshDedicatedState;vi.clearAllMocks();calls=[];imageLimit=4;clientEndpoints=[{id:'baibaohui',enabled:true,skillId:'moss-layout-spec'}];h.context=context();server();});
+
+describe('editable per-turn Skill request',()=>{
+  const endpoint={...channel,url:'http://127.0.0.1:43121/clients/baibaohui/v1'};
+  it.each([false,true])('sends custom text once at the end with automatic KEEP, dedicated=%s',async(dedicated)=>{
+    settings.autoTag.dshDedicated=dedicated;settings.autoTag.dshRuleSource='skill';
+    settings.autoTag.dshSkillRequest='读取 {{skill_id}}。\n按照 {{skill_id}} 输出 "JSON"。';
+    await requestDshCompletion(endpoint,messages,h.context!,{protocolKey:'manga'});
+    const generated=calls.find(call=>payload(call).action==='generate');
+    expect(generated.messages.at(-1)).toEqual({role:'user',content:'<<<STB-KEEP>>>\n读取 moss-layout-spec。\n按照 moss-layout-spec 输出 "JSON"。\n<<<STB-/KEEP>>>'});
+    expect(generated.messages.filter((m:any)=>typeof m.content==='string' && m.content.includes('读取 moss-layout-spec'))).toHaveLength(1);
+    expect(payload(generated).skill_id).toBe('moss-layout-spec');
+    expect(calls.filter(call=>payload(call).action!=='generate').every(call=>!JSON.stringify(call.messages).includes('读取 moss-layout-spec'))).toBe(true);
+  });
+  it.each([undefined,'','  \n '])('uses default text when blank: %s',async(value)=>{
+    settings.autoTag.dshRuleSource='skill';settings.autoTag.dshSkillRequest=value;
+    await requestDshCompletion(endpoint,messages,h.context!,{protocolKey:'manga'});
+    expect(calls.at(-1).messages.at(-1).content).toBe('<<<STB-KEEP>>>\n'+DEFAULT_DSH_SKILL_REQUEST.replaceAll('{{skill_id}}','moss-layout-spec')+'\n<<<STB-/KEEP>>>');
+  });
+  it('does not send saved custom text when the switch is off or for a non-manga task',async()=>{
+    settings.autoTag.dshSkillRequest='CUSTOM_SKILL_REQUEST';
+    await requestDshCompletion(endpoint,messages,h.context!,{protocolKey:'manga'});
+    settings.autoTag.dshRuleSource='skill';
+    await requestDshCompletion(endpoint,messages,h.context!,{protocolKey:'nai'});
+    expect(JSON.stringify(calls)).not.toContain('CUSTOM_SKILL_REQUEST');
+    expect(calls.every(call=>payload(call).skill_enabled===false)).toBe(true);
+  });
+  it('keeps retry text frozen after editing and uses the edit for the next task',async()=>{
+    settings.autoTag.dshRuleSource='skill';settings.autoTag.dshSkillRequest='FIRST {{skill_id}}';
+    const operation:DshOperation={};let fail=true;
+    server(body=>{if(fail){fail=false;throw new TypeError('network');}return response(body);});
+    await expect(requestDshCompletion(endpoint,messages,h.context!,{protocolKey:'manga',operation})).rejects.toThrow('network');
+    const original=structuredClone(calls[0]);settings.autoTag.dshSkillRequest='NEXT {{skill_id}}';
+    await requestDshCompletion(endpoint,messages,h.context!,{protocolKey:'manga',operation});
+    expect(calls[1]).toEqual(original);
+    await requestDshCompletion(endpoint,messages,h.context!,{protocolKey:'manga'});
+    expect(calls[2].messages.at(-1).content).toContain('NEXT moss-layout-spec');
+  });
+});
 
 describe('DSH user-message switch',()=>{
   const endpoint={...channel,url:'http://127.0.0.1:43121/clients/baibaohui/v1'};
@@ -326,6 +364,40 @@ describe('DSH persistent agent routing',()=>{
     expect(calls[1]).toEqual(calls[0]);
     expect(calls[1].messages.filter((message:any)=>Array.isArray(message.content)).map((message:any)=>message.content.length-1)).toEqual([4,2]);
   });
+  it.each(['plugin','skill'] as const)('retries a retained dedicated atlas without losing confirmed capabilities: %s',async(source)=>{
+    settings.autoTag.dshDedicated=true;settings.autoTag.dshRuleSource=source;
+    const endpoint={...channel,url:'http://127.0.0.1:43121/clients/baibaohui/v1'};
+    const batch=[...messages,...layoutAtlasMessages(['data:image/png;base64,AAAA'],['portrait'],4,'a'.repeat(64))];
+    await requestDshCompletion(endpoint,batch,h.context!,{protocolKey:'manga'});
+    calls=[];let failures=2;
+    server(body=>{if(failures-->0)throw new TypeError('network');return response(body);});
+    const operation:DshOperation={};
+    await expect(requestDshCompletion(endpoint,batch,h.context!,{operation,protocolKey:'manga'})).rejects.toThrow('network');
+    expect(operation.pending?.session.layout_atlas?.message_indices).toEqual([]);
+    const original=structuredClone(calls[0]);
+    const capabilityCalls=()=>vi.mocked(fetch).mock.calls.filter(([url])=>String(url).endsWith('/v1/bridge/capabilities')).length;
+    const beforeRetry=capabilityCalls();
+    await expect(requestDshCompletion(endpoint,batch,h.context!,{operation,protocolKey:'manga'})).rejects.toThrow('network');
+    await expect(requestDshCompletion(endpoint,batch,h.context!,{operation,protocolKey:'manga'})).resolves.toBe('result');
+    expect(calls).toHaveLength(3);
+    expect(calls[1]).toEqual(original);expect(calls[2]).toEqual(original);
+    expect(calls.every(call=>call.messages.every((message:any)=>typeof message.content==='string'))).toBe(true);
+    expect(capabilityCalls()).toBe(beforeRetry);
+  });
+  it('rechecks retained atlas capabilities when an older pending snapshot has no handshake',async()=>{
+    settings.autoTag.dshDedicated=true;
+    const batch=[...messages,...layoutAtlasMessages(['data:image/png;base64,AAAA'],['portrait'],4,'a'.repeat(64))];
+    await requestDshCompletion(channel,batch,h.context!);
+    calls=[];let fail=true;
+    server(body=>{if(fail){fail=false;throw new TypeError('network');}return response(body);});
+    const operation:DshOperation={};
+    await expect(requestDshCompletion(channel,batch,h.context!,{operation})).rejects.toThrow('network');
+    delete operation.pending!.capabilities;
+    vi.mocked(fetch).mockClear();
+    await expect(requestDshCompletion(channel,batch,h.context!,{operation})).resolves.toBe('result');
+    expect(vi.mocked(fetch).mock.calls.filter(([url])=>String(url).endsWith('/v1/bridge/capabilities'))).toHaveLength(1);
+    expect(calls[1]).toEqual(calls[0]);
+  });
   it('rejects images on an old bridge before dedicated sync or generation',async()=>{
     settings.autoTag.dshDedicated=true;
     const fetch=vi.fn(async()=>new Response(JSON.stringify({version:'0.13.0'})));
@@ -397,7 +469,7 @@ describe('DSH persistent agent routing',()=>{
     expect(JSON.stringify(ctx.chatMetadata)).not.toContain(channel.key);
     const reloaded=context();reloaded.chatMetadata=JSON.parse(JSON.stringify(ctx.chatMetadata));h.context=reloaded;
     await requestDshCompletion(channel,messages,reloaded);expect(calls[2].messages).toHaveLength(2);
-    server(body=>new Response(JSON.stringify({choices:[{message:{content:'ordinary'}}],usage:{prompt_tokens:1,completion_tokens:1}})));
+    server(()=>new Response(JSON.stringify({choices:[{message:{content:'ordinary'}}],usage:{prompt_tokens:1,completion_tokens:1}})));
     await requestCompletion({...channel,stream:false},messages);
     expect(calls[3].chat_completion_source).toBe('openai');expect(calls[3].messages).toHaveLength(6);
     expect(calls[3].custom_include_body).toBeUndefined();expect(JSON.stringify(messages)).toBe(original);
@@ -470,13 +542,14 @@ describe('DSH persistent agent routing',()=>{
     release();await Promise.all([first,third]);expect(calls).toHaveLength(2);expect(calls[1].messages).toHaveLength(2);
   });
 
-  it('requires session acknowledgement; HTTP410 clears stale binding for a full retry',async()=>{
+  it.each(['http', 'wrapped', 'legacy'] as const)('requires acknowledgement; %s 410 clears stale binding for a full retry',async(transport)=>{
     const operation:DshOperation={};
     server(body=>response(body,{dsh_session:undefined}));
     await expect(requestDshCompletion(channel,messages,h.context!,{operation})).rejects.toThrow('session_id');
     expect(h.context!.chatMetadata).toEqual({});
     server();await requestDshCompletion(channel,messages,h.context!,{operation});
-    server(()=>new Response('gone',{status:410}));
+    server(()=>transport==='http' ? new Response('gone',{status:410})
+      : new Response(JSON.stringify({error:transport==='wrapped' ? {message:'session expired',status:410} : {message:'Gone'}}), {headers:{'content-type':'application/json'}}));
     await expect(requestDshCompletion(channel,messages,h.context!,{operation})).rejects.toMatchObject({status:410});
     server();await requestDshCompletion(channel,messages,h.context!,{operation});
     expect(calls.at(-1).messages).toHaveLength(6);

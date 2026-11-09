@@ -1,9 +1,7 @@
 import { parseCustomLayout, resolveLayouts, orderMangaLayouts, type MangaCustomLayout, type MangaSettings } from './layouts';
 
-import { readLayoutFile, writeLayoutFile, LAYOUT_FORMAT, portableLayout } from './portable';
-const FORMAT=LAYOUT_FORMAT;
+import { readLayoutFile, writeLayoutFile, portableLayout } from './portable';
 interface SavedLayout extends MangaCustomLayout { enabled?: boolean }
-interface LayoutFile { format: typeof FORMAT; version: 1; layouts: SavedLayout[]; deleted: string[]; order?: string[] }
 
 /** Snapshot the geometry actually used, including disabled entries and built-in fallbacks. */
 function snapshots(manga:MangaSettings): SavedLayout[] {

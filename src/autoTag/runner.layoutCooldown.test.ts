@@ -26,7 +26,7 @@ vi.mock('@/api/client', () => {
 });
 vi.mock('@/api/dsh', async () => {
   const { requestCompletion } = await import('@/api/client');
-  return { dshChatId: (c: STContext) => c.getCurrentChatId(), requestDshCompletion: async (channel: any, messages: ChatMsg[], context: STContext, options: any) =>
+  return { dshChatId: (c: STContext) => c.getCurrentChatId(), requestDshCompletion: async (channel: any, messages: ChatMsg[], _context: STContext, options: any) =>
     options.action === 'sync_rules' ? '固定规范已发送' : requestCompletion(channel, messages, options) };
 });
 vi.mock('@/autoTag/prompt', () => ({
@@ -34,7 +34,7 @@ vi.mock('@/autoTag/prompt', () => ({
   autoTagProfile: () => ({ layout: true, nl: false, naiCharPrompts: false, lockedSize: null }),
   autoTagLayoutSelection: (context: STContext) => createLayoutSelection(context, h.settings.manga,
     { portrait: { width: 1152, height: 1728 }, landscape: null }, null),
-  buildAutoTagMessages: async (context: STContext, _floor: number, _options: any, _memory: any, _target: any, _library: any, _note: any, _profile: any, selection: any) => {
+  buildAutoTagMessages: async (_context: STContext, _floor: number, _options: any, _memory: any, _target: any, _library: any, _note: any, _profile: any, selection: any) => {
     const messages: ChatMsg[] = [{ role: 'system', content: 'fixed geometry', purpose: 'spec' }];
     if (selection) setLayoutSelectionMessage(messages, selection);
     return messages;

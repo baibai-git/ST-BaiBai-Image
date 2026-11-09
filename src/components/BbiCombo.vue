@@ -28,12 +28,18 @@ const props = withDefaults(
     /** Keep an explicit picker available while its remote options are loading/unavailable. */
     alwaysDropdown?: boolean;
     emptyText?: string;
+    /** 缩短显示路径；编辑和选项始终使用完整值。 */
+    compactPath?: boolean;
   }>(),
   { placeholder: '', ariaLabel: undefined, maxShown: 200, alwaysDropdown: false, emptyText: '无匹配项' },
 );
 const emit = defineEmits<{ (e: 'update:modelValue', v: string): void; (e: 'open'): void }>();
 
 const open = ref(false);
+const focused = ref(false);
+const displayValue = computed(() => props.compactPath && !focused.value
+  ? props.modelValue.split(/[\\/]/).pop() ?? props.modelValue
+  : props.modelValue);
 /** 聚焦后用户输入的过滤词;聚焦/关闭时清空(清空=显示全部候选) */
 const query = ref('');
 const trigger = ref<HTMLInputElement | null>(null);
@@ -92,8 +98,14 @@ function closeOnViewportChange() {
 }
 
 function onFocus() {
+  focused.value = true;
   query.value = '';
   openMenu();
+}
+
+function onBlur() {
+  focused.value = false;
+  closeMenu();
 }
 
 function toggleMenu() {
@@ -174,14 +186,15 @@ onBeforeUnmount(() => closeMenu());
       class="bbi-input bbi-combo-input"
       :class="{ 'has-toggle': alwaysDropdown }"
       type="text"
-      :value="modelValue"
+      :value="displayValue"
+      :title="compactPath ? modelValue : undefined"
       :placeholder="placeholder"
       :aria-label="ariaLabel"
       spellcheck="false"
       autocomplete="off"
       @input="onInput"
       @focus="onFocus"
-      @blur="closeMenu"
+      @blur="onBlur"
       @keydown="onTriggerKeydown"
     />
     <button
@@ -286,7 +299,7 @@ onBeforeUnmount(() => closeMenu());
 .bbi-combo-item {
   padding: 6px 10px;
   border-radius: var(--bbi-radius-sm);
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--bbi-ink);
   cursor: pointer;
   overflow: hidden;

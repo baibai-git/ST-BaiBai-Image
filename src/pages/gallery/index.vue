@@ -14,7 +14,7 @@ import { ARTIST_PREVIEW_FOLDER, listUserImageFolders, listUserImages, probeUserI
 import { computed, onMounted, ref } from 'vue';
 
 /**
- * 图库页 —— 按角色名分组浏览已生成的图片（GALLERY-STORAGE-DESIGN.md）。
+ * 图库页：按角色名分组，结果与侧写文件由 floor/storage.ts 管理。
  *
  * 分组键取**目录名**而非文件名:落盘文件名里的角色名是哈希
  * (floor/storage.ts imageFileName,防中文名被清洗成连续下划线),可读名只能从
@@ -747,20 +747,20 @@ async function open(image: GalleryImage): Promise<void> {
 }
 .gal-state-title {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--bbi-ink);
 }
 .gal-state-hint {
   margin: 0;
   max-width: 34em;
-  font-size: 12.5px;
+  font-size: 12px;
   word-break: break-word;
 }
 .gal-state-inline {
   margin: 0;
   padding: 40px 16px;
   text-align: center;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--bbi-ink-muted);
 }
 .gal-spin {
@@ -887,7 +887,7 @@ async function open(image: GalleryImage): Promise<void> {
   background: var(--bbi-surface-2);
   color: var(--bbi-ink-soft);
   font-family: var(--bbi-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.6;
 }
@@ -899,7 +899,7 @@ async function open(image: GalleryImage): Promise<void> {
   padding-left: 8px;
   color: var(--bbi-ink-muted);
   font-family: var(--bbi-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1039,7 +1039,7 @@ async function open(image: GalleryImage): Promise<void> {
 }
 .gal-actionbar-count {
   flex: 1 1 auto;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--bbi-ink-soft);
   font-variant-numeric: tabular-nums;
 }
@@ -1061,7 +1061,7 @@ async function open(image: GalleryImage): Promise<void> {
     grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
   }
   .gal-name {
-    font-size: 13px;
+    font-size: 14px;
   }
 }
 </style>

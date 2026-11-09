@@ -5,6 +5,7 @@ import { closePanel, ui } from '@/state/ui';
 import { updateState } from '@/update';
 
 const props = defineProps<{ placement: 'top' | 'bottom'; narrow?: boolean }>();
+const shortLabels: Record<string, string> = { backend: '渠道', characters: '角色', gallery: '图库', history: '历史', settings: '设置' };
 
 function showUpdateDot(id: string): boolean {
   return id === 'settings' && updateState.available;
@@ -38,8 +39,7 @@ function onNavClick(id: string) {
         <Icon :name="p.id" class="bbi-nav-icon" />
         <span v-if="showUpdateDot(p.id)" class="bbi-nav-dot" aria-label="有可用更新"></span>
       </span>
-      <!-- 顶部带文字;但窄屏(移动端)顶部也只放图标,否则一排带字胶囊横向放不下,会把后面的项挤出屏幕 -->
-      <span v-if="placement === 'top' && !narrow" class="bbi-nav-label">{{ p.label }}</span>
+      <span class="bbi-nav-label">{{ narrow || placement === 'bottom' ? shortLabels[p.id] : p.label }}</span>
     </button>
   </nav>
 </template>
@@ -85,8 +85,7 @@ function onNavClick(id: string) {
   font-size: 17px;
 }
 
-/* —— 顶部 + 窄屏(移动端):降级为仅图标,样式与底部导航完全一致(尺寸/配色/选中态),
-   仅位置在顶,免得带字胶囊横向溢出把后面的项挤出屏幕 —— */
+/* 窄屏文字放在图标下，五项等分。 */
 .bbi-nav.is-top.is-narrow {
   justify-content: space-around;
   gap: 0;
@@ -95,7 +94,8 @@ function onNavClick(id: string) {
 .bbi-nav.is-top.is-narrow .bbi-nav-item {
   flex: 1;
   justify-content: center;
-  gap: 0;
+  flex-direction: column;
+  gap: 4px;
   padding: 10px 0;
   border-radius: 0;
   background: transparent;
@@ -113,7 +113,7 @@ function onNavClick(id: string) {
   font-size: 23px;
 }
 
-/* —— 底部:仅图标,等分,触达区大 —— */
+/* 底部导航同样保留短标签。 */
 .bbi-nav.is-bottom {
   justify-content: space-around;
   padding: 6px 6px;
@@ -123,6 +123,8 @@ function onNavClick(id: string) {
 }
 .bbi-nav.is-bottom .bbi-nav-item {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
   align-items: center;
   justify-content: center;
   flex: 1;
@@ -139,6 +141,8 @@ function onNavClick(id: string) {
 .bbi-nav.is-bottom .bbi-nav-item.is-active {
   color: var(--bbi-accent);
 }
+.bbi-nav.is-bottom .bbi-nav-label,
+.bbi-nav.is-narrow .bbi-nav-label { font-size: 12px; line-height: 1.2; }
 
 .bbi-nav-item:focus-visible {
   outline: 2px solid var(--bbi-accent);

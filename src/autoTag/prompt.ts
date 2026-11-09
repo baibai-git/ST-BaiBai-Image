@@ -443,4 +443,3 @@ export async function buildAutoTagMessages(
   messages.push({ role: 'user', content: userContent });
   return messages;
 }
-

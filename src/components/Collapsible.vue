@@ -56,7 +56,7 @@ const expanded = ref(props.open);
   color: var(--bbi-ink);
   cursor: pointer;
   font-family: var(--bbi-font-sans);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   text-align: left;
   transition: background var(--bbi-dur) var(--bbi-ease);
@@ -101,7 +101,7 @@ const expanded = ref(props.open);
 /* 移动端:折叠区标题略小一号,与窄屏整体节奏更协调 */
 @media (max-width: 640px) {
   .bbi-collapsible-head {
-    font-size: 13px;
+    font-size: 14px;
   }
 }
 </style>

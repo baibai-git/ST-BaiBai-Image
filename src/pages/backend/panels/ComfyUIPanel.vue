@@ -41,26 +41,17 @@ const configuring = ref(false);
 const assistOpen = ref(false);
 const assistDraft = ref('');
 const assistResult = ref<WorkflowAssistResult | null>(null);
-/** AI 预览针对哪一套:预览期间用户可能切走或删掉,应用时按 id 回写而不是写「当前」。 */
 const assistTargetId = ref('');
 const confirmDeleteOpen = ref(false);
 
-/** 本渠道是否为当前出图渠道;「使用此渠道」按钮与设置页选择器、页签徽标同属一个开关。 */
 const inUse = computed(() => settings.defaultBackend === 'comfyui');
 
-/* ============ 工作流库 ============ */
-
-/** 当前预设。settings 是 reactive,直接把它的字段绑 v-model 即可就地编辑。 */
 const active = computed(() => activeComfyPreset());
 
 const workflowOptions = computed(() =>
   settings.comfyui.workflows.map(w => ({ value: w.id, label: w.name || '未命名工作流' })),
 );
 
-/**
- * 下拉的值取「实际生效的那一套」而非存的 id:存的 id 悬空时
- * activeComfyPreset 会回落第一条,下拉也该跟着显示第一条,不能显示空白。
- */
 const activeId = computed<string>({
   get: () => active.value.id,
   set: id => {
@@ -68,14 +59,12 @@ const activeId = computed<string>({
   },
 });
 
-/** 只剩一套时不给删:workflows 恒非空是全局不变式,禁用比「点了没反应」诚实。 */
 const canRemove = computed(() => settings.comfyui.workflows.length > 1);
 
 function switchTo(preset: { id: string }) {
   settings.comfyui.activeWorkflowId = preset.id;
 }
 
-/** 改名是低频操作:平时只显示下拉,点「改名」才把选择器原地换成输入框,省掉常驻的名称行。 */
 const renaming = ref(false);
 const renameDraft = ref('');
 const renameInput = ref<HTMLInputElement | null>(null);
@@ -86,7 +75,6 @@ function startRename() {
   nextTick(() => renameInput.value?.focus());
 }
 
-/** Enter / 失焦都算确认;Esc 直接置 renaming=false 不经过这里,即为取消。 */
 function commitRename() {
   if (renaming.value) active.value.name = renameDraft.value.trim();
   renaming.value = false;
@@ -125,8 +113,6 @@ function confirmRemoveWorkflow() {
   settings.comfyui.activeWorkflowId = list[Math.min(index, list.length - 1)].id;
 }
 
-/* ============ 简易模式:选模型填参数 ============ */
-
 // 分段开关文案要短(括注会让小药丸挤变形),含义靠下方的表单本身说明;
 // 顺序:默认项 custom 在左(与「存量预设/新预设都是自定义工作流」的口径一致)
 const modeOptions: Array<{ value: ComfyPresetMode; label: string }> = [
@@ -136,7 +122,6 @@ const modeOptions: Array<{ value: ComfyPresetMode; label: string }> = [
 
 const templateOptions = COMFY_TEMPLATE_OPTIONS;
 
-/** 当前模板的元数据(决定表单显示哪些字段)。 */
 const meta = computed(() => COMFY_TEMPLATES[active.value.simple.template] ?? COMFY_TEMPLATES.checkpoint);
 
 const lists = ref<ComfyModelLists | null>(null);
@@ -217,11 +202,6 @@ watch(
   },
 );
 
-/**
- * 切架构模板:采样参数换成新模板推荐值,模型/VAE/CLIP 清空(列表不同源),
- * LoRA 与固定正负词保留(与架构无关)。尺寸若还是旧模板默认值则跟着换,
- * 用户自己改过的尺寸不动。
- */
 function onTemplateChange(id: string) {
   if (!isComfyTemplateId(id)) return;
   const current = active.value.simple;
@@ -302,7 +282,6 @@ function endLoraDrag() {
 watch(() => active.value.id, endLoraDrag);
 onBeforeUnmount(endLoraDrag);
 
-/** 简易模式状态药丸:与出图组装同一口径(validateSimpleConfig)。 */
 const simpleState = computed(() => {
   const invalid = validateSimpleConfig(active.value.simple);
   return invalid
@@ -316,7 +295,6 @@ const nlHint = computed(() =>
     : '额外生成一段自然语言描述,随 %nl% 注入工作流',
 );
 
-/** 药丸只显示一个词,具体原因放 title 悬浮提示,不占版面。 */
 const workflowState = computed(() => {
   if (!active.value.workflow.trim()) return { tone: 'muted', text: '未填写', detail: '' };
   try {
@@ -617,8 +595,7 @@ function applyAssist() {
           </div>
         </div>
         <p class="bbi-field-hint wf-switch-hint">
-          「自动」由自动 tag 按画面判定横竖;锁定后这套工作流每张图都按该方向出,自动 tag 也按这个画幅构图。
-          正文里已记下的方向不会被改写,改回「自动」即恢复。
+          自动 tag 跟随此方向构图；已保存的图片方向保留。
         </p>
 
         <!-- 简易模式:选模型填参数,JSON 由插件按模板组装。
@@ -712,9 +689,11 @@ function applyAssist() {
                 @pointerdown="startLoraDrag($event, lora)"
                 @keydown.up.prevent="moveLora(index, index - 1)" @keydown.down.prevent="moveLora(index, index + 1)"
               ><span aria-hidden="true">⠿</span></button>
-              <input type="checkbox" class="bbi-checkbox wf-lora-enabled" :checked="lora.enabled !== false" :aria-label="`启用 LoRA：${lora.name || '未命名'}`" @change="lora.enabled = ($event.target as HTMLInputElement).checked" />
+              <label class="wf-lora-enabled"><input type="checkbox" class="bbi-checkbox" :checked="lora.enabled !== false" :aria-label="`启用 LoRA：${lora.name || '未命名'}`" @change="lora.enabled = ($event.target as HTMLInputElement).checked" /><span>启用</span></label>
               <BbiCombo
                 v-model="lora.name"
+                class="wf-lora-file"
+                compact-path
                 :options="loraOptions"
                 placeholder="lora 文件名"
                 aria-label="LoRA 文件"
@@ -722,7 +701,7 @@ function applyAssist() {
                 :empty-text="loraEmptyText"
                 @open="openLoraOptions"
               />
-              <input
+              <label class="wf-lora-weight"><span>强度</span><input
                 class="bbi-input wf-lora-str"
                 type="number"
                 v-model.number="lora.strength"
@@ -731,7 +710,7 @@ function applyAssist() {
                 step="0.05"
                 title="强度"
                 aria-label="LoRA 强度"
-              />
+              /></label>
               <button
                 class="bbi-icon-btn wf-op wf-remove"
                 type="button"
@@ -743,7 +722,7 @@ function applyAssist() {
               </button>
             </div>
             <p v-if="active.simple.loras.length" class="bbi-field-hint wf-lora-hint">
-              启用的 LoRA 按列表从上到下加载；拖动左侧手柄排序。关闭保留名称和权重。触发词要自己写进固定正面或 tag 里。
+              按列表从上到下加载；拖动手柄排序，关闭保留权重。触发词填入正面提示词。
             </p>
           </section>
 
@@ -901,8 +880,6 @@ function applyAssist() {
 </template>
 
 <style scoped>
-/* 工作流选择行:grid 而非 flex——靠 flex-basis 撑出的对齐一 wrap 就散,
-   固定首列宽让标签列与下方 switch/num 行的标签列同起点。 */
 .wf-row {
   display: grid;
   grid-template-columns: 5.5em minmax(0, 1fr) auto;
@@ -916,7 +893,6 @@ function applyAssist() {
 .wf-row > .bbi-input {
   min-width: 0;
 }
-/* 下拉不吃满:名称通常很短,拉满只会拖出半截空白(子组件根类默认 180px/不伸缩,此处 0,2,0 压过) */
 .wf-row > .wf-select {
   width: auto;
   max-width: 320px;
@@ -927,33 +903,27 @@ function applyAssist() {
   gap: 4px;
   justify-self: end;
 }
-/* 四个操作是低频且同级的,图标化后整行只剩下拉一个视觉重点;
-   文案退到 title/aria-label,不损失可达性。 */
 .wf-op {
   width: 30px;
   height: 30px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .wf-op:disabled {
   opacity: 0.4;
   cursor: default;
 }
-/* 选择器与预设内容的分界:线以下均跟随当前这套工作流 */
 .wf-divider {
   border: 0;
   border-top: 1px dashed var(--bbi-line);
   margin: 4px 0;
 }
-/* 开关自带下留白,说明文字只需补一点上间距(base.css 的 .bbi-input + hint 规则不覆盖此组合) */
 .wf-switch-hint {
   margin: 2px 0 6px;
 }
-/* 尺寸输入:比 .bbi-num 宽一点(要装「1024×1536」),但不右对齐——「宽×高」是文本不是数值 */
 .wf-size {
   width: 130px;
   flex: 0 0 auto;
 }
-/* 配置方式:分段开关在左、状态药丸在右 */
 .wf-mode-bar {
   display: flex;
   align-items: center;
@@ -961,13 +931,11 @@ function applyAssist() {
   gap: 10px;
   padding: 4px 0 6px;
 }
-/* 架构下拉不吃满(同 .wf-select 的理由) */
 .wf-tpl {
   width: auto;
   max-width: 320px;
   min-width: 0;
 }
-/* 简易模式分组:组标题带虚线分隔,组间距固定;组内字段行统一「短标签列+输入列+尾部」网格 */
 .wf-group {
   padding: 10px 0 2px;
 }
@@ -1010,24 +978,24 @@ function applyAssist() {
   white-space: nowrap;
   cursor: pointer;
 }
-/* Only the handle captures touch gestures; inputs and the page still scroll normally. */
 .wf-lora-all { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--bbi-ink-soft); }
 .wf-lora-row {
   display: grid;
-  grid-template-columns: 24px 22px minmax(0, 1fr) 76px 30px;
+  grid-template-columns: 36px 32px minmax(0, 1fr) 76px 36px;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   padding: 3px 0;
 }
-.wf-lora-grip { width: 24px; min-width: 24px; height: 38px; padding: 0; cursor: grab; touch-action: none; user-select: none; font-size: 22px; }
+.wf-lora-grip { width: 36px; min-width: 36px; height: 38px; padding: 0; cursor: grab; touch-action: none; user-select: none; font-size: 22px; }
 .wf-lora-grip:active { cursor: grabbing; }
 .wf-lora-row.is-dragging { background: var(--bbi-surface-soft, rgba(100, 140, 180, .12)); outline: 1px dashed currentColor; border-radius: 6px; }
 .wf-lora-row.is-disabled :deep(.bbi-combo-box), .wf-lora-row.is-disabled .wf-lora-str { opacity: .55; }
-.wf-lora-enabled { justify-self: center; }
+.wf-lora-enabled, .wf-lora-weight { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+.wf-lora-enabled { justify-content: center; min-height: 36px; }
+.wf-lora-enabled span, .wf-lora-weight span { display: none; }
 .wf-lora-hint {
   margin: 4px 0 2px;
 }
-/* 采样参数:多列网格,标签在上输入在下(与 NaiPanel 的 be-row 同款语义) */
 .wf-params {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1047,12 +1015,17 @@ function applyAssist() {
   gap: 8px;
 }
 @media (max-width: 640px) {
-  .wf-lora-row { grid-template-columns: 24px 22px minmax(0, 1fr) 60px 30px; gap: 5px; }
+  .wf-lora-row { grid-template-columns: 40px 72px minmax(0, 1fr) 40px; gap: 6px; padding: 10px 0; border-bottom: 1px solid var(--bbi-line); }
+  .wf-lora-file { grid-column: 1 / -1; grid-row: 1; }
+  .wf-lora-row .wf-lora-grip, .wf-lora-row .wf-remove { width: 40px; height: 40px; }
+  .wf-lora-enabled, .wf-lora-weight { min-height: 40px; }
+  .wf-lora-enabled span, .wf-lora-weight span { display: inline; white-space: nowrap; }
+  .wf-lora-weight .wf-lora-str { min-width: 0; width: 100%; }
+  .wf-lora-file :deep(input) { font-size: 14px; }
   .wf-params {
     grid-template-columns: repeat(2, 1fr);
   }
 }
-/* JSON 头部行:标签在左,状态药丸与 AI 按钮作为「工具组」在右(textarea 是块级,头部行即它的工具栏) */
 .wf-json-head {
   display: flex;
   align-items: center;
@@ -1069,8 +1042,6 @@ function applyAssist() {
 .wf-hint {
   margin-top: 8px;
 }
-/* 危险操作按钮:平时与其它图标钮同样低调,hover 才显红(与 ConfirmDialog 同口径)。
-   图标钮无描边,故 hover 只换底色与前景色,不碰 border。 */
 .wf-remove:not(:disabled) {
   color: var(--bbi-danger);
 }
@@ -1078,7 +1049,6 @@ function applyAssist() {
   color: var(--bbi-danger);
   background: var(--bbi-danger-soft);
 }
-/* AI 预览弹窗关闭钮:.bbi-icon-btn 只在 App.vue 里声明(scoped 不跨组件),此处补一份 */
 .bbi-icon-btn {
   width: 36px;
   height: 36px;
@@ -1090,7 +1060,7 @@ function applyAssist() {
   background: var(--bbi-surface-2);
   color: var(--bbi-ink-soft);
   cursor: pointer;
-  font-size: 15px;
+  font-size: 16px;
   transition:
     color var(--bbi-dur) var(--bbi-ease),
     background var(--bbi-dur) var(--bbi-ease);
@@ -1099,7 +1069,6 @@ function applyAssist() {
   color: var(--bbi-ink);
   background: var(--bbi-line-strong);
 }
-/* JSON 状态药丸:复用全局 bbi-prompt-state 基样式,此处只按 tone 上色 */
 .wf-state.is-ok {
   color: var(--bbi-accent);
   background: var(--bbi-accent-soft);
@@ -1146,7 +1115,6 @@ function applyAssist() {
   font-size: 12px;
   line-height: 1.5;
 }
-/* URL 标签与输入框同行:标签靠左不压缩,输入框吃满剩余宽度 */
 .api-row {
   display: flex;
   align-items: center;
@@ -1166,7 +1134,6 @@ function applyAssist() {
   align-items: center;
   margin-top: 12px;
 }
-/* 左侧「使用此渠道 / 当前出图渠道」与右侧测试连接分据两端 */
 .conn-use,
 .conn-inuse {
   margin-right: auto;
@@ -1179,7 +1146,6 @@ function applyAssist() {
   color: var(--bbi-accent);
 }
 @media (max-width: 640px) {
-  /* 窄屏:四个图标钮 + 标签会把下拉挤成一条缝,标签独占首行,下拉与操作组同行分据两端 */
   .wf-row {
     grid-template-columns: minmax(0, 1fr) auto;
     row-gap: 8px;

@@ -8,6 +8,6 @@ node_modules/
 .aionrs/
 CLAUDE.md
 .pnpm-store/
-AGENTS.md
+*.bak-*
 .pi/
 data/

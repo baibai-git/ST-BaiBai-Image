@@ -239,6 +239,10 @@ describe('extractContent:推理模型把答案塞进 reasoning', () => {
 });
 
 describe('readSseContent:流式', () => {
+  it('preserves structured upstream errors inside SSE', async () => {
+    await expect(readSseContent(sseResponse('data: {"error":{"message":"Gone","status":410,"code":"session_gone"}}\n\n')))
+      .rejects.toMatchObject({status: 410, code: 'session_gone'});
+  });
   it('拼接 delta.content', async () => {
     const sse = [
       'data: {"choices":[{"delta":{"content":"Hel"}}]}',
@@ -319,6 +323,30 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
     await expect(requestCompletion(channel, messages, { validate })).rejects.toThrow('500');
     expect(validate).not.toHaveBeenCalled();
     expect(h.failLlm).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [{ message: 'Conflict', status: 409, code: 'rules_changed' }, 409, 'rules_changed'],
+    [{ message: 'Gone', status: 410 }, 410, undefined],
+    [{ message: 'Conflict' }, 409, undefined],
+    [{ message: 'Gone' }, 410, undefined],
+    [{ message: 'Unauthorized', status: 401 }, 401, undefined],
+    [{ message: 'provider failed', status: '410' }, undefined, undefined],
+    [{ message: 'toString' }, undefined, undefined],
+  ])('preserves an upstream error wrapped in HTTP 200: %j', async (error, status, code) => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error })));
+    await expect(requestCompletion(channel, messages)).rejects.toMatchObject({
+      name: 'ApiError', message: error.message, status, code,
+    });
+    expect(h.finishLlm).not.toHaveBeenCalled();
+    expect(h.failLlm).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the actual HTTP status with structured errors', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({error: {message: 'session expired'}}), {
+      status: 410, headers: {'content-type': 'application/json'},
+    })));
+    await expect(requestCompletion(channel, messages)).rejects.toMatchObject({status: 410, message: 'session expired'});
   });
 });
 

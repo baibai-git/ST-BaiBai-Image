@@ -1,4 +1,5 @@
 import { unzipSync } from 'fflate';
+import { bytesToBase64 } from '@/base64';
 import { randomUuid } from '@/randomUuid';
 
 import type { ImageCharacterPrompt } from '@/autoTag/protocol';
@@ -207,22 +208,6 @@ export function parseResolution(text: string): NaiSize {
 /** NAI 种子是 32 位无符号整数(与 ComfyUI 的 2^53 不同,不能复用 randomSeed)。 */
 export function naiRandomSeed(): number {
   return Math.floor(Math.random() * 2 ** 32);
-}
-
-function uint8ToBase64(bytes: Uint8Array): string {
-  let bin = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(bin);
-}
-
-function base64ToUint8(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -607,7 +592,7 @@ export function unzipNaiImage(buffer: ArrayBuffer): { base64: string; filename: 
   }
   const name = Object.keys(files).find(n => /\.(png|jpe?g|webp)$/i.test(n)) ?? Object.keys(files)[0];
   if (!name) throw new NaiError('zip 包内没有图片文件');
-  return { base64: uint8ToBase64(files[name]), filename: name };
+  return { base64: bytesToBase64(files[name]), filename: name };
 }
 
 /** generateNaiImage 的完整产出：图片 + 随图记录的元信息。 */
@@ -762,7 +747,7 @@ export async function encodeVibeImage(
       if (bytes.length < 100) {
         throw new NaiError(`vibe 编码数据异常(仅 ${bytes.length} 字节),接口可能返回了错误响应`);
       }
-      return uint8ToBase64(bytes);
+      return bytesToBase64(bytes);
     },
     { signal, onRetry: opts.onRetry },
   );

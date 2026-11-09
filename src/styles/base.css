@@ -78,7 +78,7 @@
 
 /* 区块/分页标题:比主标题(22px)小一号,跨页统一(摘要/悬念簿/物品/设置) */
 .bbi-title-sub {
-  font-size: 18px;
+  font-size: 16px;
 }
 
 @media (max-width: 640px) {
@@ -98,7 +98,7 @@
   background: var(--bbi-surface);
   color: var(--bbi-ink);
   font-family: var(--bbi-font-sans);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   white-space: nowrap;
   transition:
@@ -142,7 +142,7 @@
   background: var(--bbi-surface);
   color: var(--bbi-ink);
   font-family: var(--bbi-font-sans);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .bbi-input:focus {
@@ -218,7 +218,7 @@
 
 .bbi-modal-title {
   font-weight: 600;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--bbi-ink);
 }
 
@@ -342,7 +342,7 @@
 }
 .bbi-page-intro {
   margin: 10px 0 16px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--bbi-ink-muted);
   line-height: 1.6;
 }
@@ -372,7 +372,7 @@
   color: var(--bbi-ink);
 }
 .bbi-field-value {
-  font-size: 13px;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
   color: var(--bbi-accent);
 }
@@ -471,7 +471,7 @@
   border-radius: var(--bbi-radius-sm);
   color: var(--bbi-ink-soft);
   font-family: var(--bbi-font-sans);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   transition:
     background var(--bbi-dur) var(--bbi-ease),
@@ -497,7 +497,7 @@
 /* —— 下拉:自绘小三角,去掉原生大留白箭头 —— */
 .bbi-select {
   max-width: 100%;
-  font-size: 13px;
+  font-size: 14px;
   appearance: none;
   -webkit-appearance: none;
   padding-right: 26px;
@@ -552,7 +552,7 @@
    (scoped 样式过不了组件边界)。 —— */
 .bbi-prompt-state {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 9px;
   border-radius: var(--bbi-radius-pill);
@@ -569,10 +569,10 @@
 /* ============ 移动端:表单正文整体收一号,与窄屏标题节奏统一(对齐柏宝书) ============ */
 @media (max-width: 640px) {
   .bbi-field-label {
-    font-size: 13px;
+    font-size: 14px;
   }
   .bbi-field-hint {
-    font-size: 11px;
+    font-size: 12px;
   }
   .bbi-seg {
     font-size: 12px;

@@ -661,7 +661,7 @@ function sourceLabel(entry: CharTagEntry): string {
   background: var(--bbi-surface-2);
   color: var(--bbi-ink-soft);
   font-family: var(--bbi-font-mono);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1;
 }
@@ -755,7 +755,7 @@ function sourceLabel(entry: CharTagEntry): string {
   border: 1px dashed var(--bbi-line);
   border-radius: var(--bbi-radius);
   color: var(--bbi-ink-muted);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 /* —— 角色卡片网格 —— */
@@ -802,7 +802,7 @@ function sourceLabel(entry: CharTagEntry): string {
   min-width: 0;
 }
 .bbi-char-name {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   word-break: break-word;
   min-width: 0;
@@ -816,7 +816,7 @@ function sourceLabel(entry: CharTagEntry): string {
 
 /* —— 徽标药丸:全局=实心强调;柏宝书/AI=强调浅底;手动=弱化;覆盖=警示色 —— */
 .bbi-char-pill {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 9px;
   border-radius: var(--bbi-radius-pill);
@@ -855,7 +855,7 @@ function sourceLabel(entry: CharTagEntry): string {
 }
 .bbi-chip {
   font-family: var(--bbi-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   padding: 3px 9px;
   border-radius: var(--bbi-radius-pill);
   background: var(--bbi-surface-2);
@@ -879,7 +879,7 @@ function sourceLabel(entry: CharTagEntry): string {
   align-items: center;
   gap: 3px;
   font-family: var(--bbi-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--bbi-ink-muted);
 }
 
@@ -966,7 +966,7 @@ function sourceLabel(entry: CharTagEntry): string {
   min-width: 0;
 }
 .bbi-char-history-field {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--bbi-accent);
 }
@@ -981,7 +981,7 @@ function sourceLabel(entry: CharTagEntry): string {
   color: var(--bbi-ink-muted);
 }
 .bbi-char-history-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--bbi-ink-muted);
 }
 
@@ -1005,7 +1005,7 @@ function sourceLabel(entry: CharTagEntry): string {
 }
 .bbi-char-preview-mode {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 8px;
   border-radius: var(--bbi-radius-pill);

@@ -13,6 +13,7 @@ import {
   DEFAULT_COMFY_SPEC,
   DEFAULT_COMFY_THINKING,
   DEFAULT_JAILBREAK_PROMPT,
+  DEFAULT_DSH_SKILL_REQUEST,
   DEFAULT_NAI_V5_SPEC,
   DEFAULT_NAI_V5_THINKING,
   IMAGE_DISPLAY_SIZES,
@@ -34,11 +35,15 @@ import {
   type ThemeName,
 } from '@/state/ui';
 import { checkForUpdate, performUpdate, updateState } from '@/update';
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 const dshSkillEnabled = computed({
   get: () => settings.autoTag.dshRuleSource === 'skill',
   set: (enabled: boolean) => { settings.autoTag.dshRuleSource = enabled ? 'skill' : 'plugin'; },
+});
+const dshSkillRequest = computed({
+  get: () => settings.autoTag.dshSkillRequest ?? DEFAULT_DSH_SKILL_REQUEST,
+  set: (text: string) => { settings.autoTag.dshSkillRequest = text; },
 });
 
 const worldBookMode = computed({
@@ -589,8 +594,7 @@ async function confirmUpdate() {
 
     <!-- 总开关:整个插件的主控。全页唯一的大号滑动开关,与下方各项的小复选框拉开层级。 -->
     <div class="bbi-master" :class="{ 'is-off': !settings.enabled }">
-      <span class="bbi-master-spine" aria-hidden="true"></span>
-      <span class="bbi-master-title">柏宝绘 · 文生图</span>
+      <span class="bbi-master-title">启用柏宝绘</span>
       <button
         type="button"
         role="switch"
@@ -729,9 +733,13 @@ async function confirmUpdate() {
             <span class="bbi-field-label">每轮请求指定 Skill</span>
             <input v-model="dshSkillEnabled" type="checkbox" class="bbi-checkbox" aria-label="每轮请求指定 Skill" />
           </label>
-          <p class="bbi-field-hint">仅对 DSH 的 ComfyUI 漫画 Layout 任务生效。开启后，每轮在请求末尾追加用成对 STB-KEEP 标记保护的 Skill 调用说明；桥接加载最新正文，插件不发送主规范和检查指导。关闭后不发送调用说明、不注入 Skill，恢复插件规范。其他资料与宿主协议照常发送。</p>
-          <p v-if="dshSkillEnabled" class="bbi-field-hint">指定的 Skill 在 DSH 当前入口绑定。新请求可加载更新后的规范，同一请求重试沿用原版本；内容更新无需重建会话。需要 ST-bridge 0.15.0 或更新版本；references 分册仍不自动加载。</p>
-          <p class="bbi-field-hint">使用上方指派的 DSH 副 API 渠道。当前候选版式、世界书、角色资料和正文每次发送。{{ settings.autoTag.dshDedicated ? '专属模式首次使用或固定规范变化时自动同步；手动按钮管理当前输出模式的专属会话。' : '每个酒馆聊天独立绑定会话，固定规范仅在首次发送；修改规范后请手动重新发送。' }}普通 API 模式不受影响。</p>
+          <p class="bbi-field-hint">仅用于 DSH 漫画 Layout。开启后每轮调用入口绑定的 Skill，关闭后使用插件规范。</p>
+          <Collapsible v-if="dshSkillEnabled" title="Skill 请求文案" :open="false">
+            <BbiTextarea v-model="dshSkillRequest" :rows="4" :max-rows="12" :placeholder="DEFAULT_DSH_SKILL_REQUEST" aria-label="Skill 请求文案" />
+            <p class="bbi-field-hint"><code v-text="'{{skill_id}}'"></code> 自动替换为绑定的 Skill；KEEP 保护自动添加。留空使用默认文案。</p>
+            <button type="button" class="bbi-btn bbi-btn-sm" @click="dshSkillRequest=DEFAULT_DSH_SKILL_REQUEST">恢复默认文案</button>
+          </Collapsible>
+          <p class="bbi-field-hint">本轮资料每次发送；{{ settings.autoTag.dshDedicated ? '固定规范变化时自动同步。' : '固定规范首次发送，修改后手动同步。' }}</p>
           <div class="bbi-channel-bar">
             <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('sync_rules')">{{ settings.autoTag.dshRuleSource==='skill' && settings.defaultBackend==='comfyui' && settings.manga.enabled ? '重新发送宿主协议' : '重新发送固定规范' }}</button>
             <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('reset')">重建 DSH 会话</button>
@@ -1283,7 +1291,7 @@ async function confirmUpdate() {
   color: var(--bbi-accent-ink);
   cursor: pointer;
   font-family: var(--bbi-font-mono);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1;
 }
@@ -1299,23 +1307,9 @@ async function confirmUpdate() {
   align-items: center;
   gap: 14px;
   margin-bottom: 16px;
-  padding: 16px 18px 16px 16px;
-  border: 1px solid var(--bbi-line);
-  border-radius: var(--bbi-radius);
-  background: var(--bbi-surface);
-  box-shadow: var(--bbi-shadow);
+  padding: 12px 0 18px;
+  border-bottom: 1px solid var(--bbi-line);
   transition: opacity var(--bbi-dur) var(--bbi-ease);
-}
-.bbi-master-spine {
-  flex: 0 0 auto;
-  align-self: stretch;
-  width: 4px;
-  border-radius: var(--bbi-radius-pill);
-  background: var(--bbi-accent);
-  transition: background var(--bbi-dur) var(--bbi-ease);
-}
-.bbi-master.is-off .bbi-master-spine {
-  background: var(--bbi-line-strong);
 }
 .bbi-master.is-off .bbi-master-title {
   opacity: 0.7;
@@ -1323,7 +1317,7 @@ async function confirmUpdate() {
 .bbi-master-title {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--bbi-ink);
 }
@@ -1539,7 +1533,7 @@ async function confirmUpdate() {
 .bbi-combo-item {
   padding: 7px 9px;
   border-radius: var(--bbi-radius-sm);
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--bbi-ink);
   cursor: pointer;
   word-break: break-all;
@@ -1639,7 +1633,7 @@ async function confirmUpdate() {
 .bbi-prompt-name {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 /* 状态药丸(.bbi-prompt-state / .is-custom)已提到 base.css 全局:渠道页也用它 */
@@ -1687,7 +1681,7 @@ async function confirmUpdate() {
 }
 .bbi-prompt-area {
   line-height: 1.6;
-  font-size: 12.5px;
+  font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   tab-size: 2;
@@ -1777,10 +1771,10 @@ async function confirmUpdate() {
     grid-template-columns: repeat(2, 1fr);
   }
   .bbi-channel-item-name {
-    font-size: 13px;
+    font-size: 14px;
   }
   .bbi-channel-item-model {
-    font-size: 11px;
+    font-size: 12px;
   }
   /* 渠道弹窗底部:测试按钮窄屏只显短版「测试」,PC 显完整「测试渠道」 */
   .bbi-btn-label-full {

@@ -1,12 +1,12 @@
 import { ApiError, requestCompletion, type ChatMsg, type DshSessionRequest, type RequestOptions } from '@/api/client';
-import { settings, type ApiChannel } from '@/state/settings';
+import { DEFAULT_DSH_SKILL_REQUEST, settings, type ApiChannel } from '@/state/settings';
 import { getContext, type STContext } from '@/st/context';
-import { assertDshImageSupport, readDshCapabilities } from '@/api/dshImages';
+import { assertDshImageSupport, readDshCapabilities, type DshCapabilities } from '@/api/dshImages';
 import { regroupLayoutAtlasMessages } from '@/manga/atlas';
 
 const STORE='baibai_dsh_sessions';
 interface Binding { session_id: string; initialized: boolean; rulesHash?: string; atlasHash?: string }
-interface Pending { rulesHash?: string; atlasHash?: string; key: string; messages: ChatMsg[]; session: DshSessionRequest; channel: ApiChannel }
+interface Pending { rulesHash?: string; atlasHash?: string; capabilities?: DshCapabilities; key: string; messages: ChatMsg[]; session: DshSessionRequest; channel: ApiChannel }
 /** Kept by one runner invocation: ambiguous network retries reuse the exact request. */
 export interface DshOperation { pending?: Pending; acknowledged?: boolean }
 interface DshOptions extends RequestOptions {
@@ -120,8 +120,12 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
     const retry=operation.pending?.key===operationKey && operation.pending.session.action==='generate' && !operation.acknowledged ? operation.pending : undefined;
     let skillId: string | undefined = retry?.session.skill_id;
     const imageMessages=retry?.messages ?? effectiveMessages;
-    const capabilities=(!retry && skillMode && action!=='reset' || action==='generate' && imageMessages.some(message=>message.images?.length))
-      ? await readDshCapabilities(retry?.channel ?? channel,options.signal) : undefined;
+    // A retained atlas retry has no images; keep its confirmed handshake with the frozen request.
+    const needsCapabilities=!retry && skillMode && action!=='reset' || action==='generate' && (
+      imageMessages.some(message=>message.images?.length) || dedicated && (
+        !!retry?.session.layout_atlas || effectiveMessages.some(message=>message.atlasRevision)));
+    const capabilities=retry?.capabilities ?? (needsCapabilities
+      ? await readDshCapabilities(retry?.channel ?? channel,options.signal) : undefined);
     if (skillMode && !retry && capabilities) {
       if (capabilities.skill_updates?.mode!=='per-request' || capabilities.skill_updates.toggle!=='skill_enabled' || capabilities.skill_updates.retry!=='frozen-version') throw new ApiError('当前桥接不支持每轮更新 Skill 与请求版本冻结，请更新 ST-bridge 至 0.15.0 或更新版本。');
       const entry=Array.isArray(capabilities.client_endpoints) ? capabilities.client_endpoints.find(entry=>entry && typeof entry==='object' && entry.id===clientId && entry.enabled!==false) : undefined;
@@ -161,13 +165,12 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
         }
         if (currentAction==='generate' && skillId) outgoing=[...outgoing,{role:'user',content:[
           '<<<STB-KEEP>>>',
-          `本轮指定 Skill：${skillId}。`,
-          '请使用桥接为本次请求加载的该 Skill 规范，处理上方目标正文，并遵守本轮槽位白名单与宿主输出协议。',
+          (settings.autoTag.dshSkillRequest?.trim() || DEFAULT_DSH_SKILL_REQUEST).replaceAll('{{skill_id}}',()=>skillId!),
           '<<<STB-/KEEP>>>',
         ].join('\n')}];
         if (currentAction==='generate') await assertDshImageSupport(channel,outgoing,options.signal,capabilities);
         const fixed=sendFixed ? parts.fixed : [];
-        operation.pending={rulesHash,...(currentAction==='generate' && atlasHash ? {atlasHash} : {}),key:operationKey,channel:{...channel,excludeParams:[...(channel.excludeParams ?? [])]},messages:outgoing.map(({role,content,images})=>({role,content,...(images?.length ? {images:[...images]} : {})})),session:{
+        operation.pending={rulesHash,...(currentAction==='generate' && atlasHash ? {atlasHash} : {}),...(capabilities ? {capabilities} : {}),key:operationKey,channel:{...channel,excludeParams:[...(channel.excludeParams ?? [])]},messages:outgoing.map(({role,content,images})=>({role,content,...(images?.length ? {images:[...images]} : {})})),session:{
           protocol_version:1,chat_id:chatId,request_id:requestId(),action:currentAction,
           ...(dedicated ? {session_mode:'dedicated',client_id:clientId,task_id:profile,...(origin ? {source_chat_id:origin} : {})} : {}),
           ...(skillMode && !dedicated ? {client_id:clientId,task_id:`${profile}-skill`} : {}),

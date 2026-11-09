@@ -5,7 +5,6 @@ import {
   BBI_IMAGE_EXTRA_KEY,
   deleteImageFileOnly,
   deleteImageResult,
-  generationId,
   historyEntries,
   imageFileName,
   latestEntry,

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { alignMossCanvasDimension } from '@/backends/size';
 import { computed, nextTick, onMounted, ref } from 'vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { canvasOf, normalizeCanvas, orientationOf, parseCustomLayout, slotType, isFullPagePanel, type FrameGuideOptions, type MangaCustomLayout, type ResolvedLayout } from '@/manga/layouts';
@@ -162,8 +163,7 @@ function resizeCanvas(): void {
   });
 }
 function alignCanvasInput(): void {
-  const align=(value: number): number => Number.isFinite(value) ? Math.max(64,Math.min(8192,Math.round(value/16)*16)) : value;
-  canvasWidth.value=align(canvasWidth.value);canvasHeight.value=align(canvasHeight.value);
+  canvasWidth.value=alignMossCanvasDimension(canvasWidth.value);canvasHeight.value=alignMossCanvasDimension(canvasHeight.value);
 }
 function preset(width: number, height: number): void { canvasWidth.value = width; canvasHeight.value = height; resizeCanvas(); }
 function add(): void {

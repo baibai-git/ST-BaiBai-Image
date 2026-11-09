@@ -212,7 +212,7 @@ describe('版式编辑器 Ctrl 角点交互',()=>{
   });
   it('层级独立于读序，移动层级可撤销且重新排列读序不改变遮挡',()=>{
     const {state,close}=editor(); state.add();
-    const first=state.doc.value.panels[0], second=state.doc.value.panels[1];
+    const first=state.doc.value.panels[0];
     state.selectPanel(0); state.moveLayer(1);
     expect(state.doc.value.panels[0]).toBe(first);
     expect(state.drawn.value.map((item:any)=>item.index)).toEqual([1,0]);

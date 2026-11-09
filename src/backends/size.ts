@@ -85,6 +85,11 @@ export function pickSize(pair: SizePair, orientation: Orientation): string {
  * 它本质是「这对尺寸只用哪一格」。从前的替代做法是把两格填成同一个尺寸——
  * 出图是统一了,AI 却仍按横竖判据取景(锁竖时照样为群像构思宽画面)。
  */
+/** Editor input only. Legacy imported canvas coordinates keep their original precision. */
+export function alignMossCanvasDimension(value: number): number {
+  return Number.isFinite(value) ? Math.max(64, Math.min(8192, Math.round(value / 16) * 16)) : value;
+}
+
 export type OrientationLock = 'auto' | Orientation;
 
 /** 容忍式归一:只认两个方向值,其余(含老数据缺字段)一律 'auto' = 维持改动前的行为。 */

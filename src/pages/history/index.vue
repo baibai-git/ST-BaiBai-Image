@@ -299,7 +299,7 @@ function copyAll(record: HistoryRecord): void {
   background: var(--bbi-surface-2);
   color: var(--bbi-ink-soft);
   font-family: var(--bbi-font-mono);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1;
 }
@@ -359,7 +359,7 @@ function copyAll(record: HistoryRecord): void {
 }
 .bbi-hist-time {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--bbi-ink-muted);
   white-space: nowrap;
@@ -391,7 +391,7 @@ function copyAll(record: HistoryRecord): void {
   margin-bottom: 12px;
 }
 .bbi-hist-fact {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 9px;
   border-radius: var(--bbi-radius-pill);
@@ -405,7 +405,7 @@ function copyAll(record: HistoryRecord): void {
   border-radius: var(--bbi-radius-sm);
   background: var(--bbi-danger-soft);
   color: var(--bbi-danger);
-  font-size: 12.5px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -475,7 +475,7 @@ function copyAll(record: HistoryRecord): void {
   width: 7ch;
   text-align: right;
   font-family: var(--bbi-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--bbi-ink-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -508,7 +508,7 @@ function copyAll(record: HistoryRecord): void {
   background: var(--bbi-surface-2);
   color: var(--bbi-ink);
   font-family: var(--bbi-font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -554,7 +554,7 @@ function copyAll(record: HistoryRecord): void {
    token 与状态**必须留下**:token 是这页的核心信息,比渠道名/时间重要得多。 */
 @media (max-width: 640px) {
   .bbi-hist-name {
-    font-size: 13px;
+    font-size: 14px;
   }
   .bbi-hist-sub,
   .bbi-hist-time {
@@ -573,7 +573,7 @@ function copyAll(record: HistoryRecord): void {
     color: var(--bbi-ink);
   }
   .bbi-hist-text {
-    font-size: 11.5px;
+    font-size: 12px;
   }
 }
 </style>

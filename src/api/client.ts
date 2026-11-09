@@ -1,4 +1,6 @@
 import { getContext } from '@/st/context';
+import { ApiError, responseError } from './errors';
+export { ApiError } from './errors';
 import type { ApiChannel } from '@/state/settings';
 import {
   beginLlm,
@@ -62,13 +64,6 @@ export function wireMessages(messages: ChatMsg[]): WireMessage[] {
     if (role!=='user') throw new ApiError('版式图片只能放在 user 消息中。');
     return {role,content:[{type:'text' as const,text:content},...images.map(url=>({type:'image_url' as const,image_url:{url,detail:'high' as const}}))]};
   });
-}
-
-export class ApiError extends Error {
-  constructor(message: string, readonly status?: number) {
-    super(message);
-    this.name = 'ApiError';
-  }
 }
 
 /**
@@ -324,6 +319,10 @@ async function requestCompletionAtUrl(
 
       if (!resp.ok) {
         const text = await resp.text().catch(() => '');
+        try {
+          const data = JSON.parse(text);
+          if (data?.error) throw responseError(data.error, resp.status);
+        } catch (error) { if (error instanceof ApiError) throw error; }
         throw new ApiError(`副 API 请求失败 (${resp.status}): ${text.slice(0, 300)}`, resp.status);
       }
 
@@ -338,7 +337,7 @@ async function requestCompletionAtUrl(
 
       const data = await resp.json();
       if (data?.error) {
-        throw new ApiError(data.error.message || '副 API 返回错误');
+        throw responseError(data.error);
       }
 
       opts.onDshResponse?.(data);
@@ -395,6 +394,7 @@ export async function readSseContent(resp: Response): Promise<string> {
   if (!reader) {
     // 无法流式读取(理论上不会):退回当作整体 JSON 处理
     const data = await resp.json().catch(() => null);
+    if (data?.error) throw responseError(data.error);
     return data ? extractContent(data) : '';
   }
   const decoder = new TextDecoder();
@@ -415,7 +415,7 @@ export async function readSseContent(resp: Response): Promise<string> {
       if (payload === '[DONE]') continue;
       try {
         const json = JSON.parse(payload);
-        if (json?.error) throw new ApiError(json.error.message || '副 API 返回错误');
+        if (json?.error) throw responseError(json.error);
         const choice = json?.choices?.[0];
         const src = choice?.delta ?? choice?.message;
         const piece = textOf(src?.content) || textOf(choice?.text);
@@ -616,7 +616,7 @@ export async function fetchModels(
 
     const data = await resp.json();
     if (data?.error && !Array.isArray(data?.data)) {
-      throw new ApiError(data?.message || '拉取模型失败');
+      throw responseError(data.error);
     }
 
     const list: unknown = data?.data ?? data?.models ?? [];

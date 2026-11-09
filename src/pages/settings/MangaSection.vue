@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { alignMossCanvasDimension } from '@/backends/size';
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue';
 import { settings } from '@/state/settings';
 import Collapsible from '@/components/Collapsible.vue';
@@ -25,6 +26,7 @@ import {
 const ORIENTATIONS: MangaOrientation[] = ['portrait', 'landscape'];
 
 const draft = ref('');
+const newJsonEditor = ref<HTMLElement>();
 const editing = ref('');
 const error = ref('');
 const note = ref('');
@@ -85,8 +87,7 @@ async function previewAtlases(): Promise<void> {
 const resizeBackup = ref<{ before: MangaCustomLayout[]; after: string }>();
 const canUndoResize = computed(() => resizeBackup.value?.after === JSON.stringify(settings.manga.custom));
 function alignBatchCanvasInput(): void {
-  const align=(value: number): number => Number.isFinite(value) ? Math.max(64,Math.min(8192,Math.round(value/16)*16)) : value;
-  batchWidth.value=align(batchWidth.value);batchHeight.value=align(batchHeight.value);
+  batchWidth.value=alignMossCanvasDimension(batchWidth.value);batchHeight.value=alignMossCanvasDimension(batchHeight.value);
 }
 function resizeAllCanvases(): void {
   alignBatchCanvasInput();
@@ -319,6 +320,7 @@ function startNew(): void {
     null,
     2,
   );
+  void nextTick(() => newJsonEditor.value?.scrollIntoView({ block: 'nearest' }));
 }
 
 function cancel(): void {
@@ -373,58 +375,72 @@ function resetBuiltin(id: string): void {
   <div class="bbi-manga">
     <label class="bbi-manga-row">
       <input v-model="settings.manga.enabled" type="checkbox" class="bbi-checkbox" />
-      <span>启用漫画 Layout（模型只写版式与槽位，坐标由插件查表注入）</span>
+      <span>启用漫画 Layout</span>
     </label>
-    <p class="bbi-manga-hint">
-      关闭时完全走原本的生图配置：不追加漫画协议，也不改写提示词里的坐标。启用后提示词只带版式清单，
-      不再带坐标表——新版式加进这里，下一次请求就会出现在清单里，不需要改提示词。
-    </p>
-    <p class="bbi-manga-hint">当前可用版式 {{ activeCount }} / {{ rows.length }}。</p>
+    <p class="bbi-manga-hint">模型分配内容，插件按所选版式编译坐标。</p>
     <label class="bbi-manga-row">
       <input v-model="settings.manga.singleImageMode" type="checkbox" class="bbi-checkbox" aria-label="单图模式（全页一格）" />
       <span>单图模式（全页一格）</span>
     </label>
-    <p class="bbi-manga-hint">开启后只选全页单格版式，同轮可复用ID，停用布局冷却；关闭后恢复多格漫画规则。人物与字区可重叠，用明确位置及按需半透明气泡避让关键内容。</p>
+    <p class="bbi-manga-hint">仅选全页单格版式，允许同轮复用，暂停版式冷却。</p>
+    <label class="bbi-manga-row bbi-manga-catalog">
+      <span>版式说明方式</span>
+      <select v-model="settings.manga.catalogMode" class="bbi-input" aria-label="版式说明方式">
+        <option value="text">文字空间说明</option>
+        <option value="image">示意图＋槽位清单</option>
+      </select>
+    </label>
+    <p class="bbi-manga-hint">示意图需要副 API 和 DSH 桥接均支持图片输入。</p>
+    <details class="bbi-manga-details">
+      <summary>版式设置与维护</summary>
       <label class="bbi-manga-row">
-        <span>版式说明方式</span>
-        <select v-model="settings.manga.catalogMode" class="bbi-input" aria-label="版式说明方式">
-          <option value="text">文字空间说明</option>
-          <option value="image">示意图＋精简槽位清单（视觉模型）</option>
-        </select>
+        <span>版式冷却轮数</span>
+        <input v-model.number="settings.manga.cooldownRounds" :disabled="settings.manga.singleImageMode" type="number" min="0" max="30" step="1" class="bbi-input bbi-manga-size" aria-label="版式冷却轮数" @change="settings.manga.cooldownRounds = normalizeCooldownRounds(settings.manga.cooldownRounds)" />
       </label>
-      <p class="bbi-manga-hint">图片模式每图 4 套，保留原比例、格号、槽位及叠放关系；新增、修改或停用版式后，下一次请求自动重新拼接。本轮只发送方向、画布和冷却筛选后的候选。需指派支持图片的副 API；使用 DSH 时桥接也须支持传图。文字模式沿用现有说明。</p>
-      <button type="button" class="bbi-manga-btn" :disabled="atlasBusy" @click="previewAtlases">{{ atlasBusy ? '正在生成拼图…' : '预览版式拼图（每图4套）' }}</button>
-      <p v-if="atlasError" role="alert">{{ atlasError }}</p>
+      <p class="bbi-manga-hint">按已采纳请求计数，0 关闭跨轮冷却；同轮多页仍不重复。</p>
+      <button type="button" class="bbi-btn bbi-btn-sm" :disabled="atlasBusy" @click="previewAtlases">{{ atlasBusy ? '正在生成拼图…' : '预览版式拼图' }}</button>
+      <p v-if="atlasError" class="bbi-manga-error" role="alert">{{ atlasError }}</p>
       <details v-if="atlasPreview.length" open>
-        <summary>版式拼图预览（{{ atlasPreview.length }} 张）</summary>
-        <p class="bbi-manga-hint">预览包含当前全部启用版式；实际请求会进一步排除不适用方向、画布与冷却中的 ID。修改版式后可再次点击更新预览。</p>
+        <summary>拼图预览（{{ atlasPreview.length }} 张）</summary>
+        <p class="bbi-manga-hint">每图 4 套启用版式。实际请求按方向、画布及冷却筛选。</p>
         <figure v-for="(atlas,index) in atlasPreview" :key="index" style="margin:12px 0">
           <figcaption>{{ atlas.orientation }} · ID {{ atlas.ids.join('、') }} · <a :href="atlas.image" :download="`layout-atlas-${index+1}.png`">下载 PNG</a></figcaption>
-          <img :src="atlas.image" :alt="`版式拼图 ${index+1}：${atlas.ids.join('、')}`" style="display:block;width:100%;height:auto;border-radius:8px" />
+          <img :src="atlas.image" :alt="`版式拼图 ${index+1}：${atlas.ids.join('、')}`" style="display:block;width:100%;height:auto" />
         </figure>
       </details>
-    <label class="bbi-manga-row">
-      <span>版式冷却轮数</span>
-      <input v-model.number="settings.manga.cooldownRounds" :disabled="settings.manga.singleImageMode" type="number" min="0" max="30" step="1" class="bbi-input"
-        aria-label="版式冷却轮数" style="width: 88px"
-        @change="settings.manga.cooldownRounds = normalizeCooldownRounds(settings.manga.cooldownRounds)" />
-    </label>
-    <p class="bbi-manga-hint">{{ settings.manga.singleImageMode ? '单图模式不执行布局冷却，原冷却设置保留供关闭单图模式后使用。' : '默认3，范围0～30。按已采纳请求计数，0关闭跨轮冷却；同轮多页仍不重复。' }} 修改后下一次请求生效。</p>
-    <button v-if="settings.manga.deleted.length" type="button" class="bbi-manga-btn" @click="restoreDeleted">恢复已删除的默认版式（{{ settings.manga.deleted.length }}）</button>
-
     <Collapsible title="漫画规范" :open="false">
       <p class="bbi-manga-hint">
-        漫画规范：只在开关打开时生效，留空则沿用「自动生成 tag」里的后端规范框。版式清单由插件自动接在它后面，这里不要写坐标。
+        留空沿用后端规范。插件另附版式清单，此处填写内容规则。
       </p>
       <textarea v-model="settings.manga.spec" class="bbi-input bbi-manga-code" spellcheck="false" placeholder="粘贴漫画 1080p 规范全文"></textarea>
     </Collapsible>
     <Collapsible title="漫画检查指导" :open="false">
       <p class="bbi-manga-hint">
-        漫画检查指导：同样只在开关打开时生效，留空则沿用常规思考清单（或插件内置的 Layout 默认）。
+        留空沿用常规检查指导或内置默认。
       </p>
       <textarea v-model="settings.manga.thinking" class="bbi-input bbi-manga-notes" spellcheck="false" placeholder="粘贴输出前检查指导全文"></textarea>
     </Collapsible>
 
+    <Collapsible title="版式选择说明" :open="false">
+      <p class="bbi-manga-hint">
+        追加到提示词末尾，补充选版偏好。
+      </p>
+      <textarea v-model="settings.manga.selectionNotes" class="bbi-input bbi-manga-notes" spellcheck="false" placeholder="留空则只输出插件生成的清单"></textarea>
+    </Collapsible>
+
+    <details class="bbi-manga-details">
+      <summary>批量修改画布大小</summary>
+      <div class="bbi-manga-item-actions">
+        <label>宽度 <input v-model.number="batchWidth" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="16" @change="alignBatchCanvasInput" /></label>
+        <label>高度 <input v-model.number="batchHeight" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="16" @change="alignBatchCanvasInput" /></label>
+        <button type="button" class="bbi-btn bbi-btn-sm" :disabled="quickOpen || !!editing || !rows.length" @click="resizeAllCanvases">一键应用到全部版式（{{ rows.length }}）</button>
+        <button v-if="resizeBackup" type="button" class="bbi-btn bbi-btn-sm" :disabled="!canUndoResize" @click="undoResize">撤销本次调整</button>
+      </div>
+      <p class="bbi-manga-hint">按比例缩放全部版式，保留横竖方向、读序和层级。工作流尺寸须与新画布一致。</p>
+      <p v-if="resizeBackup" class="bbi-manga-hint">修改或新增其他版式后，撤销本次调整按钮将失效。</p>
+      <p v-if="batchError" class="bbi-manga-error" role="alert">{{ batchError }}</p>
+    </details>
+      <details class="bbi-manga-details"><summary>旧版兼容</summary>
     <div class="bbi-manga-row">
       <label for="bbi-manga-bleed">出框基准（px）</label>
       <input
@@ -440,45 +456,23 @@ function resetBuiltin(id: string): void {
     </div>
     <p class="bbi-manga-hint">仅用于旧版 X 槽的出框兼容；实际 S 等主体框按编辑器坐标，不受此数值影响。</p>
 
-    <Collapsible title="版式选择说明" :open="false">
-      <p class="bbi-manga-hint">
-        版式选择说明：整段拼入提示词末尾，用来补充说明你想要选择的版式。
-      </p>
-      <textarea v-model="settings.manga.selectionNotes" class="bbi-input bbi-manga-notes" spellcheck="false" placeholder="留空则只输出插件生成的清单"></textarea>
-    </Collapsible>
-
-    <div class="bbi-manga-editor bbi-manga-item">
-      <strong>批量修改画布大小</strong>
-      <div class="bbi-manga-item-actions">
-        <label>宽度 <input v-model.number="batchWidth" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="16" @change="alignBatchCanvasInput" /></label>
-        <label>高度 <input v-model.number="batchHeight" class="bbi-input bbi-manga-size" type="number" min="64" max="8192" step="16" @change="alignBatchCanvasInput" /></label>
-        <button type="button" class="bbi-manga-btn" :disabled="quickOpen || !!editing || !rows.length" @click="resizeAllCanvases">一键应用到全部版式（{{ rows.length }}）</button>
-        <button v-if="resizeBackup" type="button" class="bbi-manga-btn" :disabled="!canUndoResize" @click="undoResize">撤销本次调整</button>
-      </div>
-      <p class="bbi-manga-hint">作用于当前列表中的启用及停用版式，保留各自横竖方向，横版自动对调宽高；所有分格、内框和变形角点按比例缩放，读序、层级及框用途保留。完成当前版式编辑后即可批量调整。生图工作流及渠道方向尺寸须与调整后的画布一致。</p>
-      <p v-if="resizeBackup" class="bbi-manga-hint">修改或新增其他版式后，撤销本次调整按钮将失效。</p>
-      <p v-if="batchError" class="bbi-manga-error" role="alert">{{ batchError }}</p>
+<div class="bbi-manga-item-actions"><button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(undefined,true)">导出旧版兼容文件</button><button v-if="settings.manga.deleted.length" type="button" class="bbi-btn bbi-btn-sm" @click="restoreDeleted">恢复已删除的默认版式（{{ settings.manga.deleted.length }}）</button></div></details>
+      <button type="button" class="bbi-btn bbi-btn-sm" @click="startNew">新建 JSON 版式</button>
+    </details>
+    <div class="bbi-manga-item-actions">
+      <button type="button" class="bbi-btn bbi-btn-sm" @click="openQuick()">新建版式</button>
+      <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts()">导出全部版式（{{ rows.length }}）</button>
+      <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="importInput?.click()">{{ transferBusy ? '正在导入…' : '导入版式' }}</button>
+      <input ref="importInput" type="file" accept=".json,application/json" aria-label="导入版式 JSON 文件" hidden @change="importLayoutFile" />
     </div>
-
-    <div class="bbi-manga-editor bbi-manga-item">
-      <strong>版式导入 / 导出</strong>
-      <div class="bbi-manga-item-actions">
-        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts()">导出全部版式（{{ rows.length }}）</button>
-        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(undefined,true)">导出旧版兼容文件</button>
-        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="importInput?.click()">{{ transferBusy ? '正在导入…' : '导入版式' }}</button>
-        <input ref="importInput" type="file" accept=".json,application/json" aria-label="导入版式 JSON 文件" hidden @change="importLayoutFile" />
-      </div>
-      <p class="bbi-manga-hint">导出当前列表中的全部启用及停用版式，保留画布、坐标、形变、读序、层级和框说明；同时记录已删除的默认版式状态。支持导入全部版式文件或单套版式，同名项确认后覆盖，其他版式保留。</p>
-      <p v-if="transferNote" class="bbi-manga-hint" role="status">{{ transferNote }}</p>
-      <p v-if="transferError" class="bbi-manga-error" role="alert">{{ transferError }}</p>
-    </div>
-
+    <p v-if="transferNote" class="bbi-manga-hint" role="status">{{ transferNote }}</p>
+    <p v-if="transferError" class="bbi-manga-error" role="alert">{{ transferError }}</p>
     <label class="bbi-manga-mini"><input type="checkbox" class="bbi-checkbox" :checked="allEnabled" :indeterminate="activeCount>0 && !allEnabled" :disabled="!rows.length" @change="setAllEnabled(($event.target as HTMLInputElement).checked)" />全部启用（{{ activeCount }}/{{ rows.length }}）</label>
-    <p class="bbi-manga-hint">拖动手柄调整列表与图册顺序；手柄也支持上下方向键。此顺序不改变格内读序或遮挡层级，也不强制模型按顺序选版。</p>
+    <p class="bbi-manga-hint">拖动手柄或用上下方向键排序；格内读序、层级保持。</p>
     <div class="bbi-manga-layout-list">
     <div v-for="(row,index) in rows" :key="row.id" class="bbi-manga-item bbi-manga-layout-card" :class="{'is-dragging':draggingLayout===row.id}">
       <div class="bbi-manga-item-head">
-        <button type="button" class="bbi-manga-btn bbi-manga-grip" aria-label="拖动版式排序，方向键上下移动" title="拖动排序；方向键上下移动" @pointerdown="startLayoutDrag($event,row.id)" @keydown.up.prevent="moveLayout(index,index-1)" @keydown.down.prevent="moveLayout(index,index+1)">⠿</button>
+        <button type="button" class="bbi-btn bbi-btn-sm bbi-manga-grip" aria-label="拖动版式排序，方向键上下移动" title="拖动排序；方向键上下移动" @pointerdown="startLayoutDrag($event,row.id)" @keydown.up.prevent="moveLayout(index,index-1)" @keydown.down.prevent="moveLayout(index,index+1)">⠿</button>
         <code>{{ row.id }}</code>
         <span class="bbi-manga-label">{{ row.label }}</span>
         <span class="bbi-manga-meta">竖 {{ row.portrait }} 格 · 横 {{ row.landscape }} 格{{ row.custom ? ' · 自定义' : '' }}</span>
@@ -487,7 +481,7 @@ function resetBuiltin(id: string): void {
       <input
         class="bbi-input bbi-manga-usage"
         :value="row.usage"
-        :placeholder="'这套版式适合什么节拍（留空则模型只能靠格数猜）'"
+        :placeholder="'版式用途'"
         @change="onUsageChange(row.id, $event)"
       />
       <div class="bbi-manga-item-actions">
@@ -495,38 +489,34 @@ function resetBuiltin(id: string): void {
           <input type="checkbox" class="bbi-checkbox" :checked="!row.disabled" @change="toggleDisabled(row.id)" />
           启用
         </label>
+        <button type="button" class="bbi-btn bbi-btn-sm" @click="openQuick(row.id)">编辑版式</button>
         <button
           type="button"
-          class="bbi-manga-btn"
+          class="bbi-btn bbi-btn-sm"
           @click="editing === row.id ? cancel() : startEdit(row.id)"
         >
-          {{ editing === row.id ? '收起' : row.custom ? '编辑 / 覆盖' : '改写为自定义' }}
+          {{ editing === row.id ? '收起 JSON' : 'JSON 编辑' }}
         </button>
-        <button type="button" class="bbi-manga-btn" @click="openQuick(row.id)">可视化编辑</button>
-        <button type="button" class="bbi-manga-btn" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(row.id)">导出当前版式</button>
-        <button v-if="row.custom && builtins.has(row.id)" type="button" class="bbi-manga-btn" @click="resetBuiltin(row.id)">恢复内置</button>
-        <button type="button" class="bbi-manga-btn" @click="deleteLayout(row.id)">删除</button>
+        <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(row.id)">导出</button>
+        <button v-if="row.custom && builtins.has(row.id)" type="button" class="bbi-btn bbi-btn-sm" @click="resetBuiltin(row.id)">恢复内置</button>
+        <button type="button" class="bbi-btn bbi-btn-sm" @click="deleteLayout(row.id)">删除</button>
       </div>
 
       <div v-if="editing === row.id" :id="`bbi-manga-editor-${row.id}`" class="bbi-manga-editor">
         <textarea v-model="draft" class="bbi-input bbi-manga-code" spellcheck="false"></textarea>
         <div class="bbi-manga-item-actions">
-          <button type="button" class="bbi-manga-btn" @click="save">保存</button>
-          <button type="button" class="bbi-manga-btn" @click="cancel">取消</button>
+          <button type="button" class="bbi-btn bbi-btn-sm" @click="save">保存</button>
+          <button type="button" class="bbi-btn bbi-btn-sm" @click="cancel">取消</button>
         </div>
         <p v-if="error" class="bbi-manga-error">{{ error }}</p>
       </div>
     </div>
 
     </div>
-    <div class="bbi-manga-item-actions">
-      <button type="button" class="bbi-manga-btn" @click="openQuick()">快捷自定义</button>
-      <button type="button" class="bbi-manga-btn" @click="startNew">新增版式（JSON）</button>
-    </div>
     <p v-if="note" class="bbi-manga-hint" role="status">{{ note }}</p>
     <MangaLayoutEditor v-if="quickOpen" :sources="quickSources" :existing-ids="existingIds" :initial-key="quickSource" :editing-id="quickEditingId" @close="quickOpen=false" @save="saveQuick" />
 
-    <div v-if="editing === '__new__'" class="bbi-manga-editor">
+    <div v-if="editing === '__new__'" ref="newJsonEditor" class="bbi-manga-editor">
       <p class="bbi-manga-hint">
         版式 JSON：<code>id</code> 与内置同名即覆盖，新名字即追加；<code>portrait</code> / <code>landscape</code>
         各自是「格数组」，每格 <code>position</code> 为位置代号、<code>slots</code> 为槽位到
@@ -535,13 +525,12 @@ function resetBuiltin(id: string): void {
       </p>
       <textarea v-model="draft" class="bbi-input bbi-manga-code" spellcheck="false"></textarea>
       <div class="bbi-manga-item-actions">
-        <button type="button" class="bbi-manga-btn" @click="save">保存</button>
-        <button type="button" class="bbi-manga-btn" @click="cancel">取消</button>
+        <button type="button" class="bbi-btn bbi-btn-sm" @click="save">保存</button>
+        <button type="button" class="bbi-btn bbi-btn-sm" @click="cancel">取消</button>
       </div>
       <p v-if="error" class="bbi-manga-error">{{ error }}</p>
     </div>
 
-    <p v-if="note" class="bbi-manga-hint">{{ note }}</p>
   </div>
 </template>
 
@@ -560,23 +549,22 @@ function resetBuiltin(id: string): void {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 14px;
 }
 .bbi-manga-hint {
   margin: 0;
   font-size: 12px;
   line-height: 1.6;
-  opacity: 0.72;
+  color: var(--bbi-ink-muted);
 }
 .bbi-manga-error {
   margin: 0;
   font-size: 12px;
-  color: #b3261e;
+  color: var(--bbi-danger);
 }
 .bbi-manga-item {
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 8px;
-  padding: 8px 10px;
+  border-bottom: 1px solid var(--bbi-line);
+  padding: 16px 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -586,15 +574,15 @@ function resetBuiltin(id: string): void {
   align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 13px;
+  font-size: 14px;
 }
 .bbi-manga-item-head code,
 .bbi-manga-label {
-  font-size: 13px;
+  font-size: 14px;
 }
 .bbi-manga-meta {
   font-size: 12px;
-  opacity: 0.7;
+  color: var(--bbi-ink-muted);
 }
 .bbi-manga-item-actions {
   display: flex;
@@ -608,24 +596,15 @@ function resetBuiltin(id: string): void {
   gap: 4px;
   font-size: 12px;
 }
-.bbi-manga-btn {
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  background: transparent;
-  cursor: pointer;
-}
 .bbi-manga-size { width: 100px; }
 .bbi-manga-item-actions label { display: inline-flex; align-items: center; gap: 5px; }
-.bbi-manga-btn:disabled { opacity: 0.45; cursor: default; }
 .bbi-manga-editor {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 .bbi-manga-usage {
-  font-size: 12px;
+  font-size: 14px;
 }
 .bbi-manga-notes {
   min-height: 96px;
@@ -638,5 +617,22 @@ function resetBuiltin(id: string): void {
   font-size: 12px;
   line-height: 1.5;
   white-space: pre;
+}
+.bbi-manga-details { border-top: 1px solid var(--bbi-line); padding: 10px 0; }
+.bbi-manga-details > summary { cursor: pointer; font-size: 14px; font-weight: 600; padding: 4px 0; }
+.bbi-manga-details[open] > :not(summary) { margin-top: 12px; }
+.bbi-manga-details :deep(.bbi-collapsible) { border: 0; border-radius: 0; background: transparent; }
+.bbi-manga-details :deep(.bbi-collapsible-head) { padding: 10px 0; font-size: 14px; }
+.bbi-manga-details :deep(.bbi-collapsible-body) { padding: 10px 0; }
+.bbi-manga-catalog { flex-wrap: wrap; }
+.bbi-manga-catalog select { width: auto; max-width: 100%; }
+.bbi-manga-bleed { width: 88px; }
+.bbi-manga-row > label, .bbi-manga-row > span { flex-shrink: 0; }
+.bbi-manga-row:has(.bbi-manga-bleed) { flex-wrap: wrap; }
+.bbi-manga .bbi-btn { flex-shrink: 0; }
+@media (max-width: 640px) {
+  .bbi-manga .bbi-btn, .bbi-manga-details > summary { min-height: 40px; }
+  .bbi-manga-details > summary { align-content: center; }
+  .bbi-manga-mini { min-height: 40px; }
 }
 </style>

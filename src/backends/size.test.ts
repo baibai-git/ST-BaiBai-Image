@@ -2,11 +2,22 @@ import { describe, expect, it } from 'vitest';
 
 import {
   effectiveOrientation,
+  alignMossCanvasDimension,
   normalizeOrientation,
   normalizeOrientationLock,
   parseSize,
   pickSize,
 } from '@/backends/size';
+
+describe('MOSS canvas editor input', () => {
+  it('rounds to the nearest 16, clamps input, and leaves invalid values for validation', () => {
+    for (const [input, expected] of [[1080, 1088], [1087, 1088], [1079, 1072], [15, 64], [10000, 8192]]) {
+      expect(alignMossCanvasDimension(input)).toBe(expected);
+    }
+    expect(alignMossCanvasDimension(NaN)).toBeNaN();
+    expect(alignMossCanvasDimension(Infinity)).toBe(Infinity);
+  });
+});
 
 describe('normalizeOrientation', () => {
   it('认标准值与大小写/空白变体', () => {

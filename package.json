@@ -1,6 +1,6 @@
 {
   "name": "st-baibai-image",
-  "version": "0.3.22",
+  "version": "0.3.26",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,9 @@
     "prewatch": "node scripts/sync-version.mjs",
     "watch": "vite build --watch --mode development",
     "typecheck": "vue-tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:size": "node scripts/check-file-size.mjs",
+    "hooks:install": "node scripts/install-hooks.mjs"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.7",
