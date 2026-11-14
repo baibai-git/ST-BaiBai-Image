@@ -63,9 +63,9 @@ describe('NAI 画师串库', () => {
     expect(settings.nai.plans[0].artistId).toBe('art_b');
   });
 
-  it('存量条目没有绑定的正/负面词键 → 补空串,方案沿用老渠道级的值(升级后提示词零变化)', async () => {
-    // 绑定字段上线前的老数据只有 id/name/prompt;补空串而非官方词,
-    // 才能保住「配方 → 渠道 → 官方」回落链里老用户原有的渠道级/官方行为。
+  it('存量条目没有绑定的正/负面词键 → 补空串,老渠道级值留在方案兼容字段', async () => {
+    // 绑定字段上线前的老数据只有 id/name/prompt;补空串让实际出图回落官方词,
+    // 老渠道值仅作数据保留,不再插入「画师串 → 官方」之间。
     const settings = await hydrateWithNai({
       qualityTags: 'channel q',
       undesiredContent: 'channel n',
@@ -75,7 +75,7 @@ describe('NAI 画师串库', () => {
     const preset = settings.nai.artistPresets[0];
     expect(preset.quality).toBe('');
     expect(preset.negative).toBe('');
-    // 画师串没绑词 → 方案照抄老渠道级覆盖值
+    // 画师串没绑词 → 方案照抄老渠道级覆盖值(仅供兼容,不参与出图)
     expect(settings.nai.plans[0].qualityTags).toBe('channel q');
     expect(settings.nai.plans[0].undesiredContent).toBe('channel n');
   });

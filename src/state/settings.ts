@@ -241,9 +241,9 @@ export interface NaiVibe {
  * (见 nai.ts 的 QUALITY_TAGS / DEFAULT_UNDESIRED_CONTENT);画师串是**用户自己的搭配**,
  * 跨模型复用才是常态。故做成可增删的库,而非 Record<model, …>。
  *
- * quality / negative 是「自带词」:从智绘姬导入的预设、或方案化之前绑在画师串上的正/负面词。
- * **出图不读它们**——正/负面词只认方案里那一份(方案值 → 模型官方词,只此一级回落);
- * 早先「画师串绑定 → 渠道级 → 官方」三级覆盖没人看得懂。数据留着,方案编辑里可一键套用。
+ * quality / negative 随画师串一起切换:对应字段有值就只用它,留空则按当前模型取官方词。
+ * 正/负面分别回落;智绘姬导入的预设也直接落成这三段,选中即整套生效。
+ * 渠道级与方案级旧字段不再参与出图,避免同一份词出现多层覆盖。
  */
 export interface NaiArtistPreset {
   id: string;
@@ -251,9 +251,9 @@ export interface NaiArtistPreset {
   name: string;
   /** 画师/画风 tag 串,拼在正向提示词最前面;留空的条目在拼装时等同于没选。 */
   prompt: string;
-  /** 自带的正面质量词(不参与出图,见上);空串 = 没有。 */
+  /** 正面质量词;空串或纯空白 = 按当前模型取官方质量词。 */
   quality: string;
-  /** 自带的负面提示词(不参与出图,见上);空串 = 没有。 */
+  /** 负面提示词;空串或纯空白 = 按当前模型取官方负面词(Medium 档恒为官方)。 */
   negative: string;
   /**
    * 预览图路径(/api/images/upload 落在 user/images/柏宝绘_画师串/ 的相对路径)。
@@ -302,9 +302,8 @@ export interface NaiEndpoint {
 /**
  * 一套 NAI 出图方案:「从哪个站发、用什么模型、什么画风、怎么采样」打包在一起,切过去全套生效。
  *
- * 为什么画风(画师串 / 质量词 / 负面词 / vibe)跟方案走:换风格时它们本来就是一起换的。
- * 方案化之前它们散在渠道级与画师串绑定两层,换一次风格要改好几处,覆盖关系也没人看得懂;
- * 现在正/负面词只剩一级回落:方案里的值 → 模型官方词(空串 = 跟随官方)。
+ * 方案通过 artistId 引用一整套画风:画师串正文 + 它绑定的质量词 / 负面词;
+ * 正/负面分别按「画师串值 → 当前模型官方词」回落,不再读方案级旧字段。
  *
  * 接入点、画师串、vibe 是**引用**:三个库全局共享,多个方案共用一个站、一条画师串、
  * 一张 vibe,改一处全部生效。vibe 强度挂在 vibe 上(全方案共用),方案只记「叠加哪几张」。
@@ -324,9 +323,9 @@ export interface NaiPlan extends SizePair {
    * 他没选过的画风,每张图都变样却查不出原因。
    */
   artistId: string;
-  /** 正面质量词;留空 = 按模型取官方质量词(见 nai.ts naiDefaultQualityTags)。 */
+  /** @deprecated 方案化初期的旧字段;仅为兼容保留存储,出图只读当前画师串的 quality。 */
   qualityTags: string;
-  /** 负面提示词;留空 = 按模型取官方负面词(见 nai.ts naiDefaultUndesired)。 */
+  /** @deprecated 方案化初期的旧字段;仅为兼容保留存储,出图只读当前画师串的 negative。 */
   undesiredContent: string;
   sampler: string;
   steps: number;
@@ -405,7 +404,9 @@ export interface NaiRunConfig extends SizePair {
   model: NaiModel;
   /** 本方案的画师串;未选 / 悬空 = null。 */
   artist: NaiArtistPreset | null;
+  /** @deprecated 兼容旧配置形状;提示词拼装不读,正/负面只认 artist 与模型官方词。 */
   qualityTags: string;
+  /** @deprecated 同 qualityTags。 */
   undesiredContent: string;
   sampler: string;
   steps: number;
@@ -2099,11 +2100,11 @@ function normalizeNaiPlan(raw: unknown, seq: number): NaiPlan {
 }
 
 /**
- * 存量迁移:方案化之前 NAI 只有一套渠道级平铺设置。原样折成「默认方案」,目标是**升级后出图零变化**:
+ * 存量迁移:方案化之前 NAI 只有一套渠道级平铺设置,原样折成「默认方案」以保留数据:
  *
  * - 接入点 / 画师串:老的 activeEndpointId / activeArtistId 直接成为方案的引用;
- * - 正/负面词:老规则是「画师串绑定值 → 渠道值 → 官方词」三级回落,方案只剩两级。
- *   故把老规则**当时实际生效**的那一份抄进方案(绑定值优先),官方词那级照旧由空串表达;
+ * - 正/负面词:把老规则当时生效的一份抄进方案兼容字段,同时保留画师串库里的绑定词。
+ *   实际出图只读「画师串 → 官方」,这些方案旧字段不再参与;
  * - vibe:老数据每张各有 enabled,启用的那几张成为方案的 vibeIds。
  */
 function foldLegacyNaiPlan(

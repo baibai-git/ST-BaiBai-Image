@@ -90,11 +90,13 @@ function onRowClick(item: LibItem) {
   if (!item.builtin) toggleSelect(item.preset.id);
 }
 
-/* ============ 编辑弹窗(名字/内容走草稿,预览图即时落盘) ============ */
+/* ============ 编辑弹窗(名字/画师串/正负面词走草稿,预览图即时落盘) ============ */
 
 const editItem = ref<LibItem | null>(null);
 const editName = ref('');
 const editPrompt = ref('');
+const editQuality = ref('');
+const editNegative = ref('');
 /** 刚点「新建」建出来的:取消 = 连条目一起撤掉,不在库里留一条空的「画师串 N」。 */
 const editIsNew = ref(false);
 
@@ -102,6 +104,8 @@ function openEdit(item: LibItem, isNew = false) {
   editItem.value = item;
   editName.value = item.preset.name;
   editPrompt.value = item.preset.prompt;
+  editQuality.value = item.preset.quality;
+  editNegative.value = item.preset.negative;
   editIsNew.value = isNew;
 }
 
@@ -126,6 +130,8 @@ function saveEdit() {
   if (!item || item.builtin) return; // 内置只读(按钮已隐藏,双保险)
   item.preset.name = editName.value.trim();
   item.preset.prompt = editPrompt.value;
+  item.preset.quality = editQuality.value;
+  item.preset.negative = editNegative.value;
   editItem.value = null;
 }
 
@@ -142,8 +148,8 @@ function duplicateFromEdit() {
     id: newNaiArtist().id,
     name: `${name} 副本`,
     prompt: editPrompt.value,
-    quality: item.preset.quality,
-    negative: item.preset.negative,
+    quality: editQuality.value,
+    negative: editNegative.value,
   };
   const list = settings.nai.artistPresets;
   const index = list.findIndex(p => p.id === item.preset.id);
@@ -338,7 +344,7 @@ function planNames(plans: NaiPlan[]): string {
     </div>
   </div>
 
-  <!-- 编辑/查看:名称 + 内容 + 预览图 -->
+  <!-- 编辑/查看:名称 + 画师串 + 正/负面词 + 预览图 -->
   <ModalMask :open="!!editItem" @close="cancelEdit">
     <div
       v-if="editItem"
@@ -419,6 +425,32 @@ function planNames(plans: NaiPlan[]): string {
           placeholder="artist:xxx, artist:yyy"
         />
       </div>
+
+      <div class="bbi-modal-field">
+        <span class="bbi-modal-label">正面质量词</span>
+        <BbiTextarea
+          v-model="editQuality"
+          :rows="3"
+          :max-rows="10"
+          mono
+          :readonly="editItem.builtin"
+          placeholder="留空 = 使用当前模型的官方质量词"
+        />
+      </div>
+
+      <div class="bbi-modal-field">
+        <span class="bbi-modal-label">负面提示词</span>
+        <BbiTextarea
+          v-model="editNegative"
+          :rows="3"
+          :max-rows="10"
+          mono
+          :readonly="editItem.builtin"
+          placeholder="留空 = 使用当前模型的官方负面词"
+        />
+      </div>
+
+      <p class="bbi-field-hint">正/负面词随画师串一起切换，各自留空时使用当前模型的官方词。</p>
 
       <footer class="bbi-modal-foot">
         <button
