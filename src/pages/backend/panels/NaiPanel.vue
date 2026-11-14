@@ -14,6 +14,7 @@ import {
   buildNaiv4vibe,
   encodeVibeImage,
   isBuiltinNaiArtist,
+  isNai45,
   isNai5,
   naiDefaultQualityTags,
   naiDefaultUndesired,
@@ -231,7 +232,15 @@ const planModel = computed<string>({
   get: () => plan.value.model,
   set: v => {
     const hit = NAI_MODELS.find(m => m.value === v);
-    if (hit) plan.value.model = hit.value;
+    if (!hit) return;
+    const target = plan.value;
+    // 只在用户从其它模型切进 4.5 时建议默认纯 tag;已有 4.5 方案、切方案与加载设置都不经过这里。
+    const entering45 = isNai45(hit.value) && !isNai45(target.model);
+    target.model = hit.value;
+    if (entering45 && target.naturalLanguage) {
+      target.naturalLanguage = false;
+      toastr.info('已切换到 NAI 4.5，并关闭「生成自然语言」以避免提示词过长被截断；需要时可在下方重新开启。', '已关闭自然语言');
+    }
   },
 });
 
@@ -264,47 +273,28 @@ const artistSharedWith = computed(() => {
 const artistPickerOpen = ref(false);
 
 /*
- * 正/负面词只有一级回落:方案里的值 → 模型官方词。框里留空 = 跟随官方,
- * 官方词就显示在占位文字里——「实际生效了什么」打开就能看到,不必再点进二级弹窗。
+ * 正/负面词跟着方案引用的画师串走:对应字段有值就只用它,留空才回落模型官方词。
+ * 方案里的两个框与画师串库编辑的是同一份数据;不选画师串时只读展示官方词。
  */
 const officialQuality = computed(() => naiDefaultQualityTags(plan.value.model));
 const officialNegative = computed(() => naiDefaultUndesired(plan.value.model));
 
-type WordsKey = 'qualityTags' | 'undesiredContent';
+type WordsKey = 'quality' | 'negative';
 
 function isCustomWords(key: WordsKey): boolean {
-  return plan.value[key].trim().length > 0;
+  return !!planArtist.value?.[key].trim();
 }
 
-/** 「在官方词上改」:把官方词抄进框里当起点;改完与官方一字不差也无妨,只是不再跟随模型。 */
+/** 「在官方词上改」:把官方词抄进当前画师串当起点;内置条目只读,不提供这个入口。 */
 function fillOfficialWords(key: WordsKey) {
-  plan.value[key] = key === 'qualityTags' ? officialQuality.value : officialNegative.value;
+  const artist = planArtist.value;
+  if (!artist || planArtistBuiltin.value) return;
+  artist[key] = key === 'quality' ? officialQuality.value : officialNegative.value;
 }
 
 function resetWords(key: WordsKey) {
-  plan.value[key] = '';
-}
-
-/**
- * 画师串的「自带词」(智绘姬导入 / 方案化之前绑在画师串上的)出图不读,
- * 只在这里给一个一键套用:与方案现值一样时按钮不出现,点了没变化的按钮不如不摆。
- */
-const artistWordsApplicable = computed(() => {
-  const a = planArtist.value;
-  if (!a) return false;
-  const q = a.quality.trim();
-  const n = a.negative.trim();
-  return (
-    (!!q && q !== plan.value.qualityTags.trim()) || (!!n && n !== plan.value.undesiredContent.trim())
-  );
-});
-
-function applyArtistWords() {
-  const a = planArtist.value;
-  if (!a) return;
-  if (a.quality.trim()) plan.value.qualityTags = a.quality;
-  if (a.negative.trim()) plan.value.undesiredContent = a.negative;
-  toastr.success(`已把「${a.name}」自带的正/负面词填进本方案`, '画师串');
+  const artist = planArtist.value;
+  if (artist && !planArtistBuiltin.value) artist[key] = '';
 }
 
 /* —— 方案弹窗:Vibe —— */
@@ -460,12 +450,8 @@ function runArtistImport() {
   }
   const switched = switchActiveArtist.value && !!result.activeArtistId;
   if (switched) {
-    // 自带词出图不读,切换时顺手抄进方案——否则「切到智绘姬那套」只换了一半画风
-    const target = active.value;
-    target.artistId = result.activeArtistId;
-    const picked = settings.nai.artistPresets.find(p => p.id === result.activeArtistId);
-    if (picked?.quality.trim()) target.qualityTags = picked.quality;
-    if (picked?.negative.trim()) target.undesiredContent = picked.negative;
+    // 正/负面词存在画师串上,换引用即整套切换,不再复制进方案。
+    active.value.artistId = result.activeArtistId;
   }
   const parts = [`新增 ${result.imported} 个`];
   if (result.overwritten) parts.push(`覆盖更新 ${result.overwritten} 个`);
@@ -1180,7 +1166,7 @@ async function removeVibe(vibe: NaiVibe) {
 
         <!-- 提示词预设导入:与 vibe 同区同级;有没有新预设不在这里报,点开弹窗看预览 -->
         <p class="bbi-field-hint vibe-hint">
-          提示词预设同理:前置固定正向 → 画师串，后置固定正向 / 固定负向 → 画师串自带的正/负面词（在方案编辑里一键套用）。
+          提示词预设同理:前置固定正向 → 画师串，后置固定正向 / 固定负向 → 画师串的正/负面词（选中后自动生效）。
         </p>
         <p class="bbi-field-hint">
           <template v-if="!chatu8ArtistDetect.found">未检测到智绘姬（插件未安装或未启用）。</template>
@@ -1339,21 +1325,7 @@ async function removeVibe(vibe: NaiVibe) {
         </section>
 
         <section class="grp-sec">
-          <div class="grp-cap">
-            画风
-            <span class="grp-cap-tools">
-              <button
-                v-if="artistWordsApplicable"
-                class="quiet-btn"
-                type="button"
-                title="把画师串自带的正/负面词填进本方案(覆盖下面两栏)"
-                @click="applyArtistWords"
-              >
-                <Icon name="download" :size="13" />
-                套用画师串自带词
-              </button>
-            </span>
-          </div>
+          <div class="grp-cap">画风</div>
           <div class="grp">
             <div class="grp-row">
               <span class="grp-label">画师串</span>
@@ -1401,30 +1373,43 @@ async function removeVibe(vibe: NaiVibe) {
             <div class="grp-row is-stack">
               <span class="words-head">
                 <span class="grp-label">正面质量词</span>
-                <span class="bbi-prompt-state" :class="{ 'is-custom': isCustomWords('qualityTags') }">
-                  {{ isCustomWords('qualityTags') ? '已自定义' : '官方' }}
+                <span class="bbi-prompt-state" :class="{ 'is-custom': isCustomWords('quality') }">
+                  {{ isCustomWords('quality') ? '画师串' : '官方' }}
                 </span>
-                <span class="list-foot-spacer"></span>
-                <button
-                  v-if="isCustomWords('qualityTags')"
-                  class="quiet-btn"
-                  type="button"
-                  title="清空,改回跟随模型官方词"
-                  @click="resetWords('qualityTags')"
-                >
-                  <Icon name="refresh" :size="13" /> 恢复官方
-                </button>
-                <button v-else class="quiet-btn" type="button" @click="fillOfficialWords('qualityTags')">
-                  <Icon name="edit" :size="13" /> 在官方词上改
-                </button>
+                <template v-if="planArtist && !planArtistBuiltin">
+                  <span class="list-foot-spacer"></span>
+                  <button
+                    v-if="isCustomWords('quality')"
+                    class="quiet-btn"
+                    type="button"
+                    title="清空当前画师串的质量词,改回跟随模型官方词"
+                    @click="resetWords('quality')"
+                  >
+                    <Icon name="refresh" :size="13" /> 恢复官方
+                  </button>
+                  <button v-else class="quiet-btn" type="button" @click="fillOfficialWords('quality')">
+                    <Icon name="edit" :size="13" /> 在官方词上改
+                  </button>
+                </template>
               </span>
               <BbiTextarea
-                v-model="plan.qualityTags"
+                v-if="planArtist"
+                v-model="planArtist.quality"
                 class="grp-textarea"
                 :rows="2"
                 :max-rows="8"
                 mono
+                :readonly="planArtistBuiltin"
                 :placeholder="officialQuality"
+              />
+              <BbiTextarea
+                v-else
+                :model-value="officialQuality"
+                class="grp-textarea"
+                :rows="2"
+                :max-rows="8"
+                mono
+                readonly
               />
             </div>
             <div v-if="planFixed" class="grp-row is-stack">
@@ -1444,38 +1429,54 @@ async function removeVibe(vibe: NaiVibe) {
             <div v-else class="grp-row is-stack">
               <span class="words-head">
                 <span class="grp-label">负面提示词</span>
-                <span class="bbi-prompt-state" :class="{ 'is-custom': isCustomWords('undesiredContent') }">
-                  {{ isCustomWords('undesiredContent') ? '已自定义' : '官方' }}
+                <span class="bbi-prompt-state" :class="{ 'is-custom': isCustomWords('negative') }">
+                  {{ isCustomWords('negative') ? '画师串' : '官方' }}
                 </span>
-                <span class="list-foot-spacer"></span>
-                <button
-                  v-if="isCustomWords('undesiredContent')"
-                  class="quiet-btn"
-                  type="button"
-                  title="清空,改回跟随模型官方词"
-                  @click="resetWords('undesiredContent')"
-                >
-                  <Icon name="refresh" :size="13" /> 恢复官方
-                </button>
-                <button v-else class="quiet-btn" type="button" @click="fillOfficialWords('undesiredContent')">
-                  <Icon name="edit" :size="13" /> 在官方词上改
-                </button>
+                <template v-if="planArtist && !planArtistBuiltin">
+                  <span class="list-foot-spacer"></span>
+                  <button
+                    v-if="isCustomWords('negative')"
+                    class="quiet-btn"
+                    type="button"
+                    title="清空当前画师串的负面词,改回跟随模型官方词"
+                    @click="resetWords('negative')"
+                  >
+                    <Icon name="refresh" :size="13" /> 恢复官方
+                  </button>
+                  <button v-else class="quiet-btn" type="button" @click="fillOfficialWords('negative')">
+                    <Icon name="edit" :size="13" /> 在官方词上改
+                  </button>
+                </template>
               </span>
               <BbiTextarea
-                v-model="plan.undesiredContent"
+                v-if="planArtist"
+                v-model="planArtist.negative"
                 class="grp-textarea"
                 :rows="3"
                 :max-rows="10"
                 mono
+                :readonly="planArtistBuiltin"
                 :placeholder="officialNegative"
+              />
+              <BbiTextarea
+                v-else
+                :model-value="officialNegative"
+                class="grp-textarea"
+                :rows="3"
+                :max-rows="10"
+                mono
+                readonly
               />
             </div>
           </div>
           <p class="grp-foot">
-            顺序:画师串 → 画面 tag → 质量词。两栏留空 = 用当前模型的官方词(灰字就是实际生效的内容),换模型自动跟着换。
+            顺序:画师串 → 画面 tag → 质量词。正/负面词随当前画师串切换,两栏分别留空时使用当前模型的官方词(灰字就是实际生效的内容)。
+          </p>
+          <p v-if="planArtist && !planArtistBuiltin" class="grp-foot">
+            这里改的是画师串本身;在「画师串库」里也能编辑,共用这条的其它方案会一起生效。
           </p>
           <p v-if="planFixed" class="grp-foot">
-            Medium 档的负面词由官方固定,不能自定义,上面显示的就是实际发出去的内容;方案里自填过的负面词仍保留着,换回其它模型照常生效。
+            Medium 档的负面词由官方固定,不能自定义,上面显示的就是实际发出去的内容;画师串里自填过的负面词仍保留着,换回其它模型照常生效。
           </p>
           <p v-if="planArtist && isNai5(plan.model)" class="grp-foot is-warn">
             NAI 5 对画师串的响应与 4.5 差异很大,旧画师串直接套用效果可能跑偏,建议重新调试。
@@ -1744,7 +1745,7 @@ async function removeVibe(vibe: NaiVibe) {
         <p class="bbi-modal-label">
           把智绘姬的全部 {{ artistImportResult?.plans.length ?? 0 }} 个提示词预设复制到柏宝绘的画师串库，只建副本、不改动智绘姬的数据。
           映射：前置固定正向 → 画师串，后置固定正向 / 固定负向 → 画师串的自带正 / 负面词（负向前面自动拼上当前模型的官方基线）。
-          自带词不会自动生效，在方案里点「套用画师串自带词」才写进方案。
+          选中导入的画师串后，它的正/负面词会一起生效；留空的字段使用当前模型官方词。
           同名条目会覆盖更新（之前导入过的可直接重新导入修复），内容完全相同的自动跳过。
         </p>
         <ul class="art-import-list">

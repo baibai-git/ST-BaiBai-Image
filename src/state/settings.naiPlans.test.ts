@@ -4,9 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * NAI 出图方案库:老渠道级平铺设置 → 「默认方案」的迁移,以及方案引用的修复与解析。
  *
  * 看点:
- * 1. 迁移的唯一目标是**升级后出图零变化**:老的平铺字段原样进默认方案;老的
- *    「画师串绑定词 → 渠道值 → 官方词」三级回落,把当时实际生效的那份抄进方案;
- *    老 vibe 的逐张 enabled 折成方案的 vibeIds。
+ * 1. 存量数据不丢:老的平铺字段原样进默认方案;老的
+ *    「画师串绑定词 → 渠道值 → 官方词」三级回落,把当时实际生效的那份抄进方案兼容字段;
+ *    老 vibe 的逐张 enabled 折成方案的 vibeIds。实际出图只读画师串与官方词。
  * 2. 已有 plans 就不再迁移:顶层残留的老平铺字段一概不看(迁移只跑一次)。
  * 3. 三种引用的悬空口径各不相同:接入点回落第一条(地址是必需品)、画师串清空
  *    (回落等于静默换画风)、vibe 逐条剔除。
@@ -110,12 +110,12 @@ describe('老渠道级设置 → 默认方案', () => {
       qualityTags: 'bound q',
       undesiredContent: 'bound n',
     });
-    // 画师串条目本身的绑定词保留,但出图只看方案的框
+    // 方案兼容字段与画师串条目本身都保留;出图优先级由 nai.test.ts 锁定
     expect(settings.nai.artistPresets[0].quality).toBe(' bound q ');
     expect(effectiveNai().qualityTags).toBe('bound q');
   });
 
-  it('只绑了一边 → 另一边仍取渠道值;画师串没选中时绑定词不参与', async () => {
+  it('只绑了一边 → 另一边旧渠道值仍存入兼容字段;没选中时绑定词不抄入', async () => {
     const half = await hydrateWithNai({
       qualityTags: 'channel q',
       undesiredContent: 'channel n',

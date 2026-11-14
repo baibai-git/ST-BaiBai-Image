@@ -579,8 +579,8 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   回退 ST 转发只有 `/api/sd/comfy/models|samplers|schedulers|vaes`(服务端摘 object_info 字段,
   **没有 loras/clips 端点**),转发通道下这两组降级为手输。session 级缓存,「刷新」强制重拉。
 - `nai.ts`:协议与官方一致(浏览器直连,url 可指第三方兼容站,自动补 `/ai` 前缀);v4 系走
-  `v4_prompt` 结构 + vibe 编码缓存;NAI3 直接发参考原图;质量词/负面词按模型给默认值,
-  每套方案可见可覆盖(存空串 = 跟随模型官方词);正向拼装顺序为
+  `v4_prompt` 结构 + vibe 编码缓存;NAI3 直接发参考原图;质量词/负面词按「当前画师串 → 模型官方词」
+  分别回落(画师串对应字段存空串 = 跟随官方),方案里展示并编辑同一份画师串数据;正向拼装顺序为
   **画师串 → 画面 tag → 质量词**(方案引用画师串库里的一条,见 §7);
   `.naiv4vibe` 导入导出与官方互通。
   **NAI 4.5/V5 走「Base + 原生 Character Prompts」分支**:谓词是 `naiSupportsCharacterPrompts`
@@ -598,7 +598,9 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   口径与 ComfyUI 的同名开关一致(§5 `autoTagProfile`):关掉后协议/规范/思维链改成纯 tag 版
   (`{{^nl}}` 条件段)、runner 丢弃模型照写的 nl 并跳过「建档必带 nl」校验;**已写进 tag 的 nl 照常发送**,
   多角色 Character Prompts 照常拆分(只是每条 caption 只剩 tag)。开关在方案编辑弹窗的模型选择下方,
-  不按模型隐藏:可选模型只剩 4.5/V5(见下),开关恒有效。
+  不按模型隐藏:可选模型只剩 4.5/V5(见下),开关恒有效。新建方案仍默认 V5 + 开;仅在用户从非 4.5
+  模型手动切进 4.5 且开关当前为开时自动关闭并 toast 告知(可在下方重开)。已有 4.5 方案、切方案、
+  加载设置与 4.5 家族内换档都不经过这段自动修改,不覆盖用户已有选择。
   **真正的 V5 专属差异只有三处**:`params_version: 4`、采样器限子集(列表随模型过滤,面板同步)、
   varietyBoost 无效(`skipCfgAboveSigma` 对 V5 返回 null,4.5 用 magic 58)。
   **V5 Full Medium(`nai-diffusion-5-full-medium`,官方「Medium Effort」)**:V5 Full 的省点数档,
@@ -606,7 +608,7 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   **官方锁死参数**(官方前端模型能力表的 `fixedSettings`,`naiFixedSettings` 照抄):步数 14、采样器
   Euler Ancestral、不支持 CFG Rescale(发 0)、负面词恒为官方 Heavy 预设——官方前端对它隐藏这几项,
   发请求时连用户自填的负面词都清空,插件同口径,不赌服务端收不收自定义值。`naiUndesiredContent` 对它
-  无视方案里的值(方案里存的负面词不动,换回别的模型照常生效);面板把这几项换成「官方固定」字样。
+  无视画师串里的值(条目里存的负面词不动,换回别的模型照常生效);面板把这几项换成「官方固定」字样。
   它的默认负面词是**官方 Heavy 原文**,不串 5-full 那层插件精选缺陷词(官方定死的就是这一份)。
   **V5 不支持 Vibe**(`naiSupportsVibes` 只认 NAI3 与 v4 系):早先文档写「V5 同样可用」是错的——
   只因 `vibeModelKey` 有 v5full/v5curated 键就当成支持。那两个键现在只为读写官方 .naiv4vibe 不丢数据;
@@ -685,24 +687,25 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   - 工作流 JSON 随设置整体进 `settings.json`(单套数 KB–数十 KB)。刻意**没有**像 Vibe 那样搬去 `user/files`:
     量级差两个数量级。若日后设置保存变慢,这里是第一嫌疑人。
 - **NAI 出图方案库**(0.3.5):`settings.nai.plans`(`NaiPlan[]`)+ `activePlanId`,形状对齐 ComfyUI 工作流库。
-  一套方案 = 名字 + 接入点引用(`endpointId`)+ 模型 + 画师串引用(`artistId`,空 = 不用)+ 正面质量词
-  + 负面提示词 + 采样参数 + 叠加的 vibe(`vibeIds`)+「生成自然语言」+ 画幅锁 + 横竖尺寸。起因是用户反馈
+  一套方案 = 名字 + 接入点引用(`endpointId`)+ 模型 + 画师串引用(`artistId`,空 = 不用)
+  + 采样参数 + 叠加的 vibe(`vibeIds`)+「生成自然语言」+ 画幅锁 + 横竖尺寸。起因是用户反馈
   「换风格要改好几处、设置散、覆盖关系看不懂」:换一套画风原本要分别动模型、画师串、vibe 开关、质量词,
   现在一个下拉整套切换。三个库(接入点 / 画师串 / vibe)仍是全局的,方案只存引用。
   - **并发不进方案,跟接入点走**(`NaiEndpoint.concurrency`):它是 genQueue 的闸门,管的是「这个站/账号同时几张」,
     不属于任何一套画风;按方案存会让切方案顺手改了限流。
-  - **正/负面词只剩一级回落**:方案的框留空 = 模型官方词(`naiQualityTags` / `naiUndesiredContent`),
-    框里写什么就发什么。官方词以 placeholder 显示在空框里,「看到的就是发出去的」。
-    老的「画师串绑定值 → 渠道值 → 官方词」三级回落已废除(见下方画师串库)。
+  - **正/负面词跟画师串走**:当前画师串对应字段有值就只用它,留空才回落模型官方词
+    (`naiQualityTags` / `naiUndesiredContent`);正/负面分别判断。方案里的两个框直接读写画师串条目,
+    未选画师串时只读展示官方词。方案化初期短暂存在的 `plan.qualityTags` / `plan.undesiredContent`
+    仅为兼容保留存储,不再参与出图,也不需要「套用」复制。
   - **vibe 勾选按方案存**(`vibeIds`,老数据的逐张 `enabled` 已删除)。模型不支持 vibe 时(V5)勾选**原样保留**、
     出图跳过 —— 见 §6 nai.ts 的「V5 不支持 Vibe」。删 vibe 时从所有方案的 vibeIds 里一并移除。
   - **引用修复**(normalizeNai 收尾,三种口径各不相同):`endpointId` 悬空回落 `endpoints[0]`;
     `artistId` 悬空清成 `''`(内置 `bi_*` 不算悬空);`vibeIds` 逐条剔除不存在的 id 并去重。
     `activePlanId` 悬空回落 `plans[0]`;`plans` 恒非空(空数组补一套出厂方案)。
   - **存量迁移**(`foldLegacyNaiPlan`,靠 `plans` 键有无判断;空数组按脏数据处理、不重迁):老的渠道级
-    平铺字段原样折成唯一一套「默认方案」,目标是**出图零变化**:`activeEndpointId` / `activeArtistId`
-    成为方案的引用;正/负面词按老三级规则把**当时实际生效**的那份抄进方案(选中的画师串绑了词就抄绑定值,
-    否则抄渠道值,渠道值为空就保持空 = 官方词);`enabled === true` 的 vibe 成为 vibeIds。
+    平铺字段原样折成唯一一套「默认方案」,`activeEndpointId` / `activeArtistId` 成为方案的引用;
+    正/负面旧值也保留在方案兼容字段中,画师串条目本身的绑定词不丢,但实际出图只按「画师串 → 官方」取值;
+    `enabled === true` 的 vibe 成为 vibeIds。
     迁移后老平铺字段一概不留(`settings.naiPlans.test.ts` 锁住)。⚠ 代价:回滚到 0.3.2 及以前,
     老版本读不到平铺参数,会落回出厂值(回滚到 0.3.0–0.3.2 时接入点库仍在、key 不丢;更老的版本只认平铺 key,要重填)。
   - 消费方一律走 `activeNaiPlan()` / `effectiveNai(plan?)`。`effectiveNai` 产出 `NaiRunConfig`:方案参数 +
@@ -738,13 +741,12 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
     而名字是用户自己敲的 —— 有人就拿站点域名当名字,带上等于把地址漏进公开返回值
     (`public/api.ts` 的白名单正是为挡这个)。面板自己的 toast 标题不受此限,那是本地 UI。
 - **NAI 画师串库**:`settings.nai.artistPresets`(`NaiArtistPreset[]`),由方案的 `artistId` 引用。
-  一条 = 名字 + 画师串(prompt,拼在正向提示词**最前面**)+ 可选的「自带」正面质量词(quality)
+  一条 = 名字 + 画师串(prompt,拼在正向提示词**最前面**)+ 可选的正面质量词(quality)
   与负面提示词(negative)。拼装顺序:画师串 → 画面 tag → 质量词(画师串放最前是因为它定整幅画的
   基调,NAI 对靠前 tag 权重更高)。
-  - **自带词不参与出图**(0.3.5 起):出图的正/负面只看方案自己的两个框。方案化之前是「画师串绑定值 →
-    渠道值 → 官方词」三级回落,框里写的不一定是实际发出去的,用户看不懂。现在自带词只是素材:
-    方案编辑里点「套用画师串自带词」才抄进方案的框,抄完即与画师串脱钩(改画师串不会回头改方案)。
-    智绘姬导入的提示词预设也落在这里,同样要套用才生效。`nai.test.ts` 锁住「自带词不进请求」。
+  - **正/负面随画师串生效**:对应字段有值就只使用它,空串或纯空白才回落当前模型官方词;
+    两个字段各自独立回落,方案旧值不参与也不叠加。智绘姬导入的提示词预设同样选中即生效。
+    `nai.test.ts` 锁住优先级、逐字段回落、空白处理与方案旧值隔离。
   - **不按模型分表**(与质量词/负面词相反):官方质量词是**模型的属性**,切模型必须跟着换;
     画师串是**用户自己的配方**,跨模型复用才是常态,故做成可增删的库而非 `Record<model, …>`。
   - **与工作流库刻意相反的三处**:①`artistPresets` **允许为空**(工作流恒非空);
@@ -786,7 +788,8 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
       (`ArtistTile.vue`;内置排前、带「内置」小字),网格限高自滚;超过 6 条才出搜索框。
       曾做成只放名字的列表,传了预览图也看不到,被指「不直观」——画师串是视觉资产,预览图就是它的名字。
       点卡片开编辑弹窗
-      (名称/画师串草稿,「完成」才写回;预览图即传即落盘;复制/删除)。新建 = 先推进库再开编辑,
+      (名称/画师串/正面质量词/负面提示词草稿,「完成」才写回;预览图即传即落盘;复制/删除)。
+      方案里的正/负面框与这里读写同一条目,共用该画师串的方案一起生效。新建 = 先推进库再开编辑,
       取消即撤回。「多选」只服务批量删除,内置条不可勾。**库里没有「启用」**——它不在任何方案的
       上下文里,选用一律去方案编辑。
     - 纯逻辑在 naiArtistLib.ts:`matchArtist` 按名字 + 画师串内容搜索(绑定的正/负面词不参与——
@@ -794,7 +797,7 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
       没有「当前方案」可接,引用被删条目的方案一律清成 `''`(与悬空口径一致,**不**回落 [0]),
       删除确认框会先列出受影响的方案。写回时按 id 现过滤当前库,而非用开删时的快照——
       等删预览文件期间库可能又被新建/复制改过。
-  - **存量迁移**:库本身纯加法;老的 `activeArtistId` 与它的绑定词随方案化折进默认方案(见上方方案库)。
+  - **存量迁移**:库本身纯加法;老的 `activeArtistId` 折成默认方案引用,各条目的绑定词原样留在库中并直接生效。
 - **Vibe 大文件**:
   - `extensionSettings['baibai_image'].nai.vibes`:仅存 `NaiVibe` 小型索引，不存原图、缩略图 dataURL 或编码正文;
   - `user/files/bbi-vibe-*.json`:原图与各模型编码正文;

@@ -125,23 +125,29 @@ describe('提示词拼装', () => {
     expect(neg).toContain('worst quality');
   });
 
-  it('方案值优先于模型官方词(正/负各一)', () => {
-    expect(fullPositivePrompt(nai({ qualityTags: 'best quality' }), '1girl')).toBe('1girl, best quality');
-    expect(fullNegativePrompt(nai({ undesiredContent: 'only this' }))).toBe('only this');
-  });
-
-  it('覆盖值留空 = 跟随模型官方词(切模型内容跟着换)', () => {
-    // 这是「空串 = 跟随官方」这条存储口径的核心契约
-    const asFull = fullPositivePrompt(nai({ qualityTags: '', model: 'nai-diffusion-3' }), '1girl');
-    expect(asFull).toBe('1girl, best quality, amazing quality, very aesthetic, absurdres');
-    expect(fullNegativePrompt(nai({ undesiredContent: '', model: 'nai-diffusion-3' }))).toContain('{bad}');
-  });
-
-  it('纯空白覆盖值等同留空', () => {
-    expect(fullPositivePrompt(nai({ qualityTags: '   ' }), '1girl')).toBe(
+  it('方案旧字段不参与出图:未选画师串时使用模型官方词', () => {
+    expect(fullPositivePrompt(nai({ qualityTags: 'legacy plan quality' }), '1girl')).toBe(
       '1girl, location, very aesthetic, masterpiece, no text',
     );
-    expect(fullNegativePrompt(nai({ undesiredContent: '  \n ' }))).toBe(naiDefaultUndesired('nai-diffusion-4-5-full'));
+    expect(fullNegativePrompt(nai({ undesiredContent: 'legacy plan negative' }))).toBe(
+      naiDefaultUndesired('nai-diffusion-4-5-full'),
+    );
+  });
+
+  it('画师串覆盖值留空 = 跟随模型官方词(切模型内容跟着换)', () => {
+    // 这是「空串 = 跟随官方」这条存储口径的核心契约
+    const artist = { id: 'art_a', name: 'A', prompt: '', quality: '', negative: '' };
+    const asFull = fullPositivePrompt(nai({ artist, model: 'nai-diffusion-3' }), '1girl');
+    expect(asFull).toBe('1girl, best quality, amazing quality, very aesthetic, absurdres');
+    expect(fullNegativePrompt(nai({ artist, model: 'nai-diffusion-3' }))).toContain('{bad}');
+  });
+
+  it('画师串纯空白覆盖值等同留空', () => {
+    const artist = { id: 'art_a', name: 'A', prompt: '', quality: '   ', negative: '  \n ' };
+    expect(fullPositivePrompt(nai({ artist }), '1girl')).toBe(
+      '1girl, location, very aesthetic, masterpiece, no text',
+    );
+    expect(fullNegativePrompt(nai({ artist }))).toBe(naiDefaultUndesired('nai-diffusion-4-5-full'));
   });
 
   it('未知模型无官方词时回落空串,不抛', () => {
@@ -184,8 +190,8 @@ describe('画师串拼装', () => {
     );
   });
 
-  it('与自定义质量词共存,顺序仍是 画师串 → tag → 质量词', () => {
-    const s = nai({ qualityTags: 'best quality', artist: preset('artist:a') });
+  it('与画师串质量词共存,顺序仍是 画师串 → tag → 质量词', () => {
+    const s = nai({ artist: preset('artist:a', 'art_a', { quality: 'best quality' }) });
     expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, best quality');
   });
 
@@ -195,29 +201,43 @@ describe('画师串拼装', () => {
   });
 });
 
-describe('画师串自带词不参与出图(只在方案里「套用」时抄进去)', () => {
+describe('画师串正/负面词', () => {
   const preset: NaiArtistPreset = {
     id: 'art_a',
     name: 'A',
     prompt: 'artist:a',
-    quality: 'recipe quality',
-    negative: 'recipe negative',
+    quality: 'artist quality',
+    negative: 'artist negative',
   };
 
-  it('方案值为空 → 官方词,画师串自带词被忽略', () => {
-    // 旧版是「画师串 → 渠道 → 官方」三级覆盖,用户看不懂改了哪处为什么不生效;
-    // 现在只剩「方案 → 官方」一级,自带词改由「套用」按钮显式写进方案。
-    const s = nai({ artist: preset });
+  it('画师串有值就只使用画师串,方案旧值与官方词都不叠加', () => {
+    const s = nai({ artist: preset, qualityTags: 'plan quality', undesiredContent: 'plan negative' });
+    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, artist quality');
+    expect(fullNegativePrompt(s)).toBe('artist negative');
+  });
+
+  it('正/负面分别回落:一边留空只让该边使用官方词', () => {
+    const qualityOnly = nai({ artist: { ...preset, negative: '' } });
+    expect(fullPositivePrompt(qualityOnly, '1girl')).toBe('artist:a, 1girl, artist quality');
+    expect(fullNegativePrompt(qualityOnly)).toBe(naiDefaultUndesired('nai-diffusion-4-5-full'));
+
+    const negativeOnly = nai({ artist: { ...preset, quality: '', negative: 'artist negative' } });
+    expect(fullPositivePrompt(negativeOnly, '1girl')).toBe(
+      'artist:a, 1girl, location, very aesthetic, masterpiece, no text',
+    );
+    expect(fullNegativePrompt(negativeOnly)).toBe('artist negative');
+  });
+
+  it('纯空白等同留空;方案旧值不能截胡官方回落', () => {
+    const s = nai({
+      artist: { ...preset, quality: '  \n ', negative: '\t' },
+      qualityTags: 'plan quality',
+      undesiredContent: 'plan negative',
+    });
     expect(fullPositivePrompt(s, '1girl')).toBe(
       'artist:a, 1girl, location, very aesthetic, masterpiece, no text',
     );
     expect(fullNegativePrompt(s)).toBe(naiDefaultUndesired('nai-diffusion-4-5-full'));
-  });
-
-  it('方案值非空 → 用方案值,同样不看自带词', () => {
-    const s = nai({ artist: preset, qualityTags: 'plan quality', undesiredContent: 'plan negative' });
-    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, plan quality');
-    expect(fullNegativePrompt(s)).toBe('plan negative');
   });
 });
 
@@ -269,7 +289,13 @@ describe('NAI V5 support', () => {
   // 官方前端对 Medium 档隐藏步数/采样器/负面词/Rescale,发请求时强行改写;照抄同一口径
   it('V5 Full Medium 按官方锁死参数:14 步、Euler Ancestral、无 Rescale、负面词恒为官方 Heavy', () => {
     const model = 'nai-diffusion-5-full-medium' as const;
-    const s = nai({ model, steps: 28, sampler: 'k_dpmpp_2m', cfgRescale: 0.4, undesiredContent: 'my negative' });
+    const s = nai({
+      model,
+      steps: 28,
+      sampler: 'k_dpmpp_2m',
+      cfgRescale: 0.4,
+      artist: { id: 'art_a', name: 'A', prompt: '', quality: '', negative: 'my negative' },
+    });
     const params = buildNaiParameters(s, { prompt: '1girl', seed: 42 });
     expect(params).toMatchObject({ params_version: 4, steps: 14, sampler: 'k_euler_ancestral', cfg_rescale: 0 });
     expect(params.skip_cfg_above_sigma).toBeNull();
@@ -283,15 +309,15 @@ describe('NAI V5 support', () => {
     // 与官方同口径:vibe 编码键归 v5full;角色提示照常走 V5 协议
     expect(vibeModelKey(model)).toBe('v5full');
     expect(naiSupportsCharacterPrompts(model)).toBe(true);
-    // 正面质量词不受锁定影响,自定义照常生效
-    expect(fullPositivePrompt(nai({ model, qualityTags: 'my quality' }), '1girl')).toBe('1girl, my quality');
+    // 正面质量词不受锁定影响,画师串自定义照常生效
+    const artist = { id: 'art_a', name: 'A', prompt: '', quality: 'my quality', negative: 'my negative' };
+    expect(fullPositivePrompt(nai({ model, artist }), '1girl')).toBe('1girl, my quality');
   });
 
   it('maps Base Tag + NL and native Character Prompts into the V5 caption schema', () => {
     const settings = nai({
       model: 'nai-diffusion-5-full',
-      qualityTags: 'very aesthetic',
-      artist: { id: 'artist', name: 'Artist', prompt: 'artist:test', quality: '', negative: '' },
+      artist: { id: 'artist', name: 'Artist', prompt: 'artist:test', quality: 'very aesthetic', negative: '' },
     });
     const params = buildNaiParameters(settings, {
       prompt: '2girls, classroom, sunset',

@@ -279,7 +279,7 @@ export interface NaiGenerateValues {
  * 口径:
  * - id 用 bi_ 前缀(用户条目恒为 art_*),永不与用户库相撞;
  * - 只读:面板不给改名/删除,要自定义走「复制」建成用户条目再改;
- * - quality/negative 是「自带词」,出图不读(同用户条目,见 NaiArtistPreset);
+ * - quality/negative 随条目一起生效;留空的字段按模型回落官方词(见 NaiArtistPreset);
  * - 新用户的默认方案选中第一条(见 settings.ts 的 naiDefaults);老用户的
  *   方案各自存着 artistId,不受这里影响;
  * - 要下线某条内置配方,至少留一个版本再删:正选中它的用户会走既有
@@ -322,27 +322,25 @@ export function naiArtistPrompt(nai: NaiRunConfig): string {
 }
 
 /**
- * 正面质量词:方案里的值 → 内置默认,只此一级回落(空串或纯空白 = 跟随默认)。
- * 内置默认当前 = 模型官方词;以后插件要换成自己的精选默认,只改 naiDefaultQualityTags。
- * 画师串的「自带词」**不参与**(见 NaiArtistPreset 注释):三级覆盖没人看得懂,
- * 自带词改由方案编辑里的「套用」按钮显式抄进方案。
+ * 正面质量词:当前画师串的值 → 模型官方词。正/负面分别判断,
+ * 空串或纯空白只让对应字段回落,不影响另一字段。方案旧字段不再参与。
  */
 export function naiQualityTags(nai: NaiRunConfig): string {
-  return nai.qualityTags.trim() || naiDefaultQualityTags(nai.model);
+  return nai.artist?.quality.trim() || naiDefaultQualityTags(nai.model);
 }
 
-/** 负面提示词:方案里的值 → 模型官方负面词(同 naiQualityTags 的一级回落)。
+/** 负面提示词:当前画师串的值 → 模型官方负面词(同 naiQualityTags)。
  *  官方锁死参数的模型(naiFixedSettings)不收自定义,恒为官方词。 */
 export function naiUndesiredContent(nai: NaiRunConfig): string {
   if (naiFixedSettings(nai.model)) return naiDefaultUndesired(nai.model);
-  return nai.undesiredContent.trim() || naiDefaultUndesired(nai.model);
+  return nai.artist?.negative.trim() || naiDefaultUndesired(nai.model);
 }
 
 /**
  * 正向完整 prompt:画师串在最前,画面 tag 居中,质量词在最后。
  * - 画师串 = 方案引用的条目(未选则无)。放最前是因为它决定整幅画的画风基调,
  *   NAI 对靠前 tag 的权重更高;
- * - 质量词 = 方案里的值,留空则按模型取官方词(见 naiQualityTags)。
+ * - 质量词 = 当前画师串里的值,留空则按模型取官方词(见 naiQualityTags)。
  *
  * ⚠ 本函数在 buildNaiParameters(v4_prompt 的来源)与 generateNaiImage 的顶层 input
  * 字段处各调一次,两处必须同源。拼装改动一律留在本函数内部——在某个调用点单独加料会让
@@ -371,7 +369,7 @@ function characterCaption(character: ImageCharacterPrompt): string {
 }
 
 /**
- * 负面完整 prompt = 方案里的值 → 模型官方负面词(见 naiUndesiredContent)。
+ * 负面完整 prompt = 当前画师串的值 → 模型官方负面词(见 naiUndesiredContent)。
  */
 export function fullNegativePrompt(nai: NaiRunConfig): string {
   return naiUndesiredContent(nai);
