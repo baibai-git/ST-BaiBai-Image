@@ -29,6 +29,11 @@ const props = defineProps<{
   historyCount: number;
   /** 后端是否已配置好(未配置时「应用并重新生成」不可点)。 */
   configured: boolean;
+  /**
+   * 这条 tag 与当前方案类型对不上(典型:插画 tag 遇上漫画方案)。非空时 AI 重写与
+   * 「应用并重新生成」不可点——重写会按当前方案出一条对不上号的 tag,出图则注定被拒。
+   */
+  blockedReason?: string;
   /** 忙碌中(写回正在进行):禁用底部按钮,避免连点写两次。 */
   busy?: boolean;
   /**
@@ -153,6 +158,11 @@ const error = computed(() => {
 
 const canApply = computed(() => !error.value && !props.busy && !props.rewriting);
 
+/** AI 重写与「应用并重新生成」不可用的原因;空 = 可用。 */
+const drawBlocked = computed(
+  () => props.blockedReason || (props.configured ? '' : '请先在柏宝绘「渠道」页完成配置'),
+);
+
 /**
  * AI 重写落盘后,把新提示词读回输入框。
  *
@@ -186,7 +196,7 @@ function apply(regenerate: boolean): void {
 }
 
 function rewrite(): void {
-  if (props.busy || props.rewriting || !props.configured) return;
+  if (props.busy || props.rewriting || drawBlocked.value) return;
   emit('rewrite');
 }
 
@@ -252,12 +262,8 @@ onBeforeUnmount(() => {
           v-if="!rewriting"
           class="bbi-btn bbi-btn-sm"
           type="button"
-          :disabled="busy || !configured"
-          :title="
-            configured
-              ? '让 AI 重读本楼正文，把这一张的提示词重写一遍'
-              : '请先在柏宝绘「渠道」页完成配置'
-          "
+          :disabled="busy || !!drawBlocked"
+          :title="drawBlocked || '让 AI 重读本楼正文，把这一张的提示词重写一遍'"
           @click="rewrite"
         >
           <Icon name="sparkles" /> AI 重写提示词
@@ -405,8 +411,8 @@ onBeforeUnmount(() => {
         <button
           class="bbi-btn bbi-btn-primary"
           type="button"
-          :disabled="!canApply || !configured"
-          :title="configured ? '保存提示词并立即出图' : '请先在柏宝绘「渠道」页完成配置'"
+          :disabled="!canApply || !!drawBlocked"
+          :title="drawBlocked || '保存提示词并立即出图'"
           @click="apply(true)"
         >
           <Icon name="palette" /> 应用并重新生成

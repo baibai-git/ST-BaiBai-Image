@@ -1,6 +1,8 @@
 import type { ImageCharacterPrompt } from '@/autoTag/protocol';
+import { serializeComicLayout, validateComicLayout, type ComicLayout } from '@/backends/mossLayout';
 import { normalizeOrientation, type Orientation } from '@/backends/size';
 import { getContext } from '@/st/context';
+import type { ComfyKind } from '@/state/settings';
 
 /**
  * 柏宝绘生图 tag 的两条托管正则（DESIGN-FLOOR-UI.md §4）：
@@ -171,7 +173,7 @@ export function stripImageTags(mes: string): string {
  * 内容里混进一个 `</bbi_image>` 就会让 tag 提前截断、后半截漏进 DOM 与提示词，
  * 正好破掉「tag 永不进 DOM、永不进提示词」这条不变式。
  */
-export const FORBIDDEN_SUBTAG = /<\/?(?:bbi_image|tag|nl|negative|characters|size)\b/i;
+export const FORBIDDEN_SUBTAG = /<\/?(?:bbi_image|tag|nl|negative|characters|size|type|layout)\b/i;
 
 /** 文本里是否含 bbi_image 子标签字面量（手输校验用；口径同 AI 侧）。 */
 export function containsTagMarkup(text: string): boolean {
@@ -188,6 +190,21 @@ export interface ImageTagContent {
   characters: ImageCharacterPrompt[];
   /** 画幅方向：<size> 子标签内容，无/不可识别则竖屏（存量 tag 即走这条，行为与改动前一致）。 */
   size: Orientation;
+  /**
+   * tag 类型：<type> 子标签。**缺省 = 插画**——旧楼层的 tag 都没有它,解析时也只在漫画时才设,
+   * 故插画 tag 的字段集合与改动前一模一样。类型由插件按当前方案写入,AI 不参与。
+   */
+  kind?: ComfyKind;
+  /**
+   * 漫画分镜(kind 为 comic 时):<layout> 子标签里的 JSON。解析不了 / 校验不过 = null,
+   * 卡片据此显示「格式损坏」而不是拿半截内容去出图。插画 tag 恒无此字段。
+   */
+  layout?: ComicLayout | null;
+}
+
+/** tag 的类型;没写 <type> 的(全部存量 tag)一律是插画。 */
+export function imageTagKind(content: Pick<ImageTagContent, 'kind'>): ComfyKind {
+  return content.kind === 'comic' ? 'comic' : 'illustration';
 }
 
 /**
@@ -202,6 +219,20 @@ export function parseImageTagContent(raw: string): ImageTagContent {
   // 内容统一折叠成单行:手写 tag 可能跨行,而提示词里换行没有意义
   const oneLine = (text: string) => text.trim().replace(/[\r\n]+/g, ' ');
   const inner = raw.replace(/^<bbi_image[^>]*>/i, '').replace(/<\/bbi_image>$/i, '');
+  const sizeMatch = inner.match(/<size>([\s\S]*?)<\/size>/i);
+  const size = normalizeOrientation(sizeMatch ? oneLine(sizeMatch[1]) : '');
+  const typeMatch = inner.match(/<type>([\s\S]*?)<\/type>/i);
+  if (typeMatch && oneLine(typeMatch[1]).toLowerCase() === 'comic') {
+    // 漫画 tag 只认 <layout>:其余子标签对它没有意义,也不去猜
+    const layoutMatch = inner.match(/<layout>([\s\S]*?)<\/layout>/i);
+    let layout: ComicLayout | null = null;
+    try {
+      layout = layoutMatch ? validateComicLayout(JSON.parse(layoutMatch[1])) : null;
+    } catch {
+      layout = null;
+    }
+    return { tag: '', nl: '', negative: '', characters: [], size, kind: 'comic', layout };
+  }
   const nlMatch = inner.match(/<nl>([\s\S]*?)<\/nl>/i);
   const nl = nlMatch ? oneLine(nlMatch[1]) : '';
   const negativeMatch = inner.match(/<negative>([\s\S]*?)<\/negative>/i);
@@ -225,9 +256,9 @@ export function parseImageTagContent(raw: string): ImageTagContent {
       // Invalid character JSON must not break the otherwise valid Base prompt.
     }
   }
-  const sizeMatch = inner.match(/<size>([\s\S]*?)<\/size>/i);
-  const size = normalizeOrientation(sizeMatch ? oneLine(sizeMatch[1]) : '');
   const withoutSubTags = inner
+    .replace(/<type>[\s\S]*?<\/type>/gi, '')
+    .replace(/<layout>[\s\S]*?<\/layout>/gi, '')
     .replace(/<nl>[\s\S]*?<\/nl>/gi, '')
     .replace(/<negative>[\s\S]*?<\/negative>/gi, '')
     .replace(/<characters>[\s\S]*?<\/characters>/gi, '')
@@ -249,8 +280,15 @@ export function parseImageTagContent(raw: string): ImageTagContent {
  *
  * 标准形态：tag 部分保持裸文本（与存量格式一致），nl/negative/characters 空则整段不写。
  * size **恒写出**：生成是延后的(点卡片才出图)，方向必须随 tag 持久化在正文里。
+ *
+ * 漫画:`<type>comic</type><layout>{JSON}</layout><size>…</size>`。插画**不写** <type>——
+ * 写了就会让「打开弹窗什么都不改保存」的存量 tag 换 promptHash 桶。
  */
 export function serializeImageTag(content: ImageTagContent): string {
+  if (imageTagKind(content) === 'comic') {
+    const layout = content.layout ? serializeComicLayout(content.layout) : '';
+    return `<bbi_image><type>comic</type><layout>${layout}</layout><size>${content.size}</size></bbi_image>`;
+  }
   const nl = content.nl ? `<nl>${content.nl}</nl>` : '';
   const negative = content.negative ? `<negative>${content.negative}</negative>` : '';
   const characters = content.characters.length
@@ -269,8 +307,9 @@ export function serializeImageTag(content: ImageTagContent): string {
  * size 刻意不出现:它是画幅方向，不是提示词内容，卡片上也从来不显示。
  */
 export function formatPromptText(
-  content: Pick<ImageTagContent, 'tag' | 'nl' | 'negative' | 'characters'>,
+  content: Pick<ImageTagContent, 'tag' | 'nl' | 'negative' | 'characters' | 'kind' | 'layout'>,
 ): string {
+  if (imageTagKind(content) === 'comic') return formatComicText(content.layout ?? null);
   return [
     content.tag,
     content.nl,
@@ -281,6 +320,17 @@ export function formatPromptText(
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+/** 漫画页的人读形态:整页描述一段,下面每个元素一行(角色带库名,对白只显示台词)。 */
+function formatComicText(layout: ComicLayout | null): string {
+  if (!layout) return '(漫画分镜格式损坏)';
+  const lines = layout.items.map(item => {
+    if (item.label === 'text') return `[对白] ${item.text ?? ''}`;
+    if (item.label === 'object') return `[物体] ${item.caption}`;
+    return item.name ? `[角色] ${item.name}: ${item.caption}` : `[角色] ${item.caption}`;
+  });
+  return [layout.summary, lines.join('\n')].filter(Boolean).join('\n\n');
 }
 
 /**

@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { simpleDefaults } from '@/backends/comfyTemplates';
 import { generateComfyImage } from '@/backends/comfyui';
 import { generateNaiImage } from '@/backends/nai';
 import { acquireNaiSlot } from '@/floor/genQueue';
-import { backendStatus, decideSeed, generateImage } from '@/generate';
-import { activeNaiEndpoint, newNaiEndpoint, settings, type NaiModel } from '@/state/settings';
+import { activeTagKind, backendStatus, decideSeed, generateImage, tagBlockReason } from '@/generate';
+import { activeNaiEndpoint, activeNaiPlan, newNaiEndpoint, newNaiPlan, settings, type NaiModel } from '@/state/settings';
 
 vi.mock('@/backends/nai', async importOriginal => ({
   ...(await importOriginal<typeof import('@/backends/nai')>()),
@@ -36,26 +37,31 @@ beforeEach(() => {
 });
 
 /**
- * 把设置调成「NAI 已配齐」。地址与 key 落在**当前接入点**上——渠道级那两个是存量字段。
- * settings 是模块级单例,用例之间会串,故这里把接入点库整个复位成「只有官方一条」。
+ * 把设置调成「NAI 已配齐」:一条方案,引用唯一的官方接入点(地址与 key 落在接入点上)。
+ * settings 是模块级单例,用例之间会串,故这里把接入点库与方案库整个复位。
  */
 function naiReady(model: NaiModel = 'nai-diffusion-4-5-full'): void {
   settings.defaultBackend = 'nai';
   settings.nai.endpoints = [
-    { id: 'nep_official', name: 'NovelAI 官方', url: 'https://image.novelai.net', key: 'k' },
+    { id: 'nep_official', name: 'NovelAI 官方', url: 'https://image.novelai.net', key: 'k', concurrency: 1 },
   ];
-  settings.nai.activeEndpointId = 'nep_official';
-  settings.nai.model = model;
-  settings.nai.seed = 0;
-  settings.nai.orientationLock = 'auto';
+  const plan = newNaiPlan('测试方案');
+  plan.endpointId = 'nep_official';
+  plan.model = model;
+  plan.seed = 0;
+  plan.orientationLock = 'auto';
+  settings.nai.plans = [plan];
+  settings.nai.activePlanId = plan.id;
 }
 
 /** 把设置调成「ComfyUI 自定义工作流已配齐」。 */
 function comfyReady(): void {
   settings.defaultBackend = 'comfyui';
-  settings.comfyui.url = 'http://127.0.0.1:8188';
+  settings.comfyui.servers[0].url = 'http://127.0.0.1:8188';
   const preset = settings.comfyui.workflows[0];
   settings.comfyui.activeWorkflowId = preset.id;
+  preset.serverId = settings.comfyui.servers[0].id;
+  preset.kind = 'illustration';
   preset.mode = 'custom';
   preset.workflow = '{"1":{}}';
   preset.orientationLock = 'auto';
@@ -84,33 +90,30 @@ describe('backendStatus', () => {
     naiReady();
     const named = newNaiEndpoint('https://my-secret-proxy.example');
     settings.nai.endpoints.push(named);
-    settings.nai.activeEndpointId = named.id;
+    activeNaiPlan().endpointId = named.id;
     expect(backendStatus().reason).not.toContain('my-secret-proxy');
   });
 
-  it('judges readiness by the active endpoint, not the legacy channel-level url/key', () => {
-    // 存量字段留着只为回滚,出图一律不看它 —— 否则切到没填 key 的公益站会「看起来能点」
+  it("judges readiness by the active plan's endpoint, not by whichever endpoint has a key", () => {
+    // 官方条填了 key,但当前方案指向一个没填的公益站 → 不能「看起来能点」
     naiReady();
-    settings.nai.url = 'https://image.novelai.net';
-    settings.nai.key = 'legacy';
-
     const blank = newNaiEndpoint('公益站 A');
     settings.nai.endpoints.push(blank);
-    settings.nai.activeEndpointId = blank.id;
+    activeNaiPlan().endpointId = blank.id;
     expect(backendStatus()).toMatchObject({
       configured: false,
       reason: '当前 NAI 接入点未填写服务地址',
     });
   });
 
-  it('sends the active endpoint down to the backend (switching outlets keeps every other param)', async () => {
+  it("sends the plan's endpoint down to the backend together with the plan's params", async () => {
     naiReady();
-    settings.nai.steps = 33;
+    activeNaiPlan().steps = 33;
     const alt = newNaiEndpoint('公益站 A');
     alt.url = 'https://a.example';
     alt.key = 'ka';
     settings.nai.endpoints.push(alt);
-    settings.nai.activeEndpointId = alt.id;
+    activeNaiPlan().endpointId = alt.id;
 
     await generateImage({ prompt: 'x', seed: 1 }, undefined, {});
     expect(vi.mocked(generateNaiImage).mock.calls[0][0]).toMatchObject({
@@ -145,22 +148,22 @@ describe('backendStatus', () => {
 describe('decideSeed', () => {
   it('prefers an explicit seed over everything else', () => {
     naiReady();
-    settings.nai.seed = 999;
+    activeNaiPlan().seed = 999;
     expect(decideSeed('nai', 12345)).toBe(12345);
     expect(decideSeed('nai', 12345.7)).toBe(12345);
   });
 
   it('uses the NAI panel seed only when it is a positive number', () => {
     naiReady();
-    settings.nai.seed = 777;
+    activeNaiPlan().seed = 777;
     expect(decideSeed('nai')).toBe(777);
-    settings.nai.seed = 0;
+    activeNaiPlan().seed = 0;
     expect(decideSeed('nai')).not.toBe(0);
   });
 
   it.each([0, -1, NaN, undefined])('ignores %s as an override and still returns a usable seed', value => {
     naiReady();
-    settings.nai.seed = 0;
+    activeNaiPlan().seed = 0;
     const seed = decideSeed('nai', value as number | undefined);
     expect(Number.isInteger(seed)).toBe(true);
     expect(seed).toBeGreaterThan(0);
@@ -181,6 +184,20 @@ describe('generateImage', () => {
     await expect(generateImage({ prompt: '1girl', seed: 1 })).rejects.toThrow('429');
     // 漏一次 release 就永久少一格并发,漏满就再也发不出请求
     expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it("queues on the plan's endpoint gate, and tells the backend which gate to bill retries to", async () => {
+    // 闸门按接入点分:A 站的并发与 429 冷却不该拖住走官方站的方案
+    naiReady();
+    const alt = newNaiEndpoint('公益站 A');
+    alt.url = 'https://a.example';
+    alt.key = 'ka';
+    settings.nai.endpoints.push(alt);
+    activeNaiPlan().endpointId = alt.id;
+
+    await generateImage({ prompt: 'x', seed: 1 });
+    expect(vi.mocked(acquireNaiSlot).mock.calls[0][1]).toBe(alt.id);
+    expect(vi.mocked(generateNaiImage).mock.calls[0][0].endpointId).toBe(alt.id);
   });
 
   it('leaves ComfyUI out of the gate (its queue lives on the server)', async () => {
@@ -255,7 +272,7 @@ describe('generateImage', () => {
 
   it('applies the NAI channel lock here — the one path cards and the public API share', async () => {
     naiReady();
-    settings.nai.orientationLock = 'landscape';
+    activeNaiPlan().orientationLock = 'landscape';
     try {
       // tag 里记的是竖图(锁定前的老图 / 第三方传的 size),锁定后一律按横出
       const out = await generateImage({ prompt: 'x', seed: 1, size: 'portrait' });
@@ -266,7 +283,7 @@ describe('generateImage', () => {
       await generateImage({ prompt: 'x', seed: 1 });
       expect(vi.mocked(generateNaiImage).mock.calls[1][1]).toMatchObject({ size: 'landscape' });
     } finally {
-      settings.nai.orientationLock = 'auto';
+      activeNaiPlan().orientationLock = 'auto';
     }
   });
 
@@ -275,14 +292,14 @@ describe('generateImage', () => {
     const preset = settings.comfyui.workflows[0];
     preset.orientationLock = 'portrait';
     // 另一个渠道的锁不该串过来
-    settings.nai.orientationLock = 'landscape';
+    activeNaiPlan().orientationLock = 'landscape';
     try {
       const out = await generateImage({ prompt: 'x', seed: 1, size: 'landscape' });
       expect(vi.mocked(generateComfyImage).mock.calls[0][1]).toMatchObject({ size: 'portrait' });
       expect(out.size).toBe('portrait');
     } finally {
       preset.orientationLock = 'auto';
-      settings.nai.orientationLock = 'auto';
+      activeNaiPlan().orientationLock = 'auto';
     }
   });
 
@@ -346,5 +363,59 @@ describe('generateImage', () => {
     // 简易模式的固定负面 + 动态负面在 meta 里合成全文
     expect(out.meta.negative).toBe('bad');
     expect(out.meta.positive).toBe('1girl');
+  });
+});
+
+describe('comic routing', () => {
+  const layout = {
+    summary: 'full color manga page',
+    items: [{ label: 'character' as const, name: '小雪', caption: 'a girl waving', bbox: [0, 0, 500, 1000] as [number, number, number, number] }],
+  };
+
+  /** 漫画方案:MOSS 简易模板,竖页 832×1216(16 的倍数)。 */
+  function comicReady(): void {
+    comfyReady();
+    const preset = settings.comfyui.workflows[0];
+    preset.kind = 'comic';
+    preset.mode = 'simple';
+    preset.portraitSize = '832×1216';
+    preset.simple = { ...simpleDefaults('moss'), model: 'moss.safetensors', vae: 'vae.safetensors', clip1: 'clip.safetensors', positive: 'masterpiece' };
+  }
+
+  it('reports the active tag kind: NAI is always illustration, ComfyUI follows the plan', () => {
+    naiReady();
+    expect(activeTagKind()).toBe('illustration');
+    comicReady();
+    expect(activeTagKind()).toBe('comic');
+    expect(backendStatus()).toMatchObject({ configured: true });
+  });
+
+  it('turns the layout into a MOSS JSON prompt, folding the fixed positive into the summary', async () => {
+    comicReady();
+    const out = await generateImage({ prompt: '', seed: 1, size: 'portrait', comic: layout });
+    const [conn, values] = vi.mocked(generateComfyImage).mock.calls[0];
+    // 固定正面若留在 conn 里会被拼在 JSON 前面,整串就不是 JSON 了
+    expect(conn.mode === 'simple' && conn.simple.positive).toBe('');
+    const parsed = JSON.parse(values.prompt);
+    expect(parsed.summary.caption).toBe('masterpiece, full color manga page');
+    expect(parsed.items[0]).toMatchObject({ label: 'character', caption: 'a girl waving' });
+    expect(values.nl).toBe('');
+    expect(out.meta.positive).toBe(values.prompt);
+  });
+
+  it('refuses to cross kinds between the tag and the active plan', async () => {
+    comfyReady();
+    await expect(generateImage({ prompt: '', seed: 1, comic: layout })).rejects.toThrow('当前出图方案不是漫画方案');
+    comicReady();
+    await expect(generateImage({ prompt: '1girl', seed: 1 })).rejects.toThrow('不能画插画 tag');
+    expect(generateComfyImage).not.toHaveBeenCalled();
+  });
+
+  it('blocks tags whose kind differs from the plan, and broken comic layouts under any plan', () => {
+    expect(tagBlockReason({}, 'illustration')).toBe('');
+    expect(tagBlockReason({ kind: 'comic', layout }, 'comic')).toBe('');
+    expect(tagBlockReason({}, 'comic')).toContain('当前出图方案是漫画方案');
+    expect(tagBlockReason({ kind: 'comic', layout }, 'illustration')).toContain('不是漫画方案');
+    expect(tagBlockReason({ kind: 'comic', layout: null }, 'comic')).toContain('格式损坏');
   });
 });

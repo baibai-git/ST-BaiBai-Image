@@ -107,7 +107,7 @@ describe('NAI 并发闸门', () => {
   });
 });
 
-describe('NAI 全局节奏(闸门侧)', () => {
+describe('NAI 节奏(闸门侧,按接入点分)', () => {
   /** 用小间隔跑真实时钟:比假时钟更能验到「持槽等待」的真实次序。 */
   const INTERVAL = 40;
 
@@ -154,6 +154,32 @@ describe('NAI 全局节奏(闸门侧)', () => {
     const release = await acquireNaiSlot();
     expect(Date.now() - started).toBeGreaterThanOrEqual(115);
     release();
+  });
+
+  it('闸门按接入点分:A 站满了 / 在冷却,B 站照样立刻放行', async () => {
+    const a = await acquireNaiSlot(undefined, 'nep_a');
+    noteNaiRateLimited(5000, Date.now(), 'nep_a');
+    expect(naiSlotBusy('nep_a')).toBe(true);
+    expect(naiSlotBusy('nep_b')).toBe(false);
+    const started = Date.now();
+    const b = await acquireNaiSlot(undefined, 'nep_b');
+    expect(Date.now() - started).toBeLessThan(100);
+    a();
+    b();
+  });
+
+  it('并发上限逐个接入点设置', async () => {
+    setNaiConcurrency(2, 'nep_a');
+    setNaiMinInterval(0);
+    const a1 = await acquireNaiSlot(undefined, 'nep_a');
+    const a2 = await acquireNaiSlot(undefined, 'nep_a');
+    expect(naiSlotBusy('nep_a')).toBe(true);
+    // 另一个站没设过 → 按 1 起步
+    const b1 = await acquireNaiSlot(undefined, 'nep_b');
+    expect(naiSlotBusy('nep_b')).toBe(true);
+    a1();
+    a2();
+    b1();
   });
 
   it('节奏等待期间被取消:抛错且把槽还回去(不泄漏)', async () => {

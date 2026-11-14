@@ -11,7 +11,10 @@ import {
   naiDefaultQualityTags,
   naiDefaultUndesired,
   naiEndpoint,
+  naiFixedSettings,
   naiRandomSeed,
+  naiSupportsCharacterPrompts,
+  naiSupportsVibes,
   parseNaiv4vibe,
   parseResolution,
   skipCfgAboveSigma,
@@ -19,21 +22,18 @@ import {
   vibeModelKey,
   NaiError,
 } from '@/backends/nai';
-import type { NaiArtistPreset, NaiModel, NaiSettings, NaiVibe, NaiVibeData } from '@/state/settings';
+import type { NaiArtistPreset, NaiModel, NaiRunConfig, NaiVibe, NaiVibeData } from '@/state/settings';
 import { strToU8, zipSync } from 'fflate';
 
-function nai(overrides: Partial<NaiSettings> = {}): NaiSettings {
+/** 一次请求的已解析配置(effectiveNai 的产物);后端只认它,不碰 settings。 */
+function nai(overrides: Partial<NaiRunConfig> = {}): NaiRunConfig {
   return {
+    endpointId: 'nep_official',
     url: 'https://image.novelai.net',
-    qualityTags: '',
-    negativePrompt: '',
-    resolution: '832×1216',
-    portraitSize: '832×1216',
-    landscapeSize: '1216×832',
     key: 'nai-test',
-    endpoints: [{ id: 'nep_official', name: 'NovelAI 官方', url: 'https://image.novelai.net', key: 'nai-test' }],
-    activeEndpointId: 'nep_official',
     model: 'nai-diffusion-4-5-full',
+    artist: null,
+    qualityTags: '',
     undesiredContent: '',
     sampler: 'k_euler',
     steps: 28,
@@ -43,12 +43,9 @@ function nai(overrides: Partial<NaiSettings> = {}): NaiSettings {
     seed: 0,
     varietyBoost: true,
     normalizeRefStrength: true,
-    concurrency: 1,
     vibes: [],
-    artistPresets: [],
-    activeArtistId: '',
-    naturalLanguage: true,
-    orientationLock: 'auto',
+    portraitSize: '832×1216',
+    landscapeSize: '1216×832',
     ...overrides,
   };
 }
@@ -63,7 +60,6 @@ function vibe(overrides: Partial<NaiVibe> = {}): NaiVibe {
     hasImage: true,
     fingerprint: 'v4-5full:ZW5jb2Rpbmc=',
     strength: 0.6,
-    enabled: true,
     group: '',
     ...overrides,
   };
@@ -129,12 +125,7 @@ describe('提示词拼装', () => {
     expect(neg).toContain('worst quality');
   });
 
-  it('负面只认 undesiredContent,不再拼 negativePrompt', () => {
-    // 「附加负面」已并入一个框;存量 negativePrompt 由 normalizeNai 折进 undesiredContent
-    expect(fullNegativePrompt(nai({ negativePrompt: 'bad hands', undesiredContent: 'lowres' }))).toBe('lowres');
-  });
-
-  it('覆盖值优先于模型官方词(正/负各一)', () => {
+  it('方案值优先于模型官方词(正/负各一)', () => {
     expect(fullPositivePrompt(nai({ qualityTags: 'best quality' }), '1girl')).toBe('1girl, best quality');
     expect(fullNegativePrompt(nai({ undesiredContent: 'only this' }))).toBe('only this');
   });
@@ -156,7 +147,7 @@ describe('提示词拼装', () => {
   it('未知模型无官方词时回落空串,不抛', () => {
     expect(naiDefaultQualityTags('nai-diffusion-9')).toBe('');
     expect(naiDefaultUndesired('nai-diffusion-9')).toBe('');
-    const odd = nai({ model: 'nai-diffusion-9' as NaiSettings['model'] });
+    const odd = nai({ model: 'nai-diffusion-9' as NaiModel });
     expect(fullPositivePrompt(odd, '1girl')).toBe('1girl');
     expect(fullNegativePrompt(odd)).toBe('');
   });
@@ -172,142 +163,61 @@ describe('画师串拼装', () => {
     ...extra,
   });
 
-  it('空库 / 未选 → 输出与本功能上线前逐字节一致(存量用户零变化)', () => {
+  it('未选画师串 → 输出与本功能上线前逐字节一致(存量用户零变化)', () => {
     expect(fullPositivePrompt(nai(), '1girl')).toBe(
       '1girl, location, very aesthetic, masterpiece, no text',
     );
   });
 
   it('画师串拼在最前:画师串 → 画面 tag → 质量词', () => {
-    const s = nai({
-      artistPresets: [preset('artist:wlop, artist:krenz')],
-      activeArtistId: 'art_a',
-    });
+    const s = nai({ artist: preset('artist:wlop, artist:krenz') });
     expect(fullPositivePrompt(s, '1girl, sitting')).toBe(
       'artist:wlop, artist:krenz, 1girl, sitting, location, very aesthetic, masterpiece, no text',
     );
   });
 
-  it('activeArtistId 悬空 → 不使用,绝不回落第一条(那会静默给用户换一套画风)', () => {
-    const s = nai({ artistPresets: [preset('artist:a')], activeArtistId: 'art_gone' });
-    expect(fullPositivePrompt(s, '1girl')).toBe(
-      '1girl, location, very aesthetic, masterpiece, no text',
-    );
-  });
-
   it('选中条目内容全空白 → 等同不使用,不留前导逗号', () => {
     // '   ' 是 truthy,filter(Boolean) 兜不住,故 naiArtistPrompt 内部必须 trim
-    const s = nai({ artistPresets: [preset('   ')], activeArtistId: 'art_a' });
+    const s = nai({ artist: preset('   ') });
     expect(fullPositivePrompt(s, '1girl')).toBe(
       '1girl, location, very aesthetic, masterpiece, no text',
     );
   });
 
   it('与自定义质量词共存,顺序仍是 画师串 → tag → 质量词', () => {
-    const s = nai({
-      qualityTags: 'best quality',
-      artistPresets: [preset('artist:a')],
-      activeArtistId: 'art_a',
-    });
+    const s = nai({ qualityTags: 'best quality', artist: preset('artist:a') });
     expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, best quality');
   });
 
-  it('naiArtistPrompt 三态:空库 / 悬空 / 选中(选中时首尾空白被去掉)', () => {
+  it('naiArtistPrompt 两态:未选 / 选中(选中时首尾空白被去掉)', () => {
     expect(naiArtistPrompt(nai())).toBe('');
-    expect(naiArtistPrompt(nai({ artistPresets: [preset('artist:a')], activeArtistId: 'art_x' }))).toBe('');
-    expect(
-      naiArtistPrompt(nai({ artistPresets: [preset(' artist:a ')], activeArtistId: 'art_a' })),
-    ).toBe('artist:a');
-  });
-
-  it('多条只取选中那一条,不串味', () => {
-    const s = nai({
-      artistPresets: [preset('artist:a', 'art_a'), preset('artist:b', 'art_b')],
-      activeArtistId: 'art_b',
-    });
-    expect(naiArtistPrompt(s)).toBe('artist:b');
+    expect(naiArtistPrompt(nai({ artist: preset(' artist:a ') }))).toBe('artist:a');
   });
 });
 
-describe('配方绑定正/负面词(解析链:配方 → 渠道 → 官方)', () => {
-  const preset = (extra: Partial<NaiArtistPreset>): NaiArtistPreset => ({
+describe('画师串自带词不参与出图(只在方案里「套用」时抄进去)', () => {
+  const preset: NaiArtistPreset = {
     id: 'art_a',
     name: 'A',
     prompt: 'artist:a',
-    quality: '',
-    negative: '',
-    ...extra,
-  });
-  const withPreset = (extra: Partial<NaiArtistPreset>, rest: Partial<NaiSettings> = {}) =>
-    nai({ artistPresets: [preset(extra)], activeArtistId: 'art_a', ...rest });
+    quality: 'recipe quality',
+    negative: 'recipe negative',
+  };
 
-  it('配方绑定的质量词/负面词优先于渠道覆盖值与官方词', () => {
-    const s = withPreset(
-      { quality: 'recipe quality', negative: 'recipe negative' },
-      { qualityTags: 'channel quality', undesiredContent: 'channel negative' },
-    );
-    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, recipe quality');
-    expect(fullNegativePrompt(s)).toBe('recipe negative');
-  });
-
-  it('配方字段留空 → 跟随渠道覆盖值', () => {
-    const s = withPreset({}, { qualityTags: 'channel quality', undesiredContent: 'channel negative' });
-    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, channel quality');
-    expect(fullNegativePrompt(s)).toBe('channel negative');
-  });
-
-  it('配方与渠道都留空 → 模型官方词(与本功能上线前逐字节一致)', () => {
-    const s = withPreset({});
+  it('方案值为空 → 官方词,画师串自带词被忽略', () => {
+    // 旧版是「画师串 → 渠道 → 官方」三级覆盖,用户看不懂改了哪处为什么不生效;
+    // 现在只剩「方案 → 官方」一级,自带词改由「套用」按钮显式写进方案。
+    const s = nai({ artist: preset });
     expect(fullPositivePrompt(s, '1girl')).toBe(
       'artist:a, 1girl, location, very aesthetic, masterpiece, no text',
     );
     expect(fullNegativePrompt(s)).toBe(naiDefaultUndesired('nai-diffusion-4-5-full'));
   });
 
-  it('只绑定其一:另一个照常回落', () => {
-    const s = withPreset({ negative: 'recipe negative' }, { qualityTags: 'channel quality' });
-    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, channel quality');
-    expect(fullNegativePrompt(s)).toBe('recipe negative');
-  });
-
-  it('纯空白绑定值 = 未绑定,继续向下回落', () => {
-    const s = withPreset(
-      { quality: '   ', negative: ' \n ' },
-      { qualityTags: 'channel quality', undesiredContent: 'channel negative' },
-    );
-    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, channel quality');
-    expect(fullNegativePrompt(s)).toBe('channel negative');
-  });
-
-  it('activeArtistId 悬空 → 配方字段一并失效,走渠道/官方', () => {
-    const s = nai({
-      artistPresets: [preset({ quality: 'recipe quality', negative: 'recipe negative' })],
-      activeArtistId: 'art_gone',
-      qualityTags: 'channel quality',
-      undesiredContent: 'channel negative',
-    });
-    expect(fullPositivePrompt(s, '1girl')).toBe('1girl, channel quality');
-    expect(fullNegativePrompt(s)).toBe('channel negative');
-  });
-
-  it('切换配方 = 正/负面词一起切换(需求的核心契约)', () => {
-    const s = nai({
-      artistPresets: [
-        preset({ id: 'art_a', quality: 'q a', negative: 'n a' }),
-        preset({ id: 'art_b', prompt: 'artist:b', quality: 'q b', negative: 'n b' }),
-      ],
-      activeArtistId: 'art_a',
-    });
-    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, q a');
-    expect(fullNegativePrompt(s)).toBe('n a');
-    s.activeArtistId = 'art_b';
-    expect(fullPositivePrompt(s, '1girl')).toBe('artist:b, 1girl, q b');
-    expect(fullNegativePrompt(s)).toBe('n b');
-    // 切到「不使用」→ 回落渠道/官方
-    s.activeArtistId = '';
-    expect(fullPositivePrompt(s, '1girl')).toBe(
-      '1girl, location, very aesthetic, masterpiece, no text',
-    );
+  it('方案值非空 → 用方案值,同样不看自带词', () => {
+    const s = nai({ artist: preset, qualityTags: 'plan quality', undesiredContent: 'plan negative' });
+    expect(fullPositivePrompt(s, '1girl')).toBe('artist:a, 1girl, plan quality');
+    expect(fullNegativePrompt(s)).toBe('plan negative');
   });
 });
 
@@ -356,12 +266,32 @@ describe('NAI V5 support', () => {
     }
   });
 
+  // 官方前端对 Medium 档隐藏步数/采样器/负面词/Rescale,发请求时强行改写;照抄同一口径
+  it('V5 Full Medium 按官方锁死参数:14 步、Euler Ancestral、无 Rescale、负面词恒为官方 Heavy', () => {
+    const model = 'nai-diffusion-5-full-medium' as const;
+    const s = nai({ model, steps: 28, sampler: 'k_dpmpp_2m', cfgRescale: 0.4, undesiredContent: 'my negative' });
+    const params = buildNaiParameters(s, { prompt: '1girl', seed: 42 });
+    expect(params).toMatchObject({ params_version: 4, steps: 14, sampler: 'k_euler_ancestral', cfg_rescale: 0 });
+    expect(params.skip_cfg_above_sigma).toBeNull();
+    // 官方 Heavy 原文,不串 5-full 的插件精选层;用户自填的不发
+    expect(fullNegativePrompt(s)).toBe(naiDefaultUndesired(model));
+    expect(fullNegativePrompt(s)).not.toContain('my negative');
+    expect(fullNegativePrompt(s)).not.toContain('plastic skin');
+    expect(naiDefaultQualityTags(model)).toBe('very aesthetic, masterpiece, no text');
+    expect(naiFixedSettings(model)).toEqual({ steps: 14, sampler: 'k_euler_ancestral' });
+    expect(naiFixedSettings('nai-diffusion-5-full')).toBeNull();
+    // 与官方同口径:vibe 编码键归 v5full;角色提示照常走 V5 协议
+    expect(vibeModelKey(model)).toBe('v5full');
+    expect(naiSupportsCharacterPrompts(model)).toBe(true);
+    // 正面质量词不受锁定影响,自定义照常生效
+    expect(fullPositivePrompt(nai({ model, qualityTags: 'my quality' }), '1girl')).toBe('1girl, my quality');
+  });
+
   it('maps Base Tag + NL and native Character Prompts into the V5 caption schema', () => {
     const settings = nai({
       model: 'nai-diffusion-5-full',
       qualityTags: 'very aesthetic',
-      artistPresets: [{ id: 'artist', name: 'Artist', prompt: 'artist:test', quality: '', negative: '' }],
-      activeArtistId: 'artist',
+      artist: { id: 'artist', name: 'Artist', prompt: 'artist:test', quality: '', negative: '' },
     });
     const params = buildNaiParameters(settings, {
       prompt: '2girls, classroom, sunset',
@@ -395,17 +325,17 @@ describe('NAI V5 support', () => {
     expect(positive.use_order).toBe(true);
   });
 
-  it('uses model-specific V5 vibe encodings', () => {
+  // V5 不支持 Vibe Transfer:有 v5 编码也不发,整组记为跳过
+  it('skips vibes on V5 even when a V5 encoding exists', () => {
     expect(vibeModelKey('nai-diffusion-5-full')).toBe('v5full');
     expect(vibeModelKey('nai-diffusion-5-curated')).toBe('v5curated');
+    expect(naiSupportsVibes('nai-diffusion-5-full')).toBe(false);
+    expect(naiSupportsVibes('nai-diffusion-4-5-full')).toBe(true);
     const settings = nai({ model: 'nai-diffusion-5-full', vibes: [vibe({ name: 'V5 vibe' })] });
     const params = buildNaiParameters(settings, { prompt: 'x', seed: 1 });
     const data = vibeData({ encodings: { v5full: { encoding: 'djU=', infoExtracted: 1 } } });
-    expect(applyVibes(params, settings, new Map([['v1', data]])).skipped).toEqual([]);
-    expect(params.reference_image_multiple_cached).toEqual([
-      { cache_secret_key: expect.any(String), data: 'djU=' },
-    ]);
-    expect(params.reference_strength_multiple).toEqual([0.6]);
+    expect(applyVibes(params, settings, new Map([['v1', data]])).skipped).toEqual(['V5 vibe']);
+    expect(params.reference_image_multiple_cached ?? []).toEqual([]);
   });
 
   // 回归锁:char_captions 所在字段本就叫 v4_prompt,这套结构是 V4 时代的协议,V5 只是继承。
@@ -473,8 +403,7 @@ describe('buildNaiParameters', () => {
     // NAI4/4.5 读 v4_prompt,两者会拿到不同提示词且只在 NAI3 上暴露。此断言把「同源」钉死:
     // 任何拼装改动都必须留在 fullPositivePrompt 内部,不能在调用点单独加料。
     const s = nai({
-      artistPresets: [{ id: 'art_a', name: 'A', prompt: 'artist:a', quality: '', negative: '' }],
-      activeArtistId: 'art_a',
+      artist: { id: 'art_a', name: 'A', prompt: 'artist:a', quality: '', negative: '' },
     });
     const p = buildNaiParameters(s, { prompt: '1girl', seed: 1 });
     const v4 = p.v4_prompt as { caption: { base_caption: string } };
@@ -597,9 +526,12 @@ describe('applyVibes', () => {
     expect(params.reference_strength_multiple).toEqual([0.6]);
   });
 
-  it('未启用的 vibe 不参与', () => {
+  it('没勾选任何 vibe(vibes 为空)时什么都不加', () => {
     const params = buildNaiParameters(nai(), { prompt: 'x', seed: 1 });
-    applyVibes(params, nai({ vibes: [vibe({ enabled: false })] }), new Map([['v1', vibeData()]]));
+    expect(applyVibes(params, nai({ vibes: [] }), new Map([['v1', vibeData()]]))).toEqual({
+      applied: [],
+      skipped: [],
+    });
     expect(params.reference_image_multiple_cached).toEqual([]);
   });
 });
@@ -684,35 +616,19 @@ describe('naiRandomSeed', () => {
 });
 
 describe('内置画师串配方(只读、随版本更新、不进 settings)', () => {
-  it('用户库为空时,activeArtistId 命中内置库', () => {
-    const s = nai({ artistPresets: [], activeArtistId: 'bi_default' });
+  // 引用解析(方案 artistId → 用户库 / 内置库 / 悬空 = null)在 settings.naiArtistFor,
+  // 见 settings.naiPlans.test.ts;这里只锁「解析出内置条目后」的拼装。
+  it('方案选中内置条目时,画师串照常拼在最前', () => {
+    const s = nai({ artist: BUILTIN_NAI_ARTISTS[0] });
     expect(naiArtistPrompt(s)).toBe(BUILTIN_NAI_ARTISTS[0].prompt.trim());
     expect(fullPositivePrompt(s, '1girl')).toBe(
       `${BUILTIN_NAI_ARTISTS[0].prompt.trim()}, 1girl, location, very aesthetic, masterpiece, no text`,
     );
   });
 
-  it('内置配方的 quality/negative 走同一回落链:留空 → 渠道覆盖值', () => {
-    // 内置条目当前不绑定正/负面词;这里锁住「留空 = 跟随渠道」的口径,
-    // 以后给内置条目加绑定时这条测试会提醒检查链行为。
-    const s = nai({
-      artistPresets: [],
-      activeArtistId: 'bi_default',
-      qualityTags: 'channel quality',
-      undesiredContent: 'channel negative',
-    });
-    expect(fullPositivePrompt(s, '1girl')).toContain('channel quality');
-    expect(fullNegativePrompt(s)).toBe('channel negative');
-  });
-
   it('isBuiltinNaiArtist:bi_ 前缀命中,用户条目(art_*)不命中', () => {
     expect(isBuiltinNaiArtist('bi_default')).toBe(true);
     expect(isBuiltinNaiArtist('art_abc')).toBe(false);
     expect(isBuiltinNaiArtist('')).toBe(false);
-  });
-
-  it('activeArtistId 指向不存在的内置 id(如下线后)→ 不加画师串', () => {
-    const s = nai({ artistPresets: [], activeArtistId: 'bi_gone' });
-    expect(naiArtistPrompt(s)).toBe('');
   });
 });

@@ -113,7 +113,6 @@ export function vibeMetaFromData(
   thumbnailPath: string,
   data: NaiVibeData,
   strength: number,
-  enabled: boolean,
   group = '',
 ): NaiVibe {
   return {
@@ -125,7 +124,6 @@ export function vibeMetaFromData(
     hasImage: !!data.image,
     fingerprint: vibeFingerprint(data.encodings),
     strength,
-    enabled,
     group,
   };
 }

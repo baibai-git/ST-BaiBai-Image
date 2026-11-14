@@ -433,7 +433,6 @@ export async function importVibesFromChatu8(
           paths.thumbnailPath,
           data,
           ref.strength,
-          false,
           // 智绘姬的组结构原样保留;预设不属于任何组
           ref.kind === 'group' ? ref.source : '',
         ),

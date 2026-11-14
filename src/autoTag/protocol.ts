@@ -1,3 +1,4 @@
+import { validateComicLayout, type ComicLayout } from '@/backends/mossLayout';
 import { normalizeOrientation, type Orientation } from '@/backends/size';
 import type { TargetSegment } from '@/autoTag/clean';
 import { FORBIDDEN_SUBTAG, serializeImageTag } from '@/st/imageTagRegex';
@@ -27,6 +28,10 @@ export interface ImageInsertion {
   characters: ImageCharacterPrompt[];
   /** 画幅方向:模型只判横/竖,具体像素由用户在后端面板配置。漏给/乱给一律降级竖屏。 */
   size: Orientation;
+  /** tag 类型(插件按当前方案定,不是 AI 选的);缺省插画,序列化时也不写。 */
+  kind?: 'comic';
+  /** 漫画一页的分镜(kind 为 comic 时);tag/nl/negative/characters 此时恒空。 */
+  layout?: ComicLayout;
 }
 
 export interface ImagePlan {
@@ -220,6 +225,41 @@ export function parseImagePlan(
     images: limitedImages,
     changes: parseChanges(parsed.changes, positions),
   };
+}
+
+/**
+ * 漫画任务的输出:`{"pages":[{position,size,summary,items}],"changes":[…]}`。
+ *
+ * 整楼精选改编成几页,**页数与每页格数都不设硬上限**(用户明确不要写死;篇幅靠协议里的
+ * 「通常 1～2 页」参考量引导,见 prompt.ts 漫画协议);
+ * 只要求至少一页——零页等于这次分析白跑,交给 runner 重试。任一页分镜不合法即整体抛错
+ * 重试:漫画是连续叙事,悄悄丢掉中间一页比重来一次更糟。
+ * 页按正文位置稳定排序:AI 偶尔把页序写乱,插回正文时仍要跟着剧情走。
+ */
+export function parseComicPlan(raw: string, segments: TargetSegment[]): ImagePlan {
+  const parsed = parseObject(raw);
+  const pages = Array.isArray(parsed.pages) ? parsed.pages : parsed.images;
+  if (!Array.isArray(pages)) throw new Error('AI 返回的 JSON 缺少 pages 数组');
+  if (!pages.length) throw new Error('AI 没有画任何一页漫画');
+  const positions = new Map(segments.map(segment => [segment.id, segment.sourceLine]));
+
+  const images: ImageInsertion[] = pages.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`pages[${index}] 必须是对象`);
+    }
+    const entry = item as Record<string, unknown>;
+    const position = sanitizePosition(entry.position ?? entry.id, index);
+    const sourceLine = positions.get(position);
+    if (sourceLine === undefined) {
+      throw new Error(`pages[${index}].position=${position} 不在目标正文可选位置中`);
+    }
+    const layout = validateComicLayout(entry, `pages[${index}]`);
+    const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
+    return { position, sourceLine, tag: '', nl: '', negative: '', characters: [], size, kind: 'comic', layout };
+  });
+  images.sort((left, right) => left.sourceLine - right.sourceLine);
+
+  return { images, changes: parseChanges(parsed.changes, positions) };
 }
 
 /**

@@ -7,7 +7,7 @@
  *
  * 模板按模型架构分族,不做「一个工作流打天下」——不同架构的加载节点、
  * latent 类型、负面词支持都不一样,硬揉在一起只会处处是特例。
- * 范围刻意收敛:checkpoint 系(SD1.5/SDXL/Pony/Illustrious)、Flux、Anima(Qwen 链路)。
+ * 范围刻意收敛:checkpoint 系(SD1.5/SDXL/Pony/Illustrious)、Flux、Anima(Qwen 链路)、MOSS-Image(漫画)。
  * Chroma/视频系等不见实际使用的一律不做,新架构 = 在 COMFY_TEMPLATES 加一条数据 + 一个组装分支。
  *
  * 本模块刻意不 import settings/comfyui:settings.ts 要拿这里的类型与默认值工厂,
@@ -30,7 +30,7 @@ export type SimpleWorkflow = Record<string, SimpleWorkflowNode>;
 
 export type ComfyPresetMode = 'custom' | 'simple';
 
-export type ComfySimpleTemplateId = 'checkpoint' | 'flux' | 'anima';
+export type ComfySimpleTemplateId = 'checkpoint' | 'flux' | 'anima' | 'moss';
 
 export interface ComfyLoraEntry {
   /** LoRA 文件名(相对 models/loras)。 */
@@ -51,7 +51,7 @@ export interface ComfySimpleConfig {
   gguf: boolean;
   /** 外置 VAE 文件名;checkpoint 模板留空 = 用模型内置 VAE,flux/anima 必填。 */
   vae: string;
-  /** flux: t5xxl;anima: qwen_2.5_vl;checkpoint 不用。 */
+  /** flux: t5xxl;anima: qwen_2.5_vl;moss: qwen3.5;checkpoint 不用。 */
   clip1: string;
   /** flux: clip_l;其余模板不用。 */
   clip2: string;
@@ -143,7 +143,25 @@ export const COMFY_TEMPLATES: Record<ComfySimpleTemplateId, ComfyTemplateMeta> =
     landscapeSize: '1344×768',
     defaults: { steps: 28, cfg: 4, sampler: 'euler', scheduler: 'simple', guidance: 1, shift: 3 },
   },
+  // 漫画模型:吃的不是 tag 而是 layout JSON(backends/mossLayout.ts),选它的方案恒为漫画类型
+  moss: {
+    id: 'moss',
+    label: 'MOSS-Image(漫画)',
+    modelKind: 'unet',
+    modelLabel: '模型',
+    vaeRequired: true,
+    vaeLabel: 'VAE',
+    vaePlaceholder: 'flux2-vae_small.safetensors',
+    clips: [{ key: 'clip1', label: 'Qwen3.5 文本编码器' }],
+    supportsNegative: true,
+    portraitSize: '1024×1536',
+    landscapeSize: '1536×1024',
+    defaults: { steps: 25, cfg: 2.5, sampler: 'er_sde', scheduler: 'simple', guidance: 1, shift: 3 },
+  },
 };
+
+/** MOSS 的固定负面推荐值。**不能有** color / greyscale / monochrome——会把漫画页压成黑白或褪色。 */
+export const MOSS_DEFAULT_NEGATIVE = 'nsfw, worst quality, bad anatomy, watermark, jpeg artifact, blurry';
 
 export const COMFY_TEMPLATE_OPTIONS = (Object.keys(COMFY_TEMPLATES) as ComfySimpleTemplateId[]).map(id => ({
   value: id,
@@ -429,6 +447,54 @@ function buildFluxWorkflow(simple: ComfySimpleConfig, values: SimpleGenValues): 
   return nodes;
 }
 
+/**
+ * MOSS-Image:UNET + CLIPLoader(type moss_image) + flux2 VAE / EmptyFlux2LatentImage。
+ * 这三处选错都是出废图而不是报错,所以写死在模板里。不经 ModelSampling——采样参数在
+ * ComfyUI 的 supported_models.MOSSImage 里已定好。positive 在漫画链路里是整段 layout JSON。
+ */
+function buildMossWorkflow(simple: ComfySimpleConfig, values: SimpleGenValues): SimpleWorkflow {
+  const nodes: SimpleWorkflow = {};
+  nodes['1'] = unetLoader(simple);
+  nodes['2'] = {
+    class_type: 'CLIPLoader',
+    inputs: { clip_name: simple.clip1.trim(), type: 'moss_image' },
+  };
+  nodes['3'] = { class_type: 'VAELoader', inputs: { vae_name: simple.vae.trim() } };
+
+  const chain = applyLoras(nodes, simple.loras, true, ['1', 0], null);
+
+  nodes['4'] = {
+    class_type: 'CLIPTextEncode',
+    inputs: { text: composePositive(simple, values), clip: ['2', 0] },
+  };
+  nodes['5'] = {
+    class_type: 'CLIPTextEncode',
+    inputs: { text: composeNegative(simple, values), clip: ['2', 0] },
+  };
+  nodes['6'] = {
+    class_type: 'EmptyFlux2LatentImage',
+    inputs: { width: values.width, height: values.height, batch_size: 1 },
+  };
+  nodes['7'] = {
+    class_type: 'KSampler',
+    inputs: {
+      seed: values.seed,
+      steps: simple.steps,
+      cfg: simple.cfg,
+      sampler_name: simple.sampler,
+      scheduler: simple.scheduler,
+      denoise: 1,
+      model: chain.model,
+      positive: ['4', 0],
+      negative: ['5', 0],
+      latent_image: ['6', 0],
+    },
+  };
+  nodes['8'] = { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['3', 0] } };
+  nodes['9'] = saveNode(['8', 0]);
+  return nodes;
+}
+
 function buildAnimaWorkflow(simple: ComfySimpleConfig, values: SimpleGenValues): SimpleWorkflow {
   const nodes: SimpleWorkflow = {};
   nodes['1'] = unetLoader(simple);
@@ -488,6 +554,12 @@ export function buildSimpleWorkflow(simple: ComfySimpleConfig, values: SimpleGen
     throw new Error('请在 ComfyUI 渠道页填写竖屏与横屏尺寸（如 832×1216）');
   }
   switch (simple.template) {
+    case 'moss':
+      // EmptyFlux2LatentImage 的宽高步进是 16,不是倍数会被 ComfyUI 拒收
+      if (values.width % 16 || values.height % 16) {
+        throw new Error(`MOSS-Image 的尺寸必须是 16 的倍数(当前 ${values.width}×${values.height})`);
+      }
+      return buildMossWorkflow(simple, values);
     case 'flux':
       return buildFluxWorkflow(simple, values);
     case 'anima':

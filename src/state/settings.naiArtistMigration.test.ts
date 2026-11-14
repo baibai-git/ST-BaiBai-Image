@@ -6,9 +6,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * 与 ComfyUI 工作流库**刻意相反**的三条,是本文件的主要看点:
  * 1. 库允许为空,`naiDefaults` 也不播种任何条目——画师串是可选调味,
  *    凭空塞一条会让人以为自己被套了某种画风;
- * 2. `activeArtistId` 悬空时清成空串,**不**回落第一条。回落等于给用户静默换一套画风,
+ * 2. 方案的 `artistId` 悬空时清成空串,**不**回落第一条。回落等于给用户静默换一套画风,
  *    而下拉显示的正是那一条(看起来就是自己设的),几乎无法排查;
- * 3. 纯加法迁移,没有老字段可折——老配置升级后正向提示词输出必须逐字节不变。
+ * 3. 老配置升级后正向提示词输出必须逐字节不变(老 activeArtistId 折成默认方案的 artistId)。
  */
 
 const mocks = vi.hoisted(() => ({
@@ -39,13 +39,13 @@ describe('NAI 画师串库', () => {
   it('存量配置没有这两个键 → 空库 + 不使用,不抛(升级后出图提示词零变化)', async () => {
     const settings = await hydrateWithNai({ model: 'nai-diffusion-4-5-full', key: 'k' });
     expect(settings.nai.artistPresets).toEqual([]);
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
   });
 
   it('nai 键整个缺失 → 同样是空库 + 不使用', async () => {
     const settings = await hydrateWithNai(undefined);
     expect(settings.nai.artistPresets).toEqual([]);
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
   });
 
   it('新格式原样保留,当前项不被动(迁移幂等)', async () => {
@@ -60,10 +60,10 @@ describe('NAI 画师串库', () => {
     expect(settings.nai.artistPresets.map(a => a.name)).toEqual(['厚涂', '赛璐璐']);
     expect(settings.nai.artistPresets[0].quality).toBe('masterpiece');
     expect(settings.nai.artistPresets[0].negative).toBe('lowres');
-    expect(settings.nai.activeArtistId).toBe('art_b');
+    expect(settings.nai.plans[0].artistId).toBe('art_b');
   });
 
-  it('存量条目没有绑定的正/负面词键 → 补空串(= 跟随渠道级,升级后提示词零变化)', async () => {
+  it('存量条目没有绑定的正/负面词键 → 补空串,方案沿用老渠道级的值(升级后提示词零变化)', async () => {
     // 绑定字段上线前的老数据只有 id/name/prompt;补空串而非官方词,
     // 才能保住「配方 → 渠道 → 官方」回落链里老用户原有的渠道级/官方行为。
     const settings = await hydrateWithNai({
@@ -75,9 +75,9 @@ describe('NAI 画师串库', () => {
     const preset = settings.nai.artistPresets[0];
     expect(preset.quality).toBe('');
     expect(preset.negative).toBe('');
-    // 渠道级覆盖值不受迁移影响
-    expect(settings.nai.qualityTags).toBe('channel q');
-    expect(settings.nai.undesiredContent).toBe('channel n');
+    // 画师串没绑词 → 方案照抄老渠道级覆盖值
+    expect(settings.nai.plans[0].qualityTags).toBe('channel q');
+    expect(settings.nai.plans[0].undesiredContent).toBe('channel n');
   });
 
   it('绑定字段是非字符串脏数据 → 归空串,不整条丢弃', async () => {
@@ -87,7 +87,7 @@ describe('NAI 画师串库', () => {
     });
     expect(settings.nai.artistPresets[0].quality).toBe('');
     expect(settings.nai.artistPresets[0].negative).toBe('');
-    expect(settings.nai.activeArtistId).toBe('art_a');
+    expect(settings.nai.plans[0].artistId).toBe('art_a');
   });
 
   it('previewPath:合法字符串保留,缺失/脏数据视为无预览', async () => {
@@ -114,7 +114,7 @@ describe('NAI 画师串库', () => {
       artistPresets: [{ id: 'art_a', name: 'A', prompt: 'artist:a' }],
       activeArtistId: 'art_gone',
     });
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
     // 库本身不受影响,条目还在
     expect(settings.nai.artistPresets).toHaveLength(1);
   });
@@ -122,7 +122,7 @@ describe('NAI 画师串库', () => {
   it('库为空数组但 id 非空 → id 清空,库保持空(不补条目,与工作流库的恒非空相反)', async () => {
     const settings = await hydrateWithNai({ artistPresets: [], activeArtistId: 'art_x' });
     expect(settings.nai.artistPresets).toEqual([]);
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
   });
 
   it('activeArtistId 不是字符串 → 清成空串', async () => {
@@ -130,7 +130,7 @@ describe('NAI 画师串库', () => {
       artistPresets: [{ id: 'art_a', name: 'A', prompt: 'artist:a' }],
       activeArtistId: 42,
     });
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
   });
 
   it('条目缺字段/含脏数据 → 逐项补齐,不整条丢弃', async () => {
@@ -148,9 +148,9 @@ describe('NAI 画师串库', () => {
     expect(second.id).toBeTruthy();
     expect(second.name).toBe('画师串 2');
     expect(second.prompt).toBe('');
-    // 非字符串 prompt 归空串;有效 id 仍被 activeArtistId 认到
+    // 非字符串 prompt 归空串;有效 id 仍被老 activeArtistId(折进方案)认到
     expect(third.prompt).toBe('');
-    expect(settings.nai.activeArtistId).toBe('art_c');
+    expect(settings.nai.plans[0].artistId).toBe('art_c');
   });
 
   it('prompt 是空串的条目照样保留(那是用户面对的空槽位,不是垃圾数据)', async () => {
@@ -159,10 +159,10 @@ describe('NAI 画师串库', () => {
       activeArtistId: 'art_a',
     });
     expect(settings.nai.artistPresets).toHaveLength(1);
-    expect(settings.nai.activeArtistId).toBe('art_a');
+    expect(settings.nai.plans[0].artistId).toBe('art_a');
   });
 
-  it('activeNaiArtist 取当前项;未选 / 悬空时返回 null', async () => {
+  it('activeNaiArtist 取当前方案引用的那条;未选 / 悬空时返回 null', async () => {
     mocks.context = {
       extensionSettings: {
         baibai_image: {
@@ -184,11 +184,11 @@ describe('NAI 画师串库', () => {
     expect(activeNaiArtist()?.prompt).toBe('artist:b');
 
     // 切到「不使用」
-    settings.nai.activeArtistId = '';
+    settings.nai.plans[0].artistId = '';
     expect(activeNaiArtist()).toBeNull();
 
     // 悬空(UI 运行中把库改坏这种时序)也返回 null,而不是兜底成第一条
-    settings.nai.activeArtistId = 'art_gone';
+    settings.nai.plans[0].artistId = 'art_gone';
     expect(activeNaiArtist()).toBeNull();
   });
 
@@ -216,31 +216,31 @@ describe('内置画师串(bi_*)与新老用户', () => {
     };
     const { hydrateSettings, settings } = await import('@/state/settings');
     await hydrateSettings();
-    expect(settings.nai.activeArtistId).toBe('bi_default');
+    expect(settings.nai.plans[0].artistId).toBe('bi_default');
     expect(settings.nai.artistPresets).toEqual([]); // 用户库仍为空:内置条不进 settings
   });
 
-  it('老用户:已存的 activeArtistId 原样保留(空串 = 不使用,不会被默认值顶掉)', async () => {
+  it('老用户:已存的 activeArtistId 原样折进方案(空串 = 不使用,不会被默认值顶掉)', async () => {
     const settings = await hydrateWithNai({
       model: 'nai-diffusion-4-5-full',
       artistPresets: [],
       activeArtistId: '',
     });
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
   });
 
   it('老用户的存量 nai 段没有 activeArtistId 键 → 空串,不吃新装默认', async () => {
     const settings = await hydrateWithNai({ model: 'nai-diffusion-4-5-full', key: 'k' });
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
   });
 
   it('选中内置条目的配置:用户库为空也不算悬空,normalize 不清掉', async () => {
     const settings = await hydrateWithNai({ artistPresets: [], activeArtistId: 'bi_default' });
-    expect(settings.nai.activeArtistId).toBe('bi_default');
+    expect(settings.nai.plans[0].artistId).toBe('bi_default');
   });
 
   it('bi_ 前缀但 id 不存在(内置条目下线后)→ 仍按悬空清成空串', async () => {
     const settings = await hydrateWithNai({ artistPresets: [], activeArtistId: 'bi_gone' });
-    expect(settings.nai.activeArtistId).toBe('');
+    expect(settings.nai.plans[0].artistId).toBe('');
   });
 });

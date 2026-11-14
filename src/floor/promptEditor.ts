@@ -53,6 +53,8 @@ export interface PromptEditorOptions {
   historyCount: number;
   /** 后端是否已配置好。 */
   configured: boolean;
+  /** 这条 tag 不能用当前方案出图的原因(见 generate.ts 的 tagBlockReason);空 = 可以。 */
+  blockedReason?: string;
 }
 
 /** 同一时刻只允许一个编辑弹窗,重复调用先关旧的。 */
@@ -341,6 +343,7 @@ export function openPromptEditor(options: PromptEditorOptions): void {
         content,
         historyCount: options.historyCount,
         configured: options.configured,
+        blockedReason: options.blockedReason ?? '',
         busy,
         rewriting: isTagPlanning(planKey),
         rewritten,

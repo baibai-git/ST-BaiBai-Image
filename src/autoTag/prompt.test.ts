@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import { autoTagProfile, buildAutoTagMessages, expandNlSections } from '@/autoTag/prompt';
 import {
   activeComfyPreset,
+  activeNaiPlan,
   DEFAULT_NAI_V5_SPEC,
   DEFAULT_NAI_V5_THINKING,
+  newComfyPromptSet,
   settings,
   type AutoTagPrompts,
   type AutoTagSettings,
@@ -26,6 +28,36 @@ function prompts(overrides: Partial<AutoTagPrompts> = {}): AutoTagPrompts {
     naiV5Thinking: '',
     ...overrides,
   };
+}
+
+/**
+ * ComfyUI 的规范与思维链不在 autoTag.prompts 里了(那两个键只剩迁移来源):
+ * 装一套用户提示词并让当前方案引用它。返回复位函数(settings 是模块级单例)。
+ */
+function useComfyPromptSet(texts: { spec?: string; thinking?: string }): () => void {
+  const preset = activeComfyPreset();
+  const saved = { promptSetId: preset.promptSetId, kind: preset.kind, sets: settings.comfyui.promptSets };
+  const set = { ...newComfyPromptSet('illustration', '测试'), spec: texts.spec ?? '', thinking: texts.thinking ?? '' };
+  settings.comfyui.promptSets = [...saved.sets, set];
+  preset.kind = 'illustration';
+  preset.promptSetId = set.id;
+  return () => {
+    settings.comfyui.promptSets = saved.sets;
+    preset.promptSetId = saved.promptSetId;
+    preset.kind = saved.kind;
+  };
+}
+
+/**
+ * 去掉恒置顶的破限词(messages[0])后的全部系统消息 = 后端书写规范 + 任务协议 + 思维链。
+ * 破限词是内置 NVWA 核心,自带「成年人」等字样;要锁「某后端专属条款别漏进另一后端」
+ * 的断言必须绕开它,否则不管规范写成什么都红。
+ */
+function backendSpecAndThinking(messages: { content: string }[]): string {
+  return messages
+    .slice(1)
+    .map(m => m.content)
+    .join('\n');
 }
 
 function context(): STContext {
@@ -308,9 +340,15 @@ describe('auto tag prompt', () => {
       maxImages: 2,
       retryCount: 1,
       autoGenerate: true,
-      prompts: prompts({ comfyThinking: '自定义清单' }),
+      prompts: prompts(),
     };
-    const messages = await buildAutoTagMessages(context(), 1, options, null);
+    const restore = useComfyPromptSet({ thinking: '自定义清单' });
+    let messages: Awaited<ReturnType<typeof buildAutoTagMessages>>;
+    try {
+      messages = await buildAutoTagMessages(context(), 1, options, null);
+    } finally {
+      restore();
+    }
 
     expect(messages.some(m => m.content.includes('自定义清单'))).toBe(true);
     expect(messages.some(m => m.content.includes('输出前思考清单'))).toBe(false);
@@ -329,13 +367,13 @@ describe('auto tag prompt', () => {
       retryCount: 1,
       autoGenerate: true,
       prompts: prompts({
-        comfyThinking: 'COMFY-CHECKLIST',
         naiThinking: 'NAI-CHECKLIST',
         naiV5Thinking: 'NAIV5-CHECKLIST',
       }),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
+    const restoreSet = useComfyPromptSet({ thinking: 'COMFY-CHECKLIST' });
     try {
       const cases = [
         { backend: 'comfyui', model: oldModel, want: 'COMFY-CHECKLIST' },
@@ -349,7 +387,7 @@ describe('auto tag prompt', () => {
       const all = ['COMFY-CHECKLIST', 'NAI-CHECKLIST', 'NAIV5-CHECKLIST'];
       for (const { backend, model, want } of cases) {
         settings.defaultBackend = backend;
-        settings.nai.model = model;
+        activeNaiPlan().model = model;
         const messages = await buildAutoTagMessages(context(), 1, options, null);
         const text = messages.map(m => m.content).join('\n');
         for (const marker of all) {
@@ -363,7 +401,8 @@ describe('auto tag prompt', () => {
       }
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
+      restoreSet();
     }
   });
 
@@ -381,7 +420,7 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
     try {
       // ComfyUI:身份 tag 定词 + 括号转义提醒 + negative 条件自查(只有 Comfy 工作流会有
       // negative 键);Comfy spec 无 NSFW 条款,思维链也不加。
@@ -407,36 +446,36 @@ describe('auto tag prompt', () => {
       // NAI 4 系:身份 tag 不转义 + 显式 NSFW 解剖落点(从有变无的回归,此处补回)。
       // 负面词由后端按模型固定附加,AI 不写 negative——不该有 negative 条件自查。
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-4-5-full';
-      text = (await buildAutoTagMessages(context(), 1, options, null))
-        .map(m => m.content)
-        .join('\n');
+      activeNaiPlan().model = 'nai-diffusion-4-5-full';
+      const nai45 = await buildAutoTagMessages(context(), 1, options, null);
+      text = nai45.map(m => m.content).join('\n');
       expect(text).toContain('判定为同人时同一行定出最终身份 tag 词');
       expect(text).toContain('不转义圆括号');
       expect(text).toContain('若正文明确为显式 NSFW 场景');
       expect(text).toContain('若本图是显式 NSFW 场景');
       expect(text).not.toContain('若本图协议含 negative 键');
-      expect(text).not.toContain('成年人');
+      // 「成年人」是 Comfy 专属成年自查条款的标记词;破限词(NVWA 核心)自身就含这个词,
+      // 故只查后端规范与思维链(messages[0] 恒为破限词)。
+      expect(backendSpecAndThinking(nai45)).not.toContain('成年人');
       // NAI 侧用户没有白痘问题,不引入这条禁令。
       expect(text).not.toContain('白皙肤色词');
       expect(text).not.toContain('白皙词一律禁止');
 
       // NAI V5:身份 tag 落点是 characters[].tag 首位;NSFW 按 Base/角色块分工;
       // contentRule 明令禁止 negative tags,不该有 negative 条件自查。
-      settings.nai.model = 'nai-diffusion-5-full';
-      text = (await buildAutoTagMessages(context(), 1, options, null))
-        .map(m => m.content)
-        .join('\n');
+      activeNaiPlan().model = 'nai-diffusion-5-full';
+      const nai5 = await buildAutoTagMessages(context(), 1, options, null);
+      text = nai5.map(m => m.content).join('\n');
       expect(text).toContain('身份 tag 必须写进档案');
       expect(text).toContain('每个同人角色的身份 tag 都逐字照抄自档案 fandom 字段');
       expect(text).toContain('若正文明确为显式 NSFW 场景');
       expect(text).toContain('若本图是显式 NSFW 场景');
       expect(text).not.toContain('若本图协议含 negative 键');
-      expect(text).not.toContain('成年人');
+      expect(backendSpecAndThinking(nai5)).not.toContain('成年人');
       expect(text).not.toContain('白皙肤色词');
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
     }
   });
 
@@ -453,10 +492,10 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-5-full';
+      activeNaiPlan().model = 'nai-diffusion-5-full';
       const messages = await buildAutoTagMessages(context(), 1, options, null);
       const text = messages.map(m => m.content).join('\n');
 
@@ -496,7 +535,7 @@ describe('auto tag prompt', () => {
       expect(text).toContain('槽位里不许退回 school uniform、dress、pantyhose 这种笼统孤立词');
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
     }
   });
 
@@ -515,10 +554,10 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-5-full';
+      activeNaiPlan().model = 'nai-diffusion-5-full';
       const messages = await buildAutoTagMessages(context(), 1, options, null);
       const text = messages.map(m => m.content).join('\n');
 
@@ -566,7 +605,7 @@ describe('auto tag prompt', () => {
       expect(text).not.toContain('"tag":"2girls, classroom, sunset, medium shot"');
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
     }
   });
 
@@ -584,10 +623,10 @@ describe('auto tag prompt', () => {
         prompts: prompts(),
       };
       const oldBackend = settings.defaultBackend;
-      const oldModel = settings.nai.model;
+      const oldModel = activeNaiPlan().model;
       try {
         settings.defaultBackend = 'nai';
-        settings.nai.model = model;
+        activeNaiPlan().model = model;
         const messages = await buildAutoTagMessages(context(), 1, options, null);
         const contract = messages.find(m => m.content.startsWith('你是严谨的剧情画面规划'))!.content;
         const thinking = messages.find(m => m.content.startsWith('【输出前思考清单】'))!.content;
@@ -616,7 +655,7 @@ describe('auto tag prompt', () => {
         expect(spec).not.toContain('an extra body in Base costs a little rendering polish');
       } finally {
         settings.defaultBackend = oldBackend;
-        settings.nai.model = oldModel;
+        activeNaiPlan().model = oldModel;
       }
     },
   );
@@ -633,10 +672,10 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-5-full';
+      activeNaiPlan().model = 'nai-diffusion-5-full';
       const messages = await buildAutoTagMessages(context(), 1, options, null);
       const text = messages.map(m => m.content).join('\n');
 
@@ -655,7 +694,7 @@ describe('auto tag prompt', () => {
       expect(text).toContain('When unsure, write portrait');
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
     }
   });
 
@@ -673,10 +712,10 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-4-full';
+      activeNaiPlan().model = 'nai-diffusion-4-full';
       const messages = await buildAutoTagMessages(context(), 1, options, null);
       const text = messages.map(m => m.content).join('\n');
 
@@ -699,7 +738,7 @@ describe('auto tag prompt', () => {
       expect(text).not.toContain('eyes closed');
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
     }
   });
 
@@ -780,10 +819,10 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-5-full';
+      activeNaiPlan().model = 'nai-diffusion-5-full';
       const messages = await buildAutoTagMessages(context(), 1, options, null);
       expect(messages.some(message => message.content.includes('one Base Prompt plus zero or more native Character Prompts'))).toBe(true);
       expect(messages.some(message => message.content.includes('"characters":['))).toBe(true);
@@ -799,7 +838,7 @@ describe('auto tag prompt', () => {
       expect(messages.some(message => message.content.includes('temporary states never enter the profile'))).toBe(true);
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
     }
   });
 
@@ -815,11 +854,11 @@ describe('auto tag prompt', () => {
       prompts: prompts(),
     };
     const oldBackend = settings.defaultBackend;
-    const oldModel = settings.nai.model;
+    const oldModel = activeNaiPlan().model;
     try {
       for (const backend of ['comfyui', 'nai'] as const) {
         settings.defaultBackend = backend;
-        if (backend === 'nai') settings.nai.model = 'nai-diffusion-4-full';
+        if (backend === 'nai') activeNaiPlan().model = 'nai-diffusion-4-full';
         const messages = await buildAutoTagMessages(context(), 1, options, null);
         const spec = messages.find(m => m.content.includes('从重要到次要排列'));
         expect(spec?.content).toContain('动作姿态 → 表情视线 → 场景');
@@ -833,7 +872,7 @@ describe('auto tag prompt', () => {
       }
     } finally {
       settings.defaultBackend = oldBackend;
-      settings.nai.model = oldModel;
+      activeNaiPlan().model = oldModel;
     }
   });
 
@@ -1033,9 +1072,9 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     const preset = activeComfyPreset();
     const saved = {
       backend: settings.defaultBackend,
-      model: settings.nai.model,
-      naiNl: settings.nai.naturalLanguage,
-      naiLock: settings.nai.orientationLock,
+      model: activeNaiPlan().model,
+      naiNl: activeNaiPlan().naturalLanguage,
+      naiLock: activeNaiPlan().orientationLock,
       presetNl: preset.naturalLanguage,
       presetLock: preset.orientationLock,
     };
@@ -1043,9 +1082,9 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       preset,
       restore() {
         settings.defaultBackend = saved.backend;
-        settings.nai.model = saved.model;
-        settings.nai.naturalLanguage = saved.naiNl;
-        settings.nai.orientationLock = saved.naiLock;
+        activeNaiPlan().model = saved.model;
+        activeNaiPlan().naturalLanguage = saved.naiNl;
+        activeNaiPlan().orientationLock = saved.naiLock;
         preset.naturalLanguage = saved.presetNl;
         preset.orientationLock = saved.presetLock;
       },
@@ -1068,8 +1107,8 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       const state = snapshot();
       try {
         settings.defaultBackend = 'nai';
-        settings.nai.model = model;
-        settings.nai.naturalLanguage = false;
+        activeNaiPlan().model = model;
+        activeNaiPlan().naturalLanguage = false;
         const messages = await buildAutoTagMessages(context(), 1, options(), null);
         const contract = pick(messages, CONTRACT_MARK);
         const spec = pick(messages, NAI_SPEC_MARK);
@@ -1093,7 +1132,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
         // 多角色提示词本身不受开关影响:关的只是 nl,characters[] 照样要
         expect(thinking).toContain('characters[]');
 
-        settings.nai.naturalLanguage = true;
+        activeNaiPlan().naturalLanguage = true;
         const on = (await buildAutoTagMessages(context(), 1, options(), null))
           .map(m => m.content)
           .join('\n');
@@ -1114,15 +1153,17 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     const custom = options({
       naiV5Spec: 'NAI-SPEC{{#nl}} with-nl{{/nl}}{{^nl}} tag-only{{/nl}}',
       naiV5Thinking: 'NAI-THINK{{#nl}} with-nl{{/nl}}{{^nl}} tag-only{{/nl}}',
-      comfySpec: 'COMFY-SPEC{{#nl}} with-nl{{/nl}}{{^nl}} tag-only{{/nl}}',
-      comfyThinking: 'COMFY-THINK{{#nl}} with-nl{{/nl}}{{^nl}} tag-only{{/nl}}',
+    });
+    const restoreSet = useComfyPromptSet({
+      spec: 'COMFY-SPEC{{#nl}} with-nl{{/nl}}{{^nl}} tag-only{{/nl}}',
+      thinking: 'COMFY-THINK{{#nl}} with-nl{{/nl}}{{^nl}} tag-only{{/nl}}',
     });
     const run = async () =>
       (await buildAutoTagMessages(context(), 1, custom, null)).map(m => m.content).join('\n');
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-4-5-full';
-      settings.nai.naturalLanguage = false;
+      activeNaiPlan().model = 'nai-diffusion-4-5-full';
+      activeNaiPlan().naturalLanguage = false;
       // ComfyUI 那份开着也不该影响 NAI
       state.preset.naturalLanguage = true;
       let text = await run();
@@ -1130,7 +1171,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       expect(text).toContain('NAI-THINK tag-only');
       expect(text).not.toContain('with-nl');
 
-      settings.nai.naturalLanguage = true;
+      activeNaiPlan().naturalLanguage = true;
       text = await run();
       expect(text).toContain('NAI-SPEC with-nl');
       expect(text).toContain('NAI-THINK with-nl');
@@ -1147,6 +1188,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       expect(text).toContain('COMFY-SPEC with-nl');
       expect(text).toContain('COMFY-THINK with-nl');
     } finally {
+      restoreSet();
       state.restore();
     }
   });
@@ -1156,8 +1198,8 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     const state = snapshot();
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-4-5-full';
-      settings.nai.orientationLock = 'landscape';
+      activeNaiPlan().model = 'nai-diffusion-4-5-full';
+      activeNaiPlan().orientationLock = 'landscape';
       const contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);
       expect(contract).toContain('锁定为横图，每张图都填 "landscape"');
       expect(contract).toContain('判据本次不适用');
@@ -1172,7 +1214,7 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     const state = snapshot();
     try {
       settings.defaultBackend = 'comfyui';
-      settings.nai.orientationLock = 'landscape';
+      activeNaiPlan().orientationLock = 'landscape';
       state.preset.orientationLock = 'portrait';
       let contract = pick(await buildAutoTagMessages(context(), 1, options(), null), CONTRACT_MARK);
       expect(contract).toContain('锁定为竖图，每张图都填 "portrait"');
@@ -1191,30 +1233,68 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
     const state = snapshot();
     try {
       settings.defaultBackend = 'nai';
-      settings.nai.model = 'nai-diffusion-4-5-full';
-      settings.nai.naturalLanguage = true;
-      settings.nai.orientationLock = 'auto';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: true, lockedSize: null });
+      activeNaiPlan().model = 'nai-diffusion-4-5-full';
+      activeNaiPlan().naturalLanguage = true;
+      activeNaiPlan().orientationLock = 'auto';
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: true, lockedSize: null, comic: false });
 
-      settings.nai.naturalLanguage = false;
-      settings.nai.orientationLock = 'portrait';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: false, lockedSize: 'portrait' });
+      activeNaiPlan().naturalLanguage = false;
+      activeNaiPlan().orientationLock = 'portrait';
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: true, nl: false, lockedSize: 'portrait', comic: false });
 
       // 单串分支(NAI4)的协议本来就不写 nl,开关对它不起作用
-      settings.nai.model = 'nai-diffusion-4-full';
-      settings.nai.naturalLanguage = true;
+      activeNaiPlan().model = 'nai-diffusion-4-full';
+      activeNaiPlan().naturalLanguage = true;
       expect(autoTagProfile()).toMatchObject({ naiCharPrompts: false, nl: false });
 
       // ComfyUI:自然语言与画幅锁都取当前工作流
       settings.defaultBackend = 'comfyui';
       state.preset.naturalLanguage = true;
       state.preset.orientationLock = 'landscape';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: true, lockedSize: 'landscape' });
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: true, lockedSize: 'landscape', comic: false });
 
       state.preset.naturalLanguage = false;
       state.preset.orientationLock = 'auto';
-      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: false, lockedSize: null });
+      expect(autoTagProfile()).toEqual({ naiCharPrompts: false, nl: false, lockedSize: null, comic: false });
     } finally {
+      state.restore();
+    }
+  });
+
+  it('漫画方案:协议换成整楼分页 + 分镜,规范与思维链取漫画内置,不看自然语言开关', async () => {
+    const state = snapshot();
+    const savedKind = state.preset.kind;
+    const savedSet = state.preset.promptSetId;
+    try {
+      settings.defaultBackend = 'comfyui';
+      state.preset.kind = 'comic';
+      state.preset.promptSetId = 'builtin_comic';
+      state.preset.naturalLanguage = true;
+      state.preset.orientationLock = 'auto';
+      expect(autoTagProfile()).toMatchObject({ comic: true, nl: false });
+
+      const all = (await buildAutoTagMessages(context(), 1, options(), null)).map(m => m.content).join('\n');
+      expect(all).toContain('你是严谨的漫画分镜师');
+      expect(all).not.toContain(CONTRACT_MARK);
+      expect(all).toContain('"pages":[{"position":"P3"');
+      // 精选改编而非全覆盖:「从头到尾、不跳过」曾让两千字一楼画出 7 页
+      expect(all).toContain('精选改编');
+      expect(all).not.toContain('不跳过中间剧情');
+      // 插画协议的张数区间与 nl 一个都不能漏进来
+      expect(all).not.toContain('images 数量必须');
+      expect(all).not.toContain('"nl":');
+      expect(all).toContain('【MOSS 漫画规范】');
+      expect(all).toContain('逐页分镜');
+      // 建档口径与插画共用
+      expect(all).toContain('建档先于画图');
+
+      state.preset.orientationLock = 'landscape';
+      const locked = (await buildAutoTagMessages(context(), 1, options(), null)).map(m => m.content).join('\n');
+      expect(locked).toContain('"size":"landscape"');
+      expect(locked).toContain('锁定为横页');
+    } finally {
+      state.preset.kind = savedKind;
+      state.preset.promptSetId = savedSet;
       state.restore();
     }
   });

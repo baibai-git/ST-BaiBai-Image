@@ -2,6 +2,7 @@ import { requestCompletion, requestViaMainApi } from '@/api/client';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   applyPositionedCharRefs,
+  entriesAtPosition,
   resolveCharAnchors,
   type PositionedCharOp,
 } from '@/autoTag/charAnchors';
@@ -22,9 +23,11 @@ import {
   readCharTagFloorDelta,
   recomputeCharTags,
   type CharTagAutoOp,
+  type CharTagEntry,
   type CharTagField,
 } from '@/state/charTags';
-import { injectImageTags, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
+import { injectImageTags, parseComicPlan, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
+import { bakeAppearance, comicAppearance, type ComicLayout } from '@/backends/mossLayout';
 import {
   clearAutoGenerateForFloor,
   consumeAutoGenerate,
@@ -34,6 +37,8 @@ import { applyMessageText, type ApplyMessageResult } from '@/st/messageEdit';
 import { getContext, isAiStoryMessage, type STMessage } from '@/st/context';
 import {
   hasImageTagTrace,
+  imageTagKind,
+  parseImageTagContent,
   parseImageTags,
   replaceImageTagAt,
   serializeImageTag,
@@ -175,6 +180,20 @@ function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
   return ops.sort((left, right) => left.sourceLine - right.sourceLine);
 }
 
+/**
+ * 漫画分镜里带 name 的人物:按库把固定外貌补进 caption。MOSS 靠逐字复用同一串词认人,
+ * 交给 AI 抄写迟早会漂;库里查不到的名字原样留着,收进 unknown 交给调用方告警。
+ */
+function bakeComicAppearance(layout: ComicLayout, entries: CharTagEntry[], unknown: Set<string>): void {
+  const byName = new Map(entries.map(entry => [entry.name, entry]));
+  for (const item of layout.items) {
+    if (item.label !== 'character' || !item.name) continue;
+    const entry = byName.get(item.name);
+    if (entry) item.caption = bakeAppearance(item.caption, comicAppearance(entry));
+    else unknown.add(item.name);
+  }
+}
+
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
   const context = getContext();
   diagnostic('runForFloor:enter', {
@@ -232,6 +251,16 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       true,
       `第 ${slot.seq + 1} 张图片的提示词已不存在（可能已换 swipe 或被编辑），本次没有重写`,
     );
+    return;
+  }
+  // 漫画只提供整楼重新生成:当前方案是漫画,或要重写的这条本身是漫画 tag,都没有按槽位
+  // 重写的协议(卡片上也不给入口,这里兜底)。
+  if (
+    slot &&
+    slotRawTag !== undefined &&
+    (autoTagProfile().comic || imageTagKind(parseImageTagContent(slotRawTag)) === 'comic')
+  ) {
+    abort(floor, 'slot-comic', true, '漫画只支持整楼重新生成，不能单独重写某一页');
     return;
   }
   // 探测口径与按钮层同源(imageTagRegex.hasImageTagTrace):两侧漂移过一次——
@@ -339,12 +368,15 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         // (直接 let 会被 TS 收窄成 null:闭包内的赋值控制流分析看不见。)
         const parsed: { plan: ImagePlan | null } = { plan: null };
         const validate = (raw: string) => {
-          const candidate = parseImagePlan(
-            raw,
-            preparedTarget.segments,
-            promptOptions.minImages,
-            promptOptions.maxImages,
-          );
+          // 漫画不受张数上下限约束(页数由 AI 按内容定),只要求至少一页
+          const candidate = profile.comic
+            ? parseComicPlan(raw, preparedTarget.segments)
+            : parseImagePlan(
+                raw,
+                preparedTarget.segments,
+                promptOptions.minImages,
+                promptOptions.maxImages,
+              );
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
           // changes 白白消耗重试次数。NAI 关了自然语言时协议不要 nl,也就不验。
           if (
@@ -422,6 +454,14 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         for (const character of image.characters) character.nl = '';
       }
       if (profile.lockedSize) image.size = profile.lockedSize;
+      if (image.layout) {
+        bakeComicAppearance(
+          image.layout,
+          entriesAtPosition(anchors.entries, effectiveOps, image.sourceLine, lockedNames),
+          unknownNames,
+        );
+        continue;
+      }
       const tagRes = applyPositionedCharRefs(
         image.tag,
         anchors.entries,
@@ -551,7 +591,12 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       recomputeCharTags();
       if (rebaseNote) console.info(`[柏宝绘] 第 ${floor} 楼 tag 位置重定位:${rebaseNote}`);
       if (plan.images.length) {
-        toastr.success(`已在第 ${floor} 楼插入 ${plan.images.length} 个生图 tag`, '柏宝绘');
+        toastr.success(
+          profile.comic
+            ? `已在第 ${floor} 楼插入 ${plan.images.length} 页漫画分镜`
+            : `已在第 ${floor} 楼插入 ${plan.images.length} 个生图 tag`,
+          '柏宝绘',
+        );
       } else if (opts.manual) {
         toastr.info('模型认为本楼没有值得插图的画面', '柏宝绘');
       } else {

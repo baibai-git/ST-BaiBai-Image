@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { injectImageTags, parseImagePlan as parseImagePlanWithRange } from '@/autoTag/protocol';
+import {
+  injectImageTags,
+  parseComicPlan,
+  parseImagePlan as parseImagePlanWithRange,
+} from '@/autoTag/protocol';
+import { parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
 
 const segments = [
   { id: 'P1', sourceLine: 0, text: '第一幕结束' },
@@ -360,5 +365,51 @@ describe('changes parsing', () => {
       images: [],
       changes: [],
     });
+  });
+});
+
+describe('comic plan parsing', () => {
+  const page = (position: string, extra: Record<string, unknown> = {}) => ({
+    position,
+    size: 'portrait',
+    summary: 'manga page',
+    items: [{ label: 'character', name: '小雪', caption: 'smiles', bbox: [0, 0, 500, 1000] }],
+    ...extra,
+  });
+
+  it('parses pages into comic insertions without any page cap', () => {
+    const pages = Array.from({ length: 12 }, () => page('P2'));
+    const plan = parseComicPlan(JSON.stringify({ pages, changes: [] }), segments);
+    expect(plan.images).toHaveLength(12);
+    expect(plan.images[0]).toMatchObject({
+      position: 'P2',
+      sourceLine: 2,
+      tag: '',
+      kind: 'comic',
+      size: 'portrait',
+      layout: { summary: 'manga page', items: [{ label: 'character', name: '小雪', caption: 'smiles' }] },
+    });
+  });
+
+  it('sorts pages back into story order', () => {
+    const plan = parseComicPlan(JSON.stringify({ pages: [page('P2'), page('P1')] }), segments);
+    expect(plan.images.map(image => image.position)).toEqual(['P1', 'P2']);
+  });
+
+  it('rejects zero pages and any malformed page (whole plan retries)', () => {
+    expect(() => parseComicPlan('{"pages":[]}', segments)).toThrow(/一页/);
+    expect(() => parseComicPlan(JSON.stringify({ pages: [page('P1'), page('P2', { summary: '' })] }), segments)).toThrow(
+      /summary/,
+    );
+    expect(() => parseComicPlan(JSON.stringify({ pages: [page('P9')] }), segments)).toThrow(/P9/);
+  });
+
+  it('injects pages as <type>comic</type> tags that parse back', () => {
+    const plan = parseComicPlan(JSON.stringify({ pages: [page('P1')] }), segments);
+    const output = injectImageTags(['第一幕结束', '', '第二幕结束'].join('\n'), plan.images);
+    const tags = parseImageTags(output);
+    expect(tags).toHaveLength(1);
+    expect(tags[0]).toContain('<type>comic</type>');
+    expect(parseImageTagContent(tags[0]).layout).toEqual(plan.images[0].layout);
   });
 });

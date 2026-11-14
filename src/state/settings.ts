@@ -55,17 +55,62 @@ export interface BackendConn {
 }
 
 /**
- * 一套具名工作流。除 JSON 外还带着「这套底模要什么」——切过去即全套生效。
+ * ComfyUI 出图方案的类型。两类的 AI 协议结构不同,不能混用:
+ * - illustration:一个画面一张图,AI 写 tag / nl(现有协议);
+ * - comic:整楼剧情画成若干页漫画,AI 写分格布局(MOSS-Image layout)。
+ * 方案与提示词各带一份类型,方案只能选同类型的提示词——错配出来的是废图而不是「效果差点」。
+ */
+export type ComfyKind = 'illustration' | 'comic';
+
+/** 类型选项(顺序即分段按钮顺序)。 */
+export const COMFY_KINDS: { value: ComfyKind; label: string }[] = [
+  { value: 'illustration', label: '插画' },
+  { value: 'comic', label: '漫画' },
+];
+
+/** 一台 ComfyUI 服务器。多个方案可共用一台;被方案引用时不可删。 */
+export interface ComfyServer {
+  id: string;
+  name: string;
+  url: string;
+}
+
+/**
+ * 一套 AI 写提示词用的文本:书写规范 + 思维链,成对存放(两者必须配套,见设置页旧注释)。
+ * 多个方案可共用一套,改一处全部生效——这正是它从方案里拆出来的理由。
  *
- * 为什么自然语言开关与横竖尺寸归预设而非渠道:它们本质是底模的属性。
+ * 内置的两套(BUILTIN_COMFY_PROMPT_SETS)不入库,按 id 解析、只读、随插件版本更新;
+ * 想改就复制成自己的(同 NAI 内置画师串的口径)。
+ * kind 建好即固定:改类型会让引用它的方案瞬间错配。
+ */
+export interface ComfyPromptSet {
+  id: string;
+  name: string;
+  kind: ComfyKind;
+  /** 书写规范;留空回落同类型内置那份。 */
+  spec: string;
+  /** 输出前思考清单;留空回落同类型内置那份。 */
+  thinking: string;
+}
+
+/**
+ * 一套出图方案(存储键沿用 workflows / ComfyWorkflowPreset,免迁移)。
+ * 除 JSON 外还带着「这套底模要什么」——切过去即全套生效。
+ *
+ * 为什么自然语言开关与横竖尺寸归方案:它们本质是底模的属性。
  * Illustrious/Pony 吃 danbooru 短 tag、832×1216;Flux/SD3.5 吃自然语言、1024 方图。
- * 留在渠道级的话,每次切工作流都得再手改两处,「切换」这件事就只做了一半。
- * url 反过来仍是渠道级(一台 ComfyUI 服务器跑所有工作流)。
+ * 服务器与提示词则是**引用**:多个方案共用一台服务器、一套提示词,改一处不必挨个改。
  */
 export interface ComfyWorkflowPreset extends SizePair {
   id: string;
   /** 显示名(下拉列表与切换用;允许重名,以 id 为键)。 */
   name: string;
+  /** 方案类型;决定能选哪些提示词、AI 走哪套协议。 */
+  kind: ComfyKind;
+  /** 引用的服务器 id;悬空时 normalize 回落第一台。 */
+  serverId: string;
+  /** 引用的提示词 id(用户库或内置);悬空/类型不符时 normalize 回落同类型内置。 */
+  promptSetId: string;
   /**
    * 配置方式,两模式互斥:
    * - custom:粘贴 Save (API Format) 的 JSON,动态值用 %prompt% 等占位符;
@@ -83,7 +128,7 @@ export interface ComfyWorkflowPreset extends SizePair {
 }
 
 /**
- * 出图/测试连接实际需要的字段:渠道级 url + 当前预设派生(见 effectiveComfyConn)。
+ * 出图/测试连接实际需要的字段:方案引用的服务器 url + 方案自身派生(见 effectiveComfyConn)。
  *
  * backends/comfyui.ts 只认这个收窄后的形状,不认整个 ComfyUISettings——
  * 后端层拿到的应该是「这一次出图用什么」,而不是「用户存了几套工作流」。
@@ -95,9 +140,16 @@ export interface ComfyRunConn extends SizePair {
   simple: ComfySimpleConfig;
 }
 
-/** ComfyUI 连接与工作流库。 */
+/**
+ * ComfyUI 的三个库:服务器、提示词、出图方案。
+ * 继承来的 url 只留作存量迁移来源(折成第一台服务器),出图一律走方案引用的服务器。
+ */
 export interface ComfyUISettings extends BackendConn {
-  /** 工作流库。**不变式:恒非空**(至少一条,见 normalizeComfyUI 收尾兜底)。 */
+  /** 服务器库。**不变式:恒非空**(方案恒非空且必引用一台,被引用的删不掉)。 */
+  servers: ComfyServer[];
+  /** 用户提示词库(不含内置);可为空。 */
+  promptSets: ComfyPromptSet[];
+  /** 出图方案库。**不变式:恒非空**(至少一条,见 normalizeComfyUI 收尾兜底)。 */
   workflows: ComfyWorkflowPreset[];
   /** 当前使用的工作流 id;指向已删条目时由 normalize 回落到第一条。 */
   activeWorkflowId: string;
@@ -113,6 +165,7 @@ export interface ComfyUISettings extends BackendConn {
  */
 export type NaiModel =
   | 'nai-diffusion-5-full'
+  | 'nai-diffusion-5-full-medium'
   | 'nai-diffusion-5-curated'
   | 'nai-diffusion-4-5-full'
   | 'nai-diffusion-4-5-curated'
@@ -131,6 +184,7 @@ export type NaiModel =
  */
 export const NAI_MODELS: { value: NaiModel; label: string }[] = [
   { value: 'nai-diffusion-5-full', label: 'NAI 5 Full(最新,无过滤)' },
+  { value: 'nai-diffusion-5-full-medium', label: 'NAI 5 Full Medium(更快更省,部分参数固定)' },
   { value: 'nai-diffusion-5-curated', label: 'NAI 5 Curated(有内容过滤)' },
   { value: 'nai-diffusion-4-5-full', label: 'NAI 4.5 Full(无过滤)' },
   { value: 'nai-diffusion-4-5-curated', label: 'NAI 4.5 Curated(有内容过滤)' },
@@ -163,10 +217,10 @@ export interface NaiVibe {
   hasImage: boolean;
   /** 编码内容指纹，用于无需读取正文的迁移去重。 */
   fingerprint: string;
-  /** 参考强度 0–1。 */
+  /** 参考强度 0–1(挂在 vibe 上,全部方案共用)。 */
   strength: number;
-  /** 生成时是否叠加此 vibe。 */
-  enabled: boolean;
+  // 「启用与否」不在这里:哪几张叠加由方案的 vibeIds 决定(见 NaiPlan)。
+  // 老数据的 enabled 键只在迁移时读一次,折进默认方案。
   /**
    * 所属分组名(空串 = 未分组)。
    *
@@ -181,18 +235,15 @@ export interface NaiVibe {
 }
 
 /**
- * 一条具名画风配方:画师串 + 可选绑定的正面质量词/负面提示词。
- * 下拉切换时三者一起生效——一套配方即用户的一套完整画风搭配。
+ * 一条具名画师串。多个出图方案可共用一条(方案的 artistId 引用它),改一处全部生效。
  *
  * 为什么不按模型分表:官方推荐词是**模型的属性**,切模型必须跟着换
- * (见 nai.ts 的 QUALITY_TAGS / DEFAULT_UNDESIRED_CONTENT);配方是**用户自己的搭配**,
+ * (见 nai.ts 的 QUALITY_TAGS / DEFAULT_UNDESIRED_CONTENT);画师串是**用户自己的搭配**,
  * 跨模型复用才是常态。故做成可增删的库,而非 Record<model, …>。
  *
- * 绑定字段的回落链(与渠道级「留空 = 跟随官方」同口径,逐级往下):
- *   配方绑定值 → 渠道级覆盖值(qualityTags / undesiredContent)→ 内置默认(当前 = 模型官方词)。
- * 空串 = 跟随下一级;解析汇聚在 nai.ts 的 naiQualityTags / naiUndesiredContent,
- * 以后内置默认要换成插件自己的精选词,只改 naiDefaultQualityTags / naiDefaultUndesired,
- * 链结构与存储口径都不变。老数据没有这两个字段,normalize 补空串即零变化。
+ * quality / negative 是「自带词」:从智绘姬导入的预设、或方案化之前绑在画师串上的正/负面词。
+ * **出图不读它们**——正/负面词只认方案里那一份(方案值 → 模型官方词,只此一级回落);
+ * 早先「画师串绑定 → 渠道级 → 官方」三级覆盖没人看得懂。数据留着,方案编辑里可一键套用。
  */
 export interface NaiArtistPreset {
   id: string;
@@ -200,9 +251,9 @@ export interface NaiArtistPreset {
   name: string;
   /** 画师/画风 tag 串,拼在正向提示词最前面;留空的条目在拼装时等同于没选。 */
   prompt: string;
-  /** 绑定的正面质量词;空串 = 跟随渠道级 qualityTags。 */
+  /** 自带的正面质量词(不参与出图,见上);空串 = 没有。 */
   quality: string;
-  /** 绑定的负面提示词;空串 = 跟随渠道级 undesiredContent。 */
+  /** 自带的负面提示词(不参与出图,见上);空串 = 没有。 */
   negative: string;
   /**
    * 预览图路径(/api/images/upload 落在 user/images/柏宝绘_画师串/ 的相对路径)。
@@ -224,11 +275,12 @@ export function isOfficialNaiEndpoint(id: string): boolean {
 }
 
 /**
- * 一条 NAI 接入点:只有地址与密钥。
+ * 一条 NAI 接入点:地址、密钥与该站的同时出图数。方案引用它(endpointId),多个方案可共用一个站。
  *
- * 为什么**只**把 url/key 拆成多条、模型/采样器/尺寸一概留在渠道级:公益站之间换的是
- * 「从哪儿发、用谁的额度」,协议与参数完全一致。参数若跟着接入点走,换个站就得把
- * 步数/画师串/vibe 重配一遍,而用户要的恰恰是「同一套设置换个出口」。
+ * 为什么出图参数一概归方案、接入点只管「站」的事:公益站之间换的是「从哪儿发、用谁的额度」,
+ * 协议与参数完全一致。参数若跟着接入点走,换个站就得把步数/画师串/vibe 重配一遍,
+ * 而用户要的恰恰是「同一套设置换个出口」——改方案里的接入点一项即可。
+ * 并发例外地挂在这里:它是站/账号的属性(各站额度不同),不是画风的属性。
  */
 export interface NaiEndpoint {
   id: string;
@@ -238,29 +290,43 @@ export interface NaiEndpoint {
   url: string;
   /** 该站的 API Key(公益站各有各的 key,故随条目走而非渠道级共用一份)。 */
   key: string;
+  /**
+   * 同时出图数(1–4,默认 1)。NAI 的 generate-image 是阻塞式请求、服务端不排队,
+   * 并发压过去容易吃 429,故由客户端闸门限流(floor/genQueue.ts,每个接入点一把)。
+   * 不进方案:按方案各设一个数会让「切方案」顺手改了同一个站的限流。
+   * ComfyUI 无此设置:它有服务端队列,一次性全发即可。
+   */
+  concurrency: number;
 }
 
-/** NAI 连接与出图参数。接入点(地址+密钥)可存多条,见 endpoints。 */
-export interface NaiSettings extends BackendConn {
-  /**
-   * 接入点列表。**不变式:恒非空,且必含内置官方那条**(normalize 缺则补回列表首位)。
-   * 官方条不可删,故 UI 不必处理「删空了怎么办」——与 ComfyUI 工作流库的恒非空同构,
-   * 与画师串库的「允许为空」相反:没有地址就出不了图,它是必需品。
-   */
-  endpoints: NaiEndpoint[];
-  /** 当前使用的接入点 id;悬空时由 normalize 回落到第一条(地址是必需品,不能落空)。 */
-  activeEndpointId: string;
-  /**
-   * 【存量字段,已不参与出图】老版本的单一渠道密钥。
-   *
-   * 出图一律走 effectiveNai()(取 endpoints 里当前那条),这两个键(key 与继承自
-   * BackendConn 的 url)留着**只为回滚**:装回旧版本时配置还在。迁移是纯加法、不清空
-   * ——与 negativePrompt 并框那次刻意不同:那边是「同一个框换了位置」,留着会让人以为
-   * 两份都生效;这里 UI 上压根不再显示它们,不存在误解。
-   */
-  key: string;
+/**
+ * 一套 NAI 出图方案:「从哪个站发、用什么模型、什么画风、怎么采样」打包在一起,切过去全套生效。
+ *
+ * 为什么画风(画师串 / 质量词 / 负面词 / vibe)跟方案走:换风格时它们本来就是一起换的。
+ * 方案化之前它们散在渠道级与画师串绑定两层,换一次风格要改好几处,覆盖关系也没人看得懂;
+ * 现在正/负面词只剩一级回落:方案里的值 → 模型官方词(空串 = 跟随官方)。
+ *
+ * 接入点、画师串、vibe 是**引用**:三个库全局共享,多个方案共用一个站、一条画师串、
+ * 一张 vibe,改一处全部生效。vibe 强度挂在 vibe 上(全方案共用),方案只记「叠加哪几张」。
+ * 同时出图数不进方案:限流是接入点/账号级的事(见 NaiEndpoint.concurrency)。
+ */
+export interface NaiPlan extends SizePair {
+  id: string;
+  /** 显示名(列表与切换用;允许重名,以 id 为键)。 */
+  name: string;
+  /** 引用的接入点 id;悬空时回落第一条(地址是必需品,不能落空)。 */
+  endpointId: string;
   model: NaiModel;
-  /** 负面提示词覆盖值;留空 = 按模型取官方负面词(见 nai.ts naiDefaultUndesired)。 */
+  /**
+   * 引用的画师串 id。**空串 = 不使用画师串**,是有意义的存储值。
+   * 合法值域:{''} ∪ 用户库 id ∪ 内置库 id(bi_*);其余一律由 normalizeNai 清成空串——
+   * 刻意**不**像 endpointId 那样回落第一条:那会给用户静默套上一套
+   * 他没选过的画风,每张图都变样却查不出原因。
+   */
+  artistId: string;
+  /** 正面质量词;留空 = 按模型取官方质量词(见 nai.ts naiDefaultQualityTags)。 */
+  qualityTags: string;
+  /** 负面提示词;留空 = 按模型取官方负面词(见 nai.ts naiDefaultUndesired)。 */
   undesiredContent: string;
   sampler: string;
   steps: number;
@@ -277,39 +343,80 @@ export interface NaiSettings extends BackendConn {
   /** 参考强度归一化:多个 vibe 强度总和超过 1 时按比例压回 1。 */
   normalizeRefStrength: boolean;
   /**
-   * 同时出图数(1–4,默认 1)。NAI 的 generate-image 是阻塞式请求、服务端不排队,
-   * 并发压过去容易吃 429,故由客户端闸门限流(floor/genQueue.ts)。
-   * ComfyUI 无此设置:它有服务端队列,一次性全发即可。
+   * 本方案叠加的 vibe(库内 id)。模型不支持 vibe(当前 = NAI 5)时**原样保留**、出图整批跳过:
+   * 切回 4.5,或日后官方给 V5 开放 vibe,勾过的还在。「支不支持」只认 nai.ts 的
+   * naiSupportsVibes 一处——V5 开放那天改它一行,面板与出图一起放开。
+   * 指向已删 vibe 的 id 由 normalize 与删除动作清掉。
    */
-  concurrency: number;
-  /** Vibe 库索引；正文存在 ST user/files，设置中不存大 Base64。 */
-  vibes: NaiVibe[];
+  vibeIds: string[];
   /**
-   * 画风配方库(画师串 + 可选绑定的正/负面词)。**与 ComfyUI 工作流库相反:允许为空**——
-   * 工作流不给就没法出图,故那边有「恒非空」不变式;配方不给只是不加画风,是可选调味。
-   * 这里只存**用户自己的**配方;官方推荐的内置配方在 backends/nai.ts 的
-   * BUILTIN_NAI_ARTISTS(只读、随版本更新),不进 settings——不然默认值会冻在
-   * 每个用户的设备上,以后想调都得做指纹迁移。
-   */
-  artistPresets: NaiArtistPreset[];
-  /**
-   * 当前使用的画师串 id。**空串 = 不使用画师串**,是有意义的存储值。
-   * 合法值域:{''} ∪ 用户库 id ∪ 内置库 id(bi_*);其余一律由 normalizeNai 清成空串——
-   * 刻意**不**像 activeWorkflowId 那样回落第一条:那会给用户静默套上一套
-   * 他没选过的画风,每张图都变样却查不出原因。
-   */
-  activeArtistId: string;
-  /**
-   * 生成自然语言(仅 4.5/V5 有意义,默认开 = 改动前的行为):开 = 自动 tag 为 Base 与每个角色
-   * 写英文 nl;关 = 只写 tag。与 ComfyUI 工作流的同名开关同一口径——**只管 AI 写不写,
+   * 生成自然语言(仅 4.5/V5 有意义,默认开):开 = 自动 tag 为 Base 与每个角色
+   * 写英文 nl;关 = 只写 tag。与 ComfyUI 方案的同名开关同一口径——**只管 AI 写不写,
    * 不管发不发**:tag 里已有的 nl 照常发送(想对比就清掉 nl 或「AI 重写提示词」)。
    * 关它不影响原生多角色提示(characters[]),那是模型能力,不是写法。
    * 存在理由:4.5 的提示词预算(约 512 token,Base 与全部角色共用)比 V5 紧得多,
    * nl 是最大头,超了会被截断、画面跟着走样。
    */
   naturalLanguage: boolean;
-  /** 画幅锁(渠道级,面板上与横竖尺寸并排);语义见 size.ts 的 OrientationLock。 */
+  /** 画幅锁;语义见 size.ts 的 OrientationLock。 */
   orientationLock: OrientationLock;
+}
+
+/**
+ * NAI 渠道:三个共享库(接入点 / 画师串 / vibe)+ 出图方案库 + 同时出图数。
+ *
+ * 方案化之前的渠道级平铺字段(model、sampler、qualityTags、activeArtistId、vibe.enabled……)
+ * 只在 normalizeNai 里读一次、折成第一套方案,之后不再存。
+ */
+export interface NaiSettings {
+  /**
+   * 接入点列表。**不变式:恒非空,且必含内置官方那条**(normalize 缺则补回)。
+   * 官方条不可删,故 UI 不必处理「删空了怎么办」——与方案库的恒非空同构,
+   * 与画师串库的「允许为空」相反:没有地址就出不了图,它是必需品。
+   */
+  endpoints: NaiEndpoint[];
+  /**
+   * 画师串库。**允许为空**——画师串不给只是不加画风,是可选调味。
+   * 这里只存**用户自己的**条目;官方推荐的内置条目在 backends/nai.ts 的
+   * BUILTIN_NAI_ARTISTS(只读、随版本更新),不进 settings——不然默认值会冻在
+   * 每个用户的设备上,以后想调都得做指纹迁移。
+   */
+  artistPresets: NaiArtistPreset[];
+  /** Vibe 库索引；正文存在 ST user/files，设置中不存大 Base64。 */
+  vibes: NaiVibe[];
+  /** 出图方案库。**不变式:恒非空**(至少一条,见 normalizeNai 收尾兜底)。 */
+  plans: NaiPlan[];
+  /** 当前方案 id;悬空时由 normalize 回落到第一条。 */
+  activePlanId: string;
+}
+
+/**
+ * 一次 NAI 请求实际要用的全部参数(effectiveNai 产出)。
+ *
+ * backends/nai.ts 只认这个收窄后的形状,不认 NaiSettings / NaiPlan——后端关心的是
+ * 「这一次往哪儿发、画什么风格」,不是「用户存了几套方案」。引用都已在这里解开:
+ * 接入点给出 url/key,画师串给出快照,vibes 只含本方案叠加的那几张(库内顺序)。
+ */
+export interface NaiRunConfig extends SizePair {
+  /** 所用接入点的 id:闸门与 429 冷却按它分账(floor/genQueue.ts)。 */
+  endpointId: string;
+  url: string;
+  key: string;
+  model: NaiModel;
+  /** 本方案的画师串;未选 / 悬空 = null。 */
+  artist: NaiArtistPreset | null;
+  qualityTags: string;
+  undesiredContent: string;
+  sampler: string;
+  steps: number;
+  scale: number;
+  cfgRescale: number;
+  noiseSchedule: string;
+  seed: number;
+  varietyBoost: boolean;
+  normalizeRefStrength: boolean;
+  /** 本方案叠加的 vibe;模型不支持 vibe 时由后端整批跳过(不在这里滤,好让它提示用户)。 */
+  vibes: NaiVibe[];
 }
 
 /** 界面偏好里要跨设备同步的部分;activePage 等纯本机临时态不在此。 */
@@ -349,6 +456,11 @@ export interface UiPrefs {
    * 与出图分辨率、横竖方向无关,生成的文件一字节不变。
    */
   imageDisplaySize: ImageDisplaySize;
+  /**
+   * 楼层图片沉浸显示:开启后有图时不显示 ⋯ 菜单与翻页器,点一下图片才浮现,
+   * 点卡片外面收起;浮现时再点图片才进灯箱。关闭 = ⋯ 常驻淡显、翻页器常驻(老样子)。
+   */
+  immersiveImages: boolean;
 }
 
 /** 楼层图片显示大小。 */
@@ -1016,13 +1128,10 @@ export interface AutoTagPrompts {
   naiSpec: string;
   /** NAI 规范(4.5/V5 的 Base Prompt + 原生 Character Prompts);设置页显示为「NAI 规范」。 */
   naiV5Spec: string;
-  /** ComfyUI 后端 tag 书写规范,拼在任务提示词里;留空回落内置默认(DEFAULT_COMFY_SPEC)。
-   *  支持 {{nl}} 宏:开启「生成自然语言」时展开为自然语言规范,关闭时置空;
-   *  自定义内容不含宏时,开启开关会把自然语言规范追加在末尾(防止开关静默失效)。 */
+  /** 【已迁走,只留作迁移来源】ComfyUI 规范已搬进提示词库(comfyui.promptSets),出图不再读这里。
+   *  老用户改过的内容在首次升级时折成「我的插画提示词」(见 foldLegacyPromptSets)。 */
   comfySpec: string;
-  /** 输出前思考检查清单(ComfyUI 后端);留空回落内置默认(DEFAULT_COMFY_THINKING)。
-   *  思维链按后端各存一份:槽位块要求填的字段必须在同后端规范里有判据和词表,
-   *  共用一份会让某个后端被要求填它的规范从未教过的东西。 */
+  /** 【已迁走,只留作迁移来源】同 comfySpec。 */
   comfyThinking: string;
   /** 【已下线,无 UI 入口】NAI 4 系及以下的思考清单;回落 DEFAULT_NAI_THINKING。 */
   naiThinking: string;
@@ -1088,12 +1197,143 @@ const DEFAULT_LANDSCAPE_SIZE = '1216×832';
 
 let workflowSeq = 0;
 
-/** 新建一条空工作流预设(id 生成口径同 newChannel)。 */
-export function newComfyWorkflow(name = DEFAULT_WORKFLOW_NAME): ComfyWorkflowPreset {
+/**
+ * 漫画书写规范(MOSS-Image)。只讲「每页怎么画」:写法、summary/items 分工、分格与对白;
+ * 输出结构、position、角色档案在 autoTag/prompt.ts 的漫画协议里(不随用户改动漂移)。
+ * 口径来自 MOSS 实测笔记:自然语言句子、权重语法无效、一人一框、避开均等田字格、
+ * 对白只认 text 项、summary 不写 full color 容易出黑白稿。
+ */
+export const DEFAULT_COMFY_COMIC_SPEC = `【MOSS 漫画规范】
+本规范说明一页漫画里每个字段怎么写；JSON 结构、position 和角色建档规则见任务协议。
+
+一、写法
+- summary 与各 item 的 caption 用英文自然语言短句，不写 danbooru 逗号 tag 流。
+  ❌ 1girl, solo, sitting, sofa, smile
+  ✅ she sits on a red sofa hugging a cushion, smiling softly, medium shot
+- 权重语法 (word:1.2)、[word]、{word} 在这个模型上无效，会被当成字面括号画出来。要强调某个特征，换更具体的词（crimson red 胜过 red）。
+- caption 的顺序：动作姿态与表情 → 景别（close up / medium shot / full body / wide shot）→ 场景背景 → 光线。
+- 每条 caption 一句话。character 的 caption 写 10～25 个词（插件会在前面补上二三十词的固定外貌）；object 的 caption 15～40 个词。整页字数越多越互相稀释，格子多时每条再压短。
+
+二、summary（整页共用）
+- 只写贯穿整页的东西：画风（full color manga page, clean line art, vivid anime cel shading）、时间与光线、天气、整体氛围，以及一致性声明（the same characters throughout, consistent art style）。
+- 必须写 full color，不写容易出黑白稿。
+- 不写任何一格的具体动作，不写对白。不同格的光线、天气不一致时，以 summary 为准统一。
+
+三、items（每格的内容）
+- character：一个人一个框。同一格里有两个人就给两个相邻的 character 框，绝不把两个人写进同一条 caption——会融合成一个人或互相串脸。一格里以 1～2 人为宜，三人以上画不稳，可以拆成两格，或只画最主要的两人。
+- character 的 caption 只写这一格：他在做什么、什么表情、看向哪里、景别、当下的临时穿着、这一格的背景。
+- 镜头措辞不要暗示格里还有别人：over the shoulder、from behind someone、seen by someone 这类写法会让模型凭空补一个人，或把动作安到那个人身上。格里看得见的每个人都要有自己的 character 框。
+- object：没有人物的格（空镜、环境、关键道具特写）用 object 框，caption 写清画的是什么。
+- text：画面里要出现的字（对白、内心独白、旁白、拟声词）写进 text 键，用剧情原文的语言（中文剧情写中文）；caption 写气泡形态：speech bubble / thought bubble / jagged shout bubble / narration box / sound effect。只写在 caption 里的字不会被画出来。
+- 对白要短：一个气泡一句短话，中文 2～8 个字最稳，越长越容易写错字。长台词拆成两个气泡，或只取最关键的一句。不是每格都要有字，没话的格就不放。
+- text 框放在说话人那一格之内、靠近说话人头部的空处，不要压在脸上。
+
+四、分格与 bbox
+- 一格就是页面上的一块矩形区域：这一格的 character / object 框铺满这块区域，text 框叠在格内。
+- 格与格之间留 15～30 的空隙，页边留 10 左右。
+- 阅读顺序：从上到下，同一行从左到右。
+- 格子要有大有小：关键瞬间给大格，过渡和反应给小格。不要排成四块一样大的田字格（那是四格漫画的排法）。
+- 每个框的长宽比不超过 4:1，不切极窄的细条。
+- 每页格数随剧情节奏定，一页 3～5 格最常见；格子越多每格越小、越画不清，排不下时删减次要瞬间，不硬塞。
+- 一页的 character 框不超过 4 个。框越多越容易串人：外貌安错人、台词格画成另一个角色、动作张冠李戴。
+
+五、连贯
+- 一页讲一段连续的剧情：同一场景、同一时间段。场景或时间跳转时另起一页；只占一两句的次要场景直接略去，不为它单开一页。
+- 同一角色的临时穿着、发型状态、手持物在各格各页之间保持一致，用同一串词描述。`;
+
+/** 漫画思维链,与 DEFAULT_COMFY_COMIC_SPEC 配对。 */
+export const DEFAULT_COMFY_COMIC_THINKING = `【输出前思考清单】
+先在 <thinking> 与 </thinking> 之间按下面顺序过一遍，思考结束后再输出最终 JSON。除这一个 <thinking> 块与最终 JSON 外，不得输出任何内容，也不得开启第二个 <thinking> 块。
+全程只写结论，不写推演过程，不复述正文。每个判断一次定死，不提出候选再逐个否决，也不预写最终的 caption。
+
+A. 角色清点与建档
+   - 逐个列出目标正文里实际在场、有名有姓的角色，每人一行：命中的库中同名条目，或本次 field:"new"。只有名字实际列在【角色固定外貌库】里的才算已建档。
+   - 对照角色库检查永久外貌变化，写入 changes 并标出生效 P编号；临时状态不写。
+
+B. 服装时间线（每个在场角色一行：从 P 几起穿的是什么）
+   - 每套临时服装定一份具体的视觉指纹，全楼复用同一串词。
+
+C. 选段与分页
+   - 先列出值得画的关键瞬间（推动剧情的事件、情绪转折、最有画面感的动作），一行一个；一句带过的过渡、来回重复的对话、纯心理和说明文字不入选。
+   - 把关键瞬间按场景排进页里，每页 3～5 格，页数尽量少；一楼通常 1～2 页，超过 2 页时确认确实是场景多次切换、剧情跨度大，而不是把每段剧情都单开了一页。
+   - 写出每页画哪几个瞬间、position 填哪个 P、size 是什么。
+
+D. 逐页分镜（每页一块）
+■ 第 N 页（覆盖 P?～P?，position=P?，size=?）
+  summary：画风 + 时间光线 + 一致性声明 + full color
+  格 1（大/小，大致位置）：谁在做什么，景别，对白（若有）
+  格 2 ……
+
+E. 自查
+   - 每个人一个 character 框，没有两人共用一条 caption；caption 里没有出现角色名。
+   - 每页 character 框不超过 4 个；character 的 caption 以动作开头，没有 over the shoulder 这类暗示格里另有一人的镜头词。
+   - 库中或本次建档的角色都写了 name，且与库中名字一字不差；caption 里没有重复他的固定外貌。
+   - 对白都在 text 项的 text 键里，够短，语言与剧情一致。
+   - 不同格的框互不重叠，有间隙，长宽比不超过 4:1，不是四块一样大的田字格。
+   - pages 按剧情先后排列。`;
+
+export const BUILTIN_COMFY_ILLUST_ID = 'builtin_illust';
+export const BUILTIN_COMFY_COMIC_ID = 'builtin_comic';
+
+/**
+ * 内置提示词:不入库、只读,按 id 解析(同 BUILTIN_NAI_ARTISTS 的口径)。
+ * 不入库是为了随插件版本更新——存进设置的副本会把旧版文本永远冻住。
+ */
+export const BUILTIN_COMFY_PROMPT_SETS: readonly ComfyPromptSet[] = [
+  {
+    id: BUILTIN_COMFY_ILLUST_ID,
+    name: '插画(内置)',
+    kind: 'illustration',
+    spec: DEFAULT_COMFY_SPEC,
+    thinking: DEFAULT_COMFY_THINKING,
+  },
+  {
+    id: BUILTIN_COMFY_COMIC_ID,
+    name: '漫画(内置)',
+    kind: 'comic',
+    spec: DEFAULT_COMFY_COMIC_SPEC,
+    thinking: DEFAULT_COMFY_COMIC_THINKING,
+  },
+];
+
+export function isBuiltinComfyPromptSet(id: string): boolean {
+  return BUILTIN_COMFY_PROMPT_SETS.some(p => p.id === id);
+}
+
+/** 某类型的内置提示词(两类各恰好一套)。 */
+export function builtinComfyPromptSet(kind: ComfyKind): ComfyPromptSet {
+  return BUILTIN_COMFY_PROMPT_SETS.find(p => p.kind === kind) ?? BUILTIN_COMFY_PROMPT_SETS[0];
+}
+
+const DEFAULT_COMFY_URL = 'http://127.0.0.1:8188';
+const DEFAULT_SERVER_NAME = '本机';
+
+let serverSeq = 0;
+
+/** 新建一台服务器(srv_ 前缀不与 wf_/ps_ 撞)。 */
+export function newComfyServer(name = DEFAULT_SERVER_NAME, url = ''): ComfyServer {
+  serverSeq += 1;
+  return { id: `srv_${Date.now()}_${serverSeq}`, name, url };
+}
+
+let promptSetSeq = 0;
+
+/** 新建一套提示词,内容预填同类型内置文本——空白起步没人会写,照着改才是常态。 */
+export function newComfyPromptSet(kind: ComfyKind, name: string): ComfyPromptSet {
+  promptSetSeq += 1;
+  const builtin = builtinComfyPromptSet(kind);
+  return { id: `ps_${Date.now()}_${promptSetSeq}`, name, kind, spec: builtin.spec, thinking: builtin.thinking };
+}
+
+/** 新建一条空方案(id 生成口径同 newChannel)。serverId 缺省为空,解析时回落第一台。 */
+export function newComfyWorkflow(name = DEFAULT_WORKFLOW_NAME, serverId = ''): ComfyWorkflowPreset {
   workflowSeq += 1;
   return {
     id: `wf_${Date.now()}_${workflowSeq}`,
     name,
+    kind: 'illustration',
+    serverId,
+    promptSetId: BUILTIN_COMFY_ILLUST_ID,
     mode: 'custom',
     workflow: '',
     simple: simpleDefaults(),
@@ -1105,14 +1345,17 @@ export function newComfyWorkflow(name = DEFAULT_WORKFLOW_NAME): ComfyWorkflowPre
 }
 
 /**
- * 新装即带一条空预设,而不是空库。
- * 只用一套工作流的人不该被迫先「新建」才有地方粘 JSON——手感与改造前的单文本框完全一致,
- * 「库」这个概念对他们保持隐形。也顺带让 workflows 恒非空的不变式从出生起就成立。
+ * 新装即带一台本机服务器 + 一条空方案,而不是空库。
+ * 只用一套工作流的人不该被迫先「新建」才有地方粘 JSON——「库」这个概念对他们保持隐形。
+ * 也顺带让 servers / workflows 恒非空的不变式从出生起就成立。
  */
 function comfyDefaults(): ComfyUISettings {
-  const preset = newComfyWorkflow();
+  const server = newComfyServer(DEFAULT_SERVER_NAME, DEFAULT_COMFY_URL);
+  const preset = newComfyWorkflow(DEFAULT_WORKFLOW_NAME, server.id);
   return {
-    ...backendDefaults('http://127.0.0.1:8188'),
+    ...backendDefaults(DEFAULT_COMFY_URL),
+    servers: [server],
+    promptSets: [],
     workflows: [preset],
     activeWorkflowId: preset.id,
   };
@@ -1129,9 +1372,13 @@ export function newNaiArtist(name = DEFAULT_ARTIST_NAME): NaiArtistPreset {
   return { id: `art_${Date.now()}_${artistSeq}`, name, prompt: '', quality: '', negative: '' };
 }
 
+/** 接入点同时出图数的缺省与上下限。 */
+const NAI_CONCURRENCY_DEFAULT = 1;
+export const NAI_CONCURRENCY_MAX = 4;
+
 /** 内置官方接入点。key 随用户填(内置的只是地址与名字,不是别人的密钥)。 */
-function officialNaiEndpoint(key = ''): NaiEndpoint {
-  return { id: OFFICIAL_NAI_ENDPOINT_ID, name: 'NovelAI 官方', url: NAI_OFFICIAL_URL, key };
+function officialNaiEndpoint(key = '', concurrency = NAI_CONCURRENCY_DEFAULT): NaiEndpoint {
+  return { id: OFFICIAL_NAI_ENDPOINT_ID, name: 'NovelAI 官方', url: NAI_OFFICIAL_URL, key, concurrency };
 }
 
 let naiEpSeq = 0;
@@ -1139,18 +1386,27 @@ let naiEpSeq = 0;
 /** 新建一条空接入点(id 前缀 nep_,不与 art_/wf_/ch_ 的 id 空间相撞)。 */
 export function newNaiEndpoint(name = '新接入点'): NaiEndpoint {
   naiEpSeq += 1;
-  return { id: `nep_${Date.now()}_${naiEpSeq}`, name, url: '', key: '' };
+  return { id: `nep_${Date.now()}_${naiEpSeq}`, name, url: '', key: '', concurrency: NAI_CONCURRENCY_DEFAULT };
 }
 
-function naiDefaults(): NaiSettings {
+/** 新方案的默认名(迁移与建库都用它)。 */
+const DEFAULT_NAI_PLAN_NAME = '默认方案';
+
+let naiPlanSeq = 0;
+
+/**
+ * 新建一套方案:官方接入点 + V5 + 不用画师串 + 正/负面词跟随官方 + 官方前端的采样默认。
+ * 只是出厂值;面板「新建」会在此基础上带上当前方案的接入点(见 NaiPanel)。
+ */
+export function newNaiPlan(name = DEFAULT_NAI_PLAN_NAME): NaiPlan {
+  naiPlanSeq += 1;
   return {
-    ...backendDefaults(NAI_OFFICIAL_URL),
-    resolution: '832×1216',
-    // 新装即带内置官方那条并选中它:地址是必需品,空列表会让「测试连接」无处可点
-    endpoints: [officialNaiEndpoint()],
-    activeEndpointId: OFFICIAL_NAI_ENDPOINT_ID,
-    key: '',
+    id: `nplan_${Date.now()}_${naiPlanSeq}`,
+    name,
+    endpointId: OFFICIAL_NAI_ENDPOINT_ID,
     model: 'nai-diffusion-5-full',
+    artistId: '',
+    qualityTags: '',
     undesiredContent: '',
     sampler: 'k_euler',
     steps: 28,
@@ -1160,17 +1416,27 @@ function naiDefaults(): NaiSettings {
     seed: 0,
     varietyBoost: true,
     normalizeRefStrength: true,
-    concurrency: 1,
-    vibes: [],
-    // 用户库为空:库里只有用户自己建的配方,官方推荐的那条是内置只读条目
-    // (BUILTIN_NAI_ARTISTS),不进 settings。
-    artistPresets: [],
-    // 新装用户默认启用内置「默认画师串」——默认值只在这条路径生效:
-    // hydrate 时旧用户的 stored.nai.activeArtistId 已存在(哪怕空串),会被
-    // normalizeNai 原样保留,不受影响。
-    activeArtistId: BUILTIN_NAI_ARTISTS[0]?.id ?? '',
+    vibeIds: [],
     naturalLanguage: true,
     orientationLock: 'auto',
+    portraitSize: DEFAULT_PORTRAIT_SIZE,
+    landscapeSize: DEFAULT_LANDSCAPE_SIZE,
+  };
+}
+
+function naiDefaults(): NaiSettings {
+  // 新装用户默认启用内置「默认画师串」——默认值只在这条路径生效:老用户的存量配置
+  // 走 normalizeNai 的迁移,没存过 activeArtistId 的就是「不使用」,不吃这个默认。
+  const plan = { ...newNaiPlan(), artistId: BUILTIN_NAI_ARTISTS[0]?.id ?? '' };
+  return {
+    // 新装即带内置官方那条:地址是必需品,空列表会让「测试连接」无处可点
+    endpoints: [officialNaiEndpoint()],
+    // 用户库为空:库里只有用户自己建的条目,官方推荐的那条是内置只读条目
+    // (BUILTIN_NAI_ARTISTS),不进 settings。
+    artistPresets: [],
+    vibes: [],
+    plans: [plan],
+    activePlanId: plan.id,
   };
 }
 
@@ -1190,6 +1456,7 @@ function defaults(): ImageSettings {
       cardTheme: 'st',
       autoCollapseImages: false,
       imageDisplaySize: 'medium',
+      immersiveImages: false,
     },
     // 出图后端默认 ComfyUI(当前唯一实现的出图后端);webui 渠道已隐藏,不再作为可选值
     defaultBackend: 'comfyui',
@@ -1298,19 +1565,47 @@ export const ORIENTATION_LOCKS: { value: OrientationLock; label: string }[] = [
  * 同样刻意只读不写(在 computed 里被调用)。
  */
 export function activeOrientationLock(): OrientationLock {
-  if (settings.defaultBackend === 'nai') return settings.nai.orientationLock;
+  if (settings.defaultBackend === 'nai') return activeNaiPlan().orientationLock;
   if (settings.defaultBackend === 'comfyui') return activeComfyPreset().orientationLock;
   return 'auto';
 }
 
 /**
- * 出图/测试连接用的 conn:渠道级 url + 当前预设的工作流与横竖尺寸。
+ * 方案引用的服务器;悬空时回落第一台(normalize 已修过,这里兜「UI 运行中改坏」的时序)。
+ * 同样刻意只读不写(在 computed 里被调用)。
+ */
+export function comfyServerFor(plan: ComfyWorkflowPreset): ComfyServer {
+  const list = settings.comfyui.servers;
+  return list.find(s => s.id === plan.serverId) ?? list[0] ?? { id: '', name: '', url: '' };
+}
+
+/**
+ * 方案引用的提示词:用户库 ∪ 内置,且类型必须与方案一致;否则回落同类型内置。
+ * 类型校验放在解析处而不只在 normalize:用户运行中切了方案类型,旧引用当场就不算数。
+ */
+export function comfyPromptSetFor(plan: ComfyWorkflowPreset): ComfyPromptSet {
+  const found =
+    settings.comfyui.promptSets.find(p => p.id === plan.promptSetId) ??
+    BUILTIN_COMFY_PROMPT_SETS.find(p => p.id === plan.promptSetId);
+  return found && found.kind === plan.kind ? found : builtinComfyPromptSet(plan.kind);
+}
+
+/** 当前方案的服务器 / 提示词。 */
+export function activeComfyServer(): ComfyServer {
+  return comfyServerFor(activeComfyPreset());
+}
+export function activeComfyPromptSet(): ComfyPromptSet {
+  return comfyPromptSetFor(activeComfyPreset());
+}
+
+/**
+ * 出图/测试连接用的 conn:当前方案引用的服务器 url + 方案的工作流与横竖尺寸。
  * backends/comfyui.ts 只吃这个形状,不关心库里还有几套。
  */
 export function effectiveComfyConn(): ComfyRunConn {
   const preset = activeComfyPreset();
   return {
-    url: settings.comfyui.url,
+    url: comfyServerFor(preset).url,
     workflow: preset.workflow,
     mode: preset.mode,
     simple: preset.simple,
@@ -1320,20 +1615,25 @@ export function effectiveComfyConn(): ComfyRunConn {
 }
 
 /**
- * 当前选中的画师串;**未选 / 指向已删条目时返回 null(= 不使用)**。
- *
- * 与 activeComfyPreset 的「永不 null」刻意相反:工作流不给就出不了图,所以那边一路兜底;
- * 画师串不给只是不加画风,兜底成 [0] 反而会把「不使用」悄悄变成「用库里第一条」,
- * 是画面级的静默改动。
- * 同样刻意只读不写:本函数在 computed 里被调用,写 settings 会引起递归求值。
- *
- * 注意拼装侧不走这里,走 backends/nai.ts 的 naiArtistPrompt(纯函数、吃 NaiSettings)——
- * settings.ts 已 import 本模块的 naiDefaultUndesired,反向加值依赖会成运行时环。
+ * 当前 NAI 方案。不返回 null(同 activeComfyPreset):plans 恒非空、id 悬空也在 normalize
+ * 阶段回落过,这里再兜一层是为了「UI 运行中把列表改坏」这种时序,让调用方不必到处判空。
+ * 刻意只读不写:本函数在 computed 里被调用,写 settings 会引起递归求值。
  */
-export function activeNaiArtist(): NaiArtistPreset | null {
-  const id = settings.nai.activeArtistId;
+export function activeNaiPlan(): NaiPlan {
+  const list = settings.nai.plans;
+  return list.find(p => p.id === settings.nai.activePlanId) ?? list[0] ?? newNaiPlan();
+}
+
+/**
+ * 方案引用的画师串;**未选 / 指向已删条目时返回 null(= 不使用)**。
+ *
+ * 与 naiEndpointFor 的「永不 null」刻意相反:地址不给就出不了图,所以那边一路兜底;
+ * 画师串不给只是不加画风,兜底成 [0] 反而会把「不使用」悄悄变成「用库里第一条」,
+ * 是画面级的静默改动。查找域 = 用户库 ∪ 内置库(id 前缀不同,实际不可能撞)。
+ */
+export function naiArtistFor(plan: NaiPlan): NaiArtistPreset | null {
+  const id = plan.artistId;
   if (!id) return null;
-  // 查找域 = 用户库 ∪ 内置库(与 nai.ts 的 naiActivePreset 同口径)
   return (
     settings.nai.artistPresets.find(a => a.id === id) ??
     BUILTIN_NAI_ARTISTS.find(a => a.id === id) ??
@@ -1341,30 +1641,50 @@ export function activeNaiArtist(): NaiArtistPreset | null {
   );
 }
 
-/**
- * 当前使用的接入点。
- *
- * 不返回 null(同 activeComfyPreset,与 activeNaiArtist 的「可为 null」相反):
- * endpoints 恒非空、id 悬空也在 normalize 阶段回落过,这里再兜一层是为了
- * 「UI 运行中把列表改坏」这种时序,让调用方不必到处判空。
- * 刻意只读不写:本函数在 computed 里被调用,写 settings 会引起递归求值。
- */
-export function activeNaiEndpoint(): NaiEndpoint {
+/** 方案引用的接入点;悬空时回落第一条(normalize 已修过,这里兜运行中改坏的时序)。 */
+export function naiEndpointFor(plan: NaiPlan): NaiEndpoint {
   const list = settings.nai.endpoints;
-  return list.find(e => e.id === settings.nai.activeEndpointId) ?? list[0] ?? officialNaiEndpoint();
+  return list.find(e => e.id === plan.endpointId) ?? list[0] ?? officialNaiEndpoint();
+}
+
+/** 当前方案的画师串 / 接入点。 */
+export function activeNaiArtist(): NaiArtistPreset | null {
+  return naiArtistFor(activeNaiPlan());
+}
+export function activeNaiEndpoint(): NaiEndpoint {
+  return naiEndpointFor(activeNaiPlan());
 }
 
 /**
- * 出图/测试连接/vibe 编码用的 NaiSettings:渠道级全部参数 + 当前接入点的 url/key。
+ * 出图/测试连接/vibe 编码用的 NaiRunConfig:方案参数 + 解开的引用(接入点 url/key、
+ * 画师串快照、本方案叠加的 vibe)。缺省取当前方案。
  *
  * **后端层一律吃这个,不吃 settings.nai**(同 effectiveComfyConn 的理由):
- * backends/nai.ts 关心的是「这一次往哪儿发、用谁的 key」,而不是「用户存了几个站」。
- * 漏走一处的症状很隐蔽——那处会用上存量的 nai.url/nai.key(老用户还是通的),
- * 只有切到第二个接入点的人才会发现某个功能还在往老地址发。
+ * backends/nai.ts 关心的是「这一次往哪儿发、画什么」,而不是「用户存了几套方案」。
  */
-export function effectiveNai(): NaiSettings {
-  const ep = activeNaiEndpoint();
-  return { ...settings.nai, url: ep.url, key: ep.key };
+export function effectiveNai(plan: NaiPlan = activeNaiPlan()): NaiRunConfig {
+  const ep = naiEndpointFor(plan);
+  const picked = new Set(plan.vibeIds);
+  return {
+    endpointId: ep.id,
+    url: ep.url,
+    key: ep.key,
+    model: plan.model,
+    artist: naiArtistFor(plan),
+    qualityTags: plan.qualityTags,
+    undesiredContent: plan.undesiredContent,
+    sampler: plan.sampler,
+    steps: plan.steps,
+    scale: plan.scale,
+    cfgRescale: plan.cfgRescale,
+    noiseSchedule: plan.noiseSchedule,
+    seed: plan.seed,
+    varietyBoost: plan.varietyBoost,
+    normalizeRefStrength: plan.normalizeRefStrength,
+    vibes: settings.nai.vibes.filter(v => picked.has(v.id)),
+    portraitSize: plan.portraitSize,
+    landscapeSize: plan.landscapeSize,
+  };
 }
 
 /**
@@ -1372,7 +1692,7 @@ export function effectiveNai(): NaiSettings {
  * 升级后按宽高关系把它归进对应那一格,另一格用默认值——
  * 用户之前特意调过的尺寸不会被默认值悄悄顶掉。
  */
-function migrateSize(o: Partial<BackendConn>, def: BackendConn, want: 'portrait' | 'landscape'): string {
+function migrateSize(o: Partial<BackendConn>, def: SizePair, want: 'portrait' | 'landscape'): string {
   const key = want === 'landscape' ? 'landscapeSize' : 'portraitSize';
   const current = o[key];
   if (typeof current === 'string' && current.trim()) return current;
@@ -1404,6 +1724,10 @@ function normalizeWorkflowPreset(raw: unknown, seq: number): ComfyWorkflowPreset
   return {
     id: typeof o.id === 'string' && o.id ? o.id : `wf_${Date.now()}_${seq}`,
     name: typeof o.name === 'string' && o.name ? o.name : DEFAULT_WORKFLOW_NAME,
+    // 存量方案没有 kind → 插画(漫画是新增类型);引用的有效性在 normalizeComfyUI 收尾统一修
+    kind: o.kind === 'comic' ? 'comic' : 'illustration',
+    serverId: typeof o.serverId === 'string' ? o.serverId : '',
+    promptSetId: typeof o.promptSetId === 'string' ? o.promptSetId : '',
     // 存量预设没有 mode 字段 → custom(它们都是粘 JSON 的);simple 逐字段清洗出全量默认值
     mode: o.mode === 'simple' ? 'simple' : 'custom',
     workflow: typeof o.workflow === 'string' ? o.workflow : '',
@@ -1436,9 +1760,60 @@ function foldLegacyWorkflow(o: Partial<ComfyUISettings>, conn: BackendConn): Com
   };
 }
 
-function normalizeComfyUI(raw: unknown, def: ComfyUISettings): ComfyUISettings {
+function normalizeServer(raw: unknown, seq: number): ComfyServer {
+  const o = (raw ?? {}) as Partial<ComfyServer>;
+  return {
+    id: typeof o.id === 'string' && o.id ? o.id : `srv_${Date.now()}_${seq}`,
+    name: typeof o.name === 'string' ? o.name : '',
+    url: typeof o.url === 'string' ? o.url : '',
+  };
+}
+
+function normalizePromptSet(raw: unknown, seq: number): ComfyPromptSet {
+  const o = (raw ?? {}) as Partial<ComfyPromptSet>;
+  // 占了内置 id 的条目换个 id:否则解析时用户库先命中,内置那份就被它顶掉了
+  const validId = typeof o.id === 'string' && o.id && !isBuiltinComfyPromptSet(o.id);
+  return {
+    id: validId ? (o.id as string) : `ps_${Date.now()}_${seq}`,
+    name: typeof o.name === 'string' ? o.name : '',
+    kind: o.kind === 'comic' ? 'comic' : 'illustration',
+    spec: typeof o.spec === 'string' ? o.spec : '',
+    thinking: typeof o.thinking === 'string' ? o.thinking : '',
+  };
+}
+
+/**
+ * 存量迁移:ComfyUI 规范/思维链原是设置页里的全局两格(autoTag.prompts.comfySpec/comfyThinking)。
+ * 改过任一格 → 折成一套「我的插画提示词」并让全部方案引用它;没改过的那一格留空串
+ * (= 回落内置、随版本更新,与面板保存口径一致;编辑弹窗打开时展开成内置全文,所见即生效)。
+ * 两格都没改过 → 不建,方案直接引用内置——用户继续享受内置文本随版本更新。
+ */
+function foldLegacyPromptSets(legacy: { spec: unknown; thinking: unknown }): ComfyPromptSet[] {
+  const spec = typeof legacy.spec === 'string' ? legacy.spec : '';
+  const thinking = typeof legacy.thinking === 'string' ? legacy.thinking : '';
+  if (!spec.trim() && !thinking.trim()) return [];
+  const set = newComfyPromptSet('illustration', '我的插画提示词');
+  return [{ ...set, spec: spec.trim() ? spec : '', thinking: thinking.trim() ? thinking : '' }];
+}
+
+function normalizeComfyUI(
+  raw: unknown,
+  def: ComfyUISettings,
+  legacyPrompts: { spec: unknown; thinking: unknown } = { spec: '', thinking: '' },
+): ComfyUISettings {
   const conn = normalizeBackend(raw, def);
   const o = (raw ?? {}) as Partial<ComfyUISettings>;
+
+  // 服务器库:老配置只有渠道级 url → 折成第一台。不变式兜底:脏数据清空了也补一台
+  const servers = Array.isArray(o.servers) ? o.servers.map(normalizeServer) : [];
+  if (!servers.length) servers.push(newComfyServer(DEFAULT_SERVER_NAME, conn.url.trim() || DEFAULT_COMFY_URL));
+
+  // 提示词库:字段缺失 = 还没迁移过(空数组是合法状态,不能当缺失再迁一次)
+  const migratingPrompts = !Array.isArray(o.promptSets);
+  const promptSets = migratingPrompts
+    ? foldLegacyPromptSets(legacyPrompts)
+    : (o.promptSets as unknown[]).map(normalizePromptSet);
+  const legacySet = migratingPrompts ? promptSets[0] : undefined;
 
   const workflows = Array.isArray(o.workflows)
     ? o.workflows.map(normalizeWorkflowPreset)
@@ -1446,13 +1821,23 @@ function normalizeComfyUI(raw: unknown, def: ComfyUISettings): ComfyUISettings {
   // 不变式兜底:脏数据把库清空了也要留一条,否则面板与出图门槛全得处理 undefined
   if (!workflows.length) workflows.push(newComfyWorkflow());
 
+  // 引用修复:悬空的服务器回落第一台;提示词悬空或类型不符回落同类型内置
+  for (const plan of workflows) {
+    if (!servers.some(s => s.id === plan.serverId)) plan.serverId = servers[0].id;
+    if (legacySet) plan.promptSetId = legacySet.id;
+    const ref =
+      promptSets.find(p => p.id === plan.promptSetId) ??
+      BUILTIN_COMFY_PROMPT_SETS.find(p => p.id === plan.promptSetId);
+    if (!ref || ref.kind !== plan.kind) plan.promptSetId = builtinComfyPromptSet(plan.kind).id;
+  }
+
   // 指向已删条目(或压根没存)时回落第一条:悬空 id 会让面板显示空白、出图取不到工作流
   const activeWorkflowId =
     typeof o.activeWorkflowId === 'string' && workflows.some(w => w.id === o.activeWorkflowId)
       ? o.activeWorkflowId
       : workflows[0].id;
 
-  return { ...conn, workflows, activeWorkflowId };
+  return { ...conn, servers, promptSets, workflows, activeWorkflowId };
 }
 
 const NAI_MODEL_VALUES = new Set<string>(NAI_MODELS.map(m => m.value));
@@ -1509,7 +1894,6 @@ function normalizeVibe(raw: unknown, seq: number): NaiVibe | null {
     fingerprint:
       typeof o.fingerprint === 'string' && o.fingerprint ? o.fingerprint : vibeFingerprint(encodings),
     strength: clampVibeStrength(o.strength),
-    enabled: typeof o.enabled === 'boolean' ? o.enabled : false,
     group: typeof o.group === 'string' ? o.group.trim() : '',
   };
 }
@@ -1534,16 +1918,19 @@ async function migrateLegacyVibesInPlace(
     if (!normalized) continue;
     try {
       const paths = await saveVibeFiles(data, null, normalized.id);
-      vibes[index] = vibeMetaFromData(
+      const meta = vibeMetaFromData(
         normalized.id,
         normalized.name,
         paths.dataPath,
         paths.thumbnailPath,
         data,
         normalized.strength,
-        normalized.enabled,
         normalized.group,
       );
+      // 原样带上老 enabled 键:本函数跑在 normalizeNai 之前,方案化迁移还要靠它
+      // 折出默认方案的 vibeIds;丢了它,升级后用户启用的 vibe 会全部静默失效。
+      const legacyEnabled = (raw as { enabled?: unknown }).enabled;
+      vibes[index] = legacyEnabled === undefined ? meta : { ...meta, enabled: legacyEnabled };
       migrated++;
       console.info(`[柏宝绘] 旧版 Vibe 自动搬迁 ${migrated}/${total}`);
     } catch (error) {
@@ -1560,14 +1947,30 @@ async function migrateLegacyVibesInPlace(
 }
 
 /**
+ * 存进 settings.json 的 NAI 原始对象可能长的样子:当前形状 ∪ 方案化之前的渠道级平铺字段。
+ * 平铺字段只在 normalizeNai 里读一次(折成第一套方案),之后不再写回。
+ */
+type LegacyNaiRaw = Partial<
+  NaiSettings &
+    Omit<NaiPlan, 'id' | 'name'> &
+    BackendConn & {
+      key: string;
+      activeArtistId: string;
+      activeEndpointId: string;
+      /** 老的全局同时出图数;现挂在各接入点上(见 migrateNaiEndpoints)。 */
+      concurrency: number;
+    }
+>;
+
+/**
  * 存量迁移:早先负面词分「附加负面(negativePrompt)」+ 官方基线两段拼,现在合成
  * undesiredContent 一个框。老配置里的附加负面若不搬,升级后会静默失效(用户排除的
  * 内容悄悄回来了),故按当年的拼接顺序折进去:附加在前 + 该模型官方词在后。
  */
-function foldLegacyNegative(o: Partial<NaiSettings>, model: NaiModel, def: string): string {
+function foldLegacyNegative(o: LegacyNaiRaw, model: NaiModel): string {
   if (typeof o.undesiredContent === 'string') return o.undesiredContent;
   const legacy = typeof o.negativePrompt === 'string' ? o.negativePrompt.trim() : '';
-  if (!legacy) return def;
+  if (!legacy) return '';
   return [legacy, naiDefaultUndesired(model)].filter(Boolean).join(', ');
 }
 
@@ -1590,18 +1993,27 @@ function normalizeArtistPreset(raw: unknown, seq: number): NaiArtistPreset {
 /**
  * 单条接入点清洗。官方条的 name/url 一律纠回内置值:UI 已禁掉改名与改址,
  * 还能出现别的值只有手改 settings.json 一途;纠回去也顺带让内置名随插件版本更新。
- * key 例外 —— 那是用户自己的密钥,内置的只是地址与名字。
+ * key 例外 —— 那是用户自己的密钥,内置的只是地址与名字;并发同理,是用户按自己额度调的。
+ * 并发缺失(老条目)时取 fallback —— 即老的全局同时出图数,升级后限流零变化。
  */
-function normalizeNaiEndpoint(raw: unknown, seq: number): NaiEndpoint {
+function normalizeNaiEndpoint(raw: unknown, seq: number, fallbackConcurrency: number): NaiEndpoint {
   const o = (raw ?? {}) as Partial<NaiEndpoint>;
   const id = typeof o.id === 'string' && o.id ? o.id : `nep_${Date.now()}_${seq}`;
-  if (isOfficialNaiEndpoint(id)) return officialNaiEndpoint(typeof o.key === 'string' ? o.key : '');
+  const concurrency = normalizeNaiConcurrency(o.concurrency, fallbackConcurrency);
+  if (isOfficialNaiEndpoint(id)) {
+    return officialNaiEndpoint(typeof o.key === 'string' ? o.key : '', concurrency);
+  }
   return {
     id,
     name: typeof o.name === 'string' && o.name ? o.name : `接入点 ${seq + 1}`,
     url: typeof o.url === 'string' ? o.url : '',
     key: typeof o.key === 'string' ? o.key : '',
+    concurrency,
   };
+}
+
+function normalizeNaiConcurrency(value: unknown, def: number): number {
+  return Math.round(clampNumber(value, def, 1, NAI_CONCURRENCY_MAX));
 }
 
 /**
@@ -1610,17 +2022,26 @@ function normalizeNaiEndpoint(raw: unknown, seq: number): NaiEndpoint {
  * 老配置只有渠道级 url/key 一对:收成第一条(名字按它指向官方还是第三方分别取),
  * 并保证内置官方那条一定在列——用户当初填的若是第三方站,官方条补在**其后**,
  * 免得静默把当前使用的那条挤到第二位、还顺手换了出图出口。
+ *
+ * 老的全局同时出图数分给当时已有的每一条(老闸门对它们一视同仁);事后补进来的官方条
+ * 从没用过那个数,按出厂值 1 起步。
  */
-function migrateNaiEndpoints(o: Partial<NaiSettings>): NaiEndpoint[] {
-  const list = Array.isArray(o.endpoints) ? o.endpoints.map(normalizeNaiEndpoint) : [];
+function migrateNaiEndpoints(o: LegacyNaiRaw): NaiEndpoint[] {
+  const legacyConcurrency = normalizeNaiConcurrency(o.concurrency, NAI_CONCURRENCY_DEFAULT);
+  const list = Array.isArray(o.endpoints)
+    ? o.endpoints.map((raw, i) => normalizeNaiEndpoint(raw, i, legacyConcurrency))
+    : [];
 
   if (!list.length) {
     // 存量:渠道级 url/key 收成第一条。url 恰是官方地址(绝大多数人)时直接并入官方条,
     // 不另起一条,否则列表一上来就是两条内容相同的。
     const url = typeof o.url === 'string' ? o.url.trim() : '';
     const key = typeof o.key === 'string' ? o.key : '';
-    if (!url || url.replace(/\/+$/, '') === NAI_OFFICIAL_URL) return [officialNaiEndpoint(key)];
-    return [{ id: `nep_legacy`, name: '我的接入点', url, key }, officialNaiEndpoint()];
+    if (!url || url.replace(/\/+$/, '') === NAI_OFFICIAL_URL) return [officialNaiEndpoint(key, legacyConcurrency)];
+    return [
+      { id: `nep_legacy`, name: '我的接入点', url, key, concurrency: legacyConcurrency },
+      officialNaiEndpoint(),
+    ];
   }
 
   // 官方条被删掉了(手改 settings.json,或以后版本回滚往返):补回去,但不抢当前那条的位置
@@ -1628,67 +2049,147 @@ function migrateNaiEndpoints(o: Partial<NaiSettings>): NaiEndpoint[] {
   return list;
 }
 
-function normalizeNai(raw: unknown, def: NaiSettings): NaiSettings {
-  const conn = normalizeBackend(raw, def);
-  const o = (raw ?? {}) as Partial<NaiSettings>;
-  const stored = typeof o.model === 'string' ? o.model : '';
-  const model = NAI_MODEL_VALUES.has(stored) ? (stored as NaiModel) : def.model;
+/** 模型白名单清洗;已下线模型回落默认并留一条控制台告警。 */
+function normalizeNaiModel(value: unknown, def: NaiModel): NaiModel {
+  const stored = typeof value === 'string' ? value : '';
+  const model = NAI_MODEL_VALUES.has(stored) ? (stored as NaiModel) : def;
   // 已下线模型(4.5 以下)静默回落会换掉画风与 vibe 编码 key。不弹窗(该人群已基本不存在),
   // 但留一条控制台告警 —— 否则「我的模型自己变了」这类反馈完全无据可查。
   if (stored && stored !== model) {
     console.warn(`[柏宝绘] NAI 模型「${stored}」已下线,本次回落为 ${model}`);
   }
+  return model;
+}
 
-  // 画师串库:允许为空,故没有「恒非空」兜底(与 normalizeComfyUI 刻意不同)
+/**
+ * 单套方案的逐字段清洗。引用(接入点 / 画师串 / vibe)只做类型清洗,
+ * 有效性在 normalizeNai 收尾统一修——那里才看得到三个库。
+ * 老渠道级平铺对象也走这里(字段同名),迁移只需先把 activeXxxId 换成方案的键名。
+ */
+function normalizeNaiPlanFields(o: LegacyNaiRaw, base: NaiPlan): NaiPlan {
+  const model = normalizeNaiModel(o.model, base.model);
+  return {
+    ...base,
+    endpointId: typeof o.endpointId === 'string' ? o.endpointId : '',
+    model,
+    artistId: typeof o.artistId === 'string' ? o.artistId : '',
+    // 空串是有意义的存储值(= 跟随模型官方词),故不能用 `&& o.x` 那种把 '' 吞掉的守卫
+    qualityTags: typeof o.qualityTags === 'string' ? o.qualityTags : '',
+    // 「附加负面」已并入 undesiredContent 一个框,存量值折进去(见 foldLegacyNegative)
+    undesiredContent: foldLegacyNegative(o, model),
+    sampler: typeof o.sampler === 'string' && o.sampler ? o.sampler : base.sampler,
+    steps: Math.round(clampNumber(o.steps, base.steps, 1, 50)),
+    scale: clampNumber(o.scale, base.scale, 0, 35),
+    cfgRescale: clampNumber(o.cfgRescale, base.cfgRescale, 0, 1),
+    noiseSchedule:
+      typeof o.noiseSchedule === 'string' && o.noiseSchedule ? o.noiseSchedule : base.noiseSchedule,
+    seed: Math.round(clampNumber(o.seed, base.seed, 0, 4294967295)),
+    varietyBoost: typeof o.varietyBoost === 'boolean' ? o.varietyBoost : base.varietyBoost,
+    normalizeRefStrength:
+      typeof o.normalizeRefStrength === 'boolean' ? o.normalizeRefStrength : base.normalizeRefStrength,
+    vibeIds: Array.isArray(o.vibeIds)
+      ? Array.from(new Set(o.vibeIds.filter((id): id is string => typeof id === 'string' && !!id)))
+      : [],
+    // 老配置缺这两个字段:回落默认 = 开着自然语言、不锁方向,即改动前的行为
+    naturalLanguage: typeof o.naturalLanguage === 'boolean' ? o.naturalLanguage : base.naturalLanguage,
+    orientationLock: normalizeOrientationLock(o.orientationLock),
+    // 老 resolution 单格 → 横竖两格的迁移也在这里(见 migrateSize)
+    portraitSize: migrateSize(o, base, 'portrait'),
+    landscapeSize: migrateSize(o, base, 'landscape'),
+  };
+}
+
+function normalizeNaiPlan(raw: unknown, seq: number): NaiPlan {
+  const o = (raw ?? {}) as LegacyNaiRaw & Partial<Pick<NaiPlan, 'id' | 'name'>>;
+  const base = newNaiPlan();
+  return normalizeNaiPlanFields(o, {
+    ...base,
+    id: typeof o.id === 'string' && o.id ? o.id : base.id,
+    name: typeof o.name === 'string' && o.name ? o.name : `方案 ${seq + 1}`,
+  });
+}
+
+/**
+ * 存量迁移:方案化之前 NAI 只有一套渠道级平铺设置。原样折成「默认方案」,目标是**升级后出图零变化**:
+ *
+ * - 接入点 / 画师串:老的 activeEndpointId / activeArtistId 直接成为方案的引用;
+ * - 正/负面词:老规则是「画师串绑定值 → 渠道值 → 官方词」三级回落,方案只剩两级。
+ *   故把老规则**当时实际生效**的那一份抄进方案(绑定值优先),官方词那级照旧由空串表达;
+ * - vibe:老数据每张各有 enabled,启用的那几张成为方案的 vibeIds。
+ */
+function foldLegacyNaiPlan(
+  o: LegacyNaiRaw,
+  artistPresets: NaiArtistPreset[],
+  enabledVibeIds: string[],
+): NaiPlan {
+  const plan = normalizeNaiPlanFields(
+    { ...o, endpointId: o.activeEndpointId, artistId: o.activeArtistId, vibeIds: enabledVibeIds },
+    newNaiPlan(),
+  );
+  // 内置画师串没有绑定词,只查用户库即可
+  const artist = artistPresets.find(a => a.id === plan.artistId);
+  return {
+    ...plan,
+    qualityTags: artist?.quality.trim() || plan.qualityTags,
+    undesiredContent: artist?.negative.trim() || plan.undesiredContent,
+  };
+}
+
+function normalizeNai(raw: unknown, def: NaiSettings): NaiSettings {
+  const o = (raw ?? {}) as LegacyNaiRaw;
+
+  // 画师串库:允许为空,故没有「恒非空」兜底(与方案库、接入点刻意不同)
   const artistPresets = Array.isArray(o.artistPresets)
     ? o.artistPresets.map(normalizeArtistPreset)
     : def.artistPresets;
+  // 接入点:存量 url/key 收成第一条;恒非空且必含官方条(见 migrateNaiEndpoints)
   const endpoints = migrateNaiEndpoints(o);
-  // 悬空 id 一律清成空串(= 不使用)。**不**照抄 normalizeComfyUI 的「回落第一条」:
-  // 用户删掉当前画师串后本该「什么都不加」,回落会给他静默换一套画风,而下拉显示的
+
+  // vibe 清洗时顺手记下老数据的 enabled(只有方案化迁移用得上)
+  const rawVibes: unknown[] = Array.isArray(o.vibes) ? o.vibes : [];
+  const vibes: NaiVibe[] = [];
+  const enabledVibeIds: string[] = [];
+  rawVibes.forEach((rawVibe, i) => {
+    const vibe = normalizeVibe(rawVibe, i);
+    if (!vibe) return;
+    vibes.push(vibe);
+    if ((rawVibe as { enabled?: unknown }).enabled === true) enabledVibeIds.push(vibe.id);
+  });
+
+  // 方案库:字段缺失 = 还没迁移过(空数组是脏数据,走下面的恒非空兜底,不重迁)
+  const migrating = !Array.isArray(o.plans);
+  const plans = migrating
+    ? [foldLegacyNaiPlan(o, artistPresets, enabledVibeIds)]
+    : (o.plans as unknown[]).map(normalizeNaiPlan);
+  if (!plans.length) plans.push(newNaiPlan());
+
+  // 引用修复。接入点悬空回落第一条——地址是必需品,清空就出不了图了;
+  // 画师串悬空则清成空串(= 不使用):回落会给用户静默换一套画风,而下拉显示的
   // 也正是那一条(看起来就是自己设的),几乎无法排查。
-  // 清成空串同时让 activeArtistId ∈ {'', 用户库 id, 内置库 id} 成为不变式,面板无需再判悬空。
-  const activeArtistId =
-    typeof o.activeArtistId === 'string' &&
-      (artistPresets.some(a => a.id === o.activeArtistId) || isBuiltinNaiArtist(o.activeArtistId))
-      ? o.activeArtistId
-      : '';
+  const vibeIdSet = new Set(vibes.map(v => v.id));
+  for (const plan of plans) {
+    if (!endpoints.some(e => e.id === plan.endpointId)) plan.endpointId = endpoints[0].id;
+    if (
+      plan.artistId &&
+      !artistPresets.some(a => a.id === plan.artistId) &&
+      !isBuiltinNaiArtist(plan.artistId)
+    ) {
+      plan.artistId = '';
+    }
+    plan.vibeIds = plan.vibeIds.filter(id => vibeIdSet.has(id));
+  }
+
+  const activePlanId =
+    !migrating && typeof o.activePlanId === 'string' && plans.some(p => p.id === o.activePlanId)
+      ? o.activePlanId
+      : plans[0].id;
 
   return {
-    ...conn,
-    // 「附加负面」已并入 undesiredContent 一个框,存量值折进去(见 foldLegacyNegative)
-    negativePrompt: '',
-    // 接入点:存量 url/key 收成第一条;恒非空且必含官方条(见 migrateNaiEndpoints)。
-    // 悬空 id 回落第一条——与画师串「悬空清空」相反:地址是必需品,清空就出不了图了。
     endpoints,
-    activeEndpointId:
-      typeof o.activeEndpointId === 'string' && endpoints.some(e => e.id === o.activeEndpointId)
-        ? o.activeEndpointId
-        : endpoints[0].id,
-    // 存量字段:出图已不读它(走 effectiveNai),原样留着只为回滚时配置不丢
-    key: typeof o.key === 'string' ? o.key : def.key,
-    model,
-    // 覆盖值:空串是有意义的存储值(=跟随模型官方词),故不能用 `&& o.x` 那种把 '' 吞掉的守卫
-    undesiredContent: foldLegacyNegative(o, model, def.undesiredContent),
-    sampler: typeof o.sampler === 'string' && o.sampler ? o.sampler : def.sampler,
-    steps: Math.round(clampNumber(o.steps, def.steps, 1, 50)),
-    scale: clampNumber(o.scale, def.scale, 0, 35),
-    cfgRescale: clampNumber(o.cfgRescale, def.cfgRescale, 0, 1),
-    noiseSchedule:
-      typeof o.noiseSchedule === 'string' && o.noiseSchedule ? o.noiseSchedule : def.noiseSchedule,
-    seed: Math.round(clampNumber(o.seed, def.seed, 0, 4294967295)),
-    varietyBoost: typeof o.varietyBoost === 'boolean' ? o.varietyBoost : def.varietyBoost,
-    normalizeRefStrength:
-      typeof o.normalizeRefStrength === 'boolean' ? o.normalizeRefStrength : def.normalizeRefStrength,
-    concurrency: Math.round(clampNumber(o.concurrency, def.concurrency, 1, 4)),
-    vibes: Array.isArray(o.vibes)
-      ? o.vibes.map((v, i) => normalizeVibe(v, i)).filter((v): v is NaiVibe => v !== null)
-      : def.vibes,
     artistPresets,
-    activeArtistId,
-    // 老配置缺这两个字段:回落默认 = 开着自然语言、不锁方向,即改动前的行为
-    naturalLanguage: typeof o.naturalLanguage === 'boolean' ? o.naturalLanguage : def.naturalLanguage,
-    orientationLock: normalizeOrientationLock(o.orientationLock),
+    vibes,
+    plans,
+    activePlanId,
   };
 }
 
@@ -1767,6 +2268,7 @@ function normalize(raw: unknown): ImageSettings {
     imageDisplaySize: IMAGE_DISPLAY_SIZES.some(option => option.value === ru.imageDisplaySize)
       ? (ru.imageDisplaySize as ImageDisplaySize)
       : d.ui.imageDisplaySize,
+    immersiveImages: typeof ru.immersiveImages === 'boolean' ? ru.immersiveImages : d.ui.immersiveImages,
   };
   // webui 已隐藏:存量数据里的 'webui' 一律迁移到默认后端(否则规范/出图口径会落空)
   merged.defaultBackend =
@@ -1774,7 +2276,13 @@ function normalize(raw: unknown): ImageSettings {
       ? merged.defaultBackend
       : d.defaultBackend;
   merged.webui = normalizeBackend(r.webui, d.webui);
-  merged.comfyui = normalizeComfyUI(r.comfyui, d.comfyui);
+  merged.comfyui = normalizeComfyUI(r.comfyui, d.comfyui, (() => {
+    // 迁移来源:设置页旧的全局 ComfyUI 规范/思维链(更老的版本只有单份 thinking,同 prompts 段的口径)
+    const rp = ((r.autoTag ?? {}) as Partial<AutoTagSettings>).prompts as
+      | (Partial<AutoTagPrompts> & { thinking?: unknown })
+      | undefined;
+    return { spec: rp?.comfySpec, thinking: typeof rp?.comfyThinking === 'string' ? rp.comfyThinking : rp?.thinking };
+  })());
   merged.nai = normalizeNai(r.nai, d.nai);
   // 副 API 渠道:逐个补全字段并校验类型
   merged.channels = (Array.isArray(r.channels) ? r.channels : []).map(normalizeChannel);

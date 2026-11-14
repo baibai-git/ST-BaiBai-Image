@@ -162,6 +162,36 @@ describe('buildSimpleWorkflow - anima', () => {
   });
 });
 
+describe('buildSimpleWorkflow - moss', () => {
+  const simple: ComfySimpleConfig = {
+    ...simpleDefaults('moss'),
+    model: 'moss_image_sft_int8_convrot.safetensors',
+    vae: 'flux2-vae_small.safetensors',
+    clip1: 'qwen3.5_9b_int8_convrot.safetensors',
+  };
+  const MOSS_VALUES = { prompt: '{"summary":{"caption":"page"}}', seed: 7, width: 1024, height: 1536 };
+
+  it('CLIPLoader 用 moss_image 类型,latent 用 EmptyFlux2LatentImage,默认 25 步 / cfg 2.5 / er_sde', () => {
+    const wf = buildSimpleWorkflow(simple, { ...MOSS_VALUES, negative: 'blurry' });
+    expect(node(wf, '2').inputs).toMatchObject({ clip_name: 'qwen3.5_9b_int8_convrot.safetensors', type: 'moss_image' });
+    expect(node(wf, '4').inputs.text).toBe('{"summary":{"caption":"page"}}');
+    expect(node(wf, '5').inputs.text).toBe('blurry');
+    expect(node(wf, '6')).toMatchObject({ class_type: 'EmptyFlux2LatentImage', inputs: { width: 1024, height: 1536 } });
+    expect(node(wf, '7').inputs).toMatchObject({ steps: 25, cfg: 2.5, sampler_name: 'er_sde', scheduler: 'simple', model: ['1', 0] });
+    expect(node(wf, '9').class_type).toBe('SaveImage');
+  });
+
+  it('LoRA 只挂 model', () => {
+    const wf = buildSimpleWorkflow({ ...simple, loras: [{ name: 'a.safetensors', strength: 1 }] }, MOSS_VALUES);
+    expect(node(wf, '300').class_type).toBe('LoraLoaderModelOnly');
+    expect(node(wf, '7').inputs.model).toEqual(['300', 0]);
+  });
+
+  it('尺寸不是 16 的倍数时报错', () => {
+    expect(() => buildSimpleWorkflow(simple, { ...MOSS_VALUES, width: 1000 })).toThrow('16 的倍数');
+  });
+});
+
 describe('buildSimpleWorkflow - 尺寸', () => {
   it('尺寸无效时报错(简易模式的画布节点是必建的,没有「工作流写死尺寸」的豁免)', () => {
     const simple = config({ model: 'm.safetensors' });

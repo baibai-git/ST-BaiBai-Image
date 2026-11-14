@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { backendStatus, decideSeed, generateImage } from '@/generate';
+import { activeTagKind, backendStatus, decideSeed, generateImage } from '@/generate';
 import type { GenerationMeta } from '@/generationMeta';
 import { saveExternalImage } from '@/floor/storage';
 import {
@@ -19,6 +19,7 @@ import {
 import { settings } from '@/state/settings';
 
 vi.mock('@/generate', () => ({
+  activeTagKind: vi.fn(() => 'illustration'),
   backendStatus: vi.fn(),
   decideSeed: vi.fn(() => 4242),
   generateImage: vi.fn(),
@@ -73,6 +74,7 @@ function ready(overrides: Partial<ReturnType<typeof backendStatus>> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(decideSeed).mockReturnValue(4242);
+  vi.mocked(activeTagKind).mockReturnValue('illustration');
   charTagLib.entries = [];
   setGlobalCharTagSource(() => []);
 });
@@ -126,9 +128,9 @@ describe('getCharacters', () => {
 
 describe('getBackendStatus', () => {
   it('exposes readiness without the api key or service url', () => {
-    settings.nai.key = 'pst-secret-key';
-    settings.nai.url = 'https://image.novelai.net';
-    settings.comfyui.url = 'http://127.0.0.1:8188';
+    settings.nai.endpoints[0].key = 'pst-secret-key';
+    settings.nai.endpoints[0].url = 'https://image.novelai.net';
+    settings.comfyui.servers[0].url = 'http://127.0.0.1:8188';
     ready();
 
     const status = getBackendStatus();
@@ -145,6 +147,14 @@ describe('getBackendStatus', () => {
   it('passes the human-readable reason through when not configured', () => {
     ready({ configured: false, reason: '未填写 NAI API Key' });
     expect(getBackendStatus()).toMatchObject({ configured: false, reason: '未填写 NAI API Key' });
+  });
+
+  it('reports a comic plan as not configured (third parties only send illustration prompts)', async () => {
+    ready({ backend: 'comfyui', supportsCharacters: false });
+    vi.mocked(activeTagKind).mockReturnValue('comic');
+    expect(getBackendStatus()).toMatchObject({ configured: false, reason: expect.stringContaining('漫画') });
+    await expect(generate({ prompt: '1girl' })).rejects.toMatchObject({ code: 'not_configured' });
+    expect(vi.mocked(generateImage)).not.toHaveBeenCalled();
   });
 });
 
