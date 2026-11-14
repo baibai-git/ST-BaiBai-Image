@@ -16,6 +16,7 @@ import {
   fetchUserPersona,
   fetchWorldInfo,
 } from '@/autoTag/context';
+import { expandMacroMessages } from '@/autoTag/macroExpand';
 import type { BookMemoryContext } from '@/autoTag/bookMemory';
 import { isAiStoryMessage, isStoryMessage, type STContext } from '@/st/context';
 import type { AutoTagSettings } from '@/state/settings';
@@ -404,5 +405,13 @@ ${comicSizeRule}
   const taskBlock = taskNote?.trim() ? `${taskNote.trim()}\n\n` : '';
   const userContent = `${memoryText}\n\n${libraryBlock}\n\n${taskBlock}${previous ? `${previous}\n\n` : ''}--- 目标正文｜${roleLabel(context, targetFloor)} ---\n${preparedTarget.promptText}`;
   messages.push({ role: 'user', content: userContent });
-  return messages;
+
+  // Tavern-Helper 的 macro-like({{format_message_variable::stat_data}} 等)只在 ST 自己的
+  // 生成链路里展开;柏宝绘直连副 API,绕过了那条链路,世界书里的宏会以原文进提示词。
+  // 这里就地展开成实际内容 —— 未装 TH 时原样返回,零影响(见 autoTag/macroExpand.ts)。
+  // message 作用域取目标楼,与目标楼的变量保持一致;该楼还没写回时由展开模块回退默认楼层。
+  // 开关缺省视为开启(老存档没有这个键),所以判定写 `!== false`。
+  return settings.autoTag.expandTavernMacros !== false
+    ? expandMacroMessages(messages, { messageId: targetFloor })
+    : messages;
 }

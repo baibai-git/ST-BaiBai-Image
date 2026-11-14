@@ -573,6 +573,16 @@ export interface AutoTagSettings {
   retryCount: number;
   /** 写入 tag 后是否立即调用出图渠道自动生成图片(默认开;关闭则卡片上手动点「生成」)。 */
   autoGenerate: boolean;
+  /**
+   * 发请求前展开 Tavern-Helper 的变量宏({{format_message_variable::stat_data}} 等)。
+   *
+   * 柏宝绘直连副 API,不经过 ST 的生成链路,TH 的 macro-like 不会自动展开 ——
+   * 世界书里写的变量宏会以花括号原文进提示词。开启后由本插件就地展开。
+   * **未安装 Tavern-Helper 时本项无副作用**:宏原样保留,其余流程不受影响。
+   *
+   * 可选:缺省视同 `true`(老存档没有这个键),判定处一律写 `!== false`。
+   */
+  expandTavernMacros?: boolean;
   /** 可编辑提示词集(破限/后端规范/思维链);空串 = 回落内置默认。 */
   prompts: AutoTagPrompts;
 }
@@ -1462,6 +1472,7 @@ function defaults(): ImageSettings {
       maxImages: 2,
       retryCount: 1,
       autoGenerate: true,
+      expandTavernMacros: true,
       prompts: {
         jailbreak: '',
         naiSpec: '',
@@ -2303,6 +2314,11 @@ function normalize(raw: unknown): ImageSettings {
         : d.autoTag.retryCount,
     autoGenerate:
       typeof rt.autoGenerate === 'boolean' ? rt.autoGenerate : d.autoTag.autoGenerate,
+    // 变量宏展开:老设置没有该键时回落到默认开(装了 TH 才有实际效果)
+    expandTavernMacros:
+      typeof rt.expandTavernMacros === 'boolean'
+        ? rt.expandTavernMacros
+        : d.autoTag.expandTavernMacros,
     // 可编辑提示词集:逐字段兜底;旧版 jailbreakPrompt 字段迁移进 prompts.jailbreak
     prompts: (() => {
       const rp = (rt.prompts ?? {}) as Partial<AutoTagPrompts>;

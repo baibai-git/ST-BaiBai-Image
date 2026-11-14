@@ -732,6 +732,17 @@ async function confirmUpdate() {
           />
         </label>
         <p class="bbi-field-hint">副 API 请求失败或返回无法解析时自动重试；0 = 不重试，最多 5 次。</p>
+
+        <label class="bbi-switch-row">
+          <span class="bbi-field-label">展开酒馆助手变量宏</span>
+          <input v-model="settings.autoTag.expandTavernMacros" type="checkbox" class="bbi-checkbox" />
+        </label>
+        <p class="bbi-field-hint">
+          世界书里写的
+          <!-- v-pre:花括号在 Vue 模板里是插值语法,这里要原文显示 -->
+          <code v-pre>{{format_message_variable::stat_data}}</code>
+          这类酒馆助手（Tavern-Helper）变量宏，在主对话里会自动展开，但柏宝绘请求的是独立副 API，宏会以原文进入提示词。开启后由柏宝绘在发请求前就地展开，让生图 AI 看到实际变量值。未安装酒馆助手时本项不生效。
+        </p>
       </Collapsible>
 
       <!-- 排除角色:名单与柏宝书共享(见 state/settings.ts 的共享存储),任一端改动自动同步 -->
