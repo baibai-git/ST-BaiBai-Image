@@ -12,15 +12,16 @@ import {
 } from '@/backends/chatu8Vibe';
 import {
   buildNaiv4vibe,
-  BUILTIN_NAI_ARTISTS,
   encodeVibeImage,
   isBuiltinNaiArtist,
   isNai5,
   naiDefaultQualityTags,
   naiDefaultUndesired,
+  naiFixedSettings,
   naiSamplers,
   naiSupportsVibes,
   NAI_NOISE_SCHEDULES,
+  NAI_SAMPLERS,
   parseNaiv4vibe,
   testNaiConnection,
   vibeModelKey,
@@ -33,10 +34,11 @@ import {
   vibeFingerprint,
   vibeMetaFromData,
 } from '@/backends/vibeStore';
-import NaiArtistManager from '@/pages/backend/panels/NaiArtistManager.vue';
+import NaiArtistLibrary from '@/pages/backend/panels/NaiArtistLibrary.vue';
+import NaiArtistPicker from '@/pages/backend/panels/NaiArtistPicker.vue';
+import { artistPreviewSrc } from '@/pages/backend/panels/artistPreview';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import { makeJpegThumbnail } from '@/st/imageFile';
-import { deleteUserImage } from '@/st/images';
 import {
   groupKey,
   groupVibes,
@@ -55,247 +57,386 @@ import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { getContext } from '@/st/context';
 import {
-  activeNaiArtist,
-  activeNaiEndpoint,
+  activeNaiPlan,
   effectiveNai,
   isOfficialNaiEndpoint,
-  newNaiArtist,
+  naiArtistFor,
+  naiEndpointFor,
   newNaiEndpoint,
+  newNaiPlan,
+  NAI_CONCURRENCY_MAX,
   NAI_MODELS,
   NAI_OFFICIAL_URL,
   ORIENTATION_LOCKS,
   settings,
-  type NaiArtistPreset,
   type NaiEndpoint,
+  type NaiPlan,
   type NaiVibe,
 } from '@/state/settings';
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
-/** 本渠道是否为当前出图渠道;「使用此渠道」按钮与设置页选择器、页签徽标同属一个开关。 */
+/** 本渠道是否为当前出图渠道;「用 NovelAI 出图」按钮与设置页选择器、页签徽标同属一个开关。 */
 const inUse = computed(() => settings.defaultBackend === 'nai');
-
-const testing = ref(false);
-const showKey = ref(false);
 
 function errorMessage(error: unknown): string {
   if (error instanceof DOMException && error.name === 'AbortError') return '操作已取消';
   return error instanceof Error ? error.message : String(error);
 }
 
+function modelLabel(model: string): string {
+  return NAI_MODELS.find(m => m.value === model)?.label ?? model;
+}
+
+/**
+ * 方案与接入点共用一个删除确认框(同 ComfyUIPanel):同一时刻只会有一个待删对象。
+ * 存 id 而非对象引用——确认前库可能被别处改动,删时按 id 现查。
+ */
+type DeleteTarget = { type: 'plan' | 'endpoint'; id: string; name: string };
+const pendingDelete = ref<DeleteTarget | null>(null);
+const deleteOpen = computed({
+  get: () => !!pendingDelete.value,
+  set: open => {
+    if (!open) pendingDelete.value = null;
+  },
+});
+const DELETE_TITLES: Record<DeleteTarget['type'], string> = {
+  plan: '删除出图方案',
+  endpoint: '删除接入点',
+};
+
+function confirmDelete() {
+  const target = pendingDelete.value;
+  pendingDelete.value = null;
+  if (!target) return;
+  if (target.type === 'plan') removePlan(target.id);
+  else removeEndpoint(target.id);
+}
+
+function planNames(plans: NaiPlan[]): string {
+  return plans.map(p => `「${p.name || '未命名方案'}」`).join('');
+}
+
+/** 按**解析后**的引用统计:悬空引用回落到谁,就算谁在用(与出图实际取值同口径)。 */
+function plansUsingEndpoint(id: string): NaiPlan[] {
+  return settings.nai.plans.filter(p => naiEndpointFor(p).id === id);
+}
+
+/* ============ 出图方案 ============ */
+
+/** 当前(出图用的)方案:存的 id 悬空时 activeNaiPlan 回落第一条,列表的选中点也跟着它走。 */
+const active = computed(() => activeNaiPlan());
+
+/** 只剩一套时不给删:plans 恒非空是全局不变式,禁用比「点了没反应」诚实。 */
+const canRemove = computed(() => settings.nai.plans.length > 1);
+
+function switchTo(target: { id: string }) {
+  settings.nai.activePlanId = target.id;
+}
+
+/**
+ * 方案编辑弹窗的对象。编辑与「选中出图」脱钩:改哪套就点哪套的 ✎,不必先把它设成当前。
+ * 弹窗关着时回落当前方案,让下面那些按方案取值的 computed 恒有对象可读。
+ * 改动即时生效、没有草稿:与 ComfyUI 方案同一手感。
+ */
+const editingPlanId = ref('');
+const plan = computed(
+  () => settings.nai.plans.find(p => p.id === editingPlanId.value) ?? active.value,
+);
+const planOpen = computed(
+  () => !!editingPlanId.value && settings.nai.plans.some(p => p.id === editingPlanId.value),
+);
+
+function openPlan(target: { id: string }) {
+  planVibeSearch.value = '';
+  editingPlanId.value = target.id;
+}
+
+function closePlan() {
+  editingPlanId.value = '';
+}
+
+/** 新建/复制都直接打开它的编辑窗,但不抢「当前」:一套还没配好的方案顶上去只会出不了图。 */
+function addPlan() {
+  // 新方案沿用当前方案的接入点:多数人只有一个站,省得每次新建都再选一遍
+  const created: NaiPlan = {
+    ...newNaiPlan(`方案 ${settings.nai.plans.length + 1}`),
+    endpointId: naiEndpointFor(active.value).id,
+  };
+  settings.nai.plans.push(created);
+  openPlan(created);
+}
+
+function duplicatePlan(source: NaiPlan) {
+  // 拷全部字段,只换 id 与名字;vibeIds 是数组,必须深拷——浅拷会让两套方案共享同一份勾选
+  const created: NaiPlan = {
+    ...source,
+    id: newNaiPlan().id,
+    name: `${source.name || '未命名方案'} 副本`,
+    vibeIds: [...source.vibeIds],
+  };
+  const list = settings.nai.plans;
+  const index = list.findIndex(p => p.id === source.id);
+  list.splice(index < 0 ? list.length : index + 1, 0, created);
+  openPlan(created);
+}
+
+function askRemovePlan(target: NaiPlan) {
+  pendingDelete.value = { type: 'plan', id: target.id, name: target.name || '未命名方案' };
+}
+
+function removePlan(id: string) {
+  const list = settings.nai.plans;
+  if (list.length <= 1) return;
+  const index = list.findIndex(p => p.id === id);
+  if (index < 0) return;
+  const wasActive = active.value.id === id;
+  list.splice(index, 1);
+  // 删掉的是当前项:接位到原位置那一条(已是最后一条则退一格)
+  if (wasActive) settings.nai.activePlanId = list[Math.min(index, list.length - 1)].id;
+}
+
+const testing = ref(false);
+
 async function onTestConnection() {
   if (testing.value) return;
   testing.value = true;
+  const name = naiEndpointFor(active.value).name || 'NovelAI';
   try {
-    // 测当前选中那条接入点(而非渠道级存量 url/key),与出图同一份连接
+    // 测当前方案所用的接入点,与出图同一份连接
     const result = await testNaiConnection(effectiveNai());
-    toastr.success(result.message, `NAI 连接 · ${endpoint.value.name}`);
+    toastr.success(result.message, `NAI 连接 · ${name}`);
   } catch (error) {
-    toastr.error(errorMessage(error), `NAI 连接失败 · ${endpoint.value.name}`);
+    toastr.error(errorMessage(error), `NAI 连接失败 · ${name}`);
   } finally {
     testing.value = false;
   }
 }
 
-/* ============ 接入点库(地址 + 密钥;形制照搬下方画师串行) ============ */
-
-/**
- * 多条接入点解决的是「公益站换着用」:同一套出图参数,换个出口。
- * 故这里只管 url/key,模型/采样器/尺寸一概留在渠道级,切站不用重配。
- */
-const endpoint = computed<NaiEndpoint>(() => activeNaiEndpoint());
-
-/** 官方那条只读:名字/地址不给改、不给删,复制出来的副本才随便改。 */
-const isOfficialEndpoint = computed(() => isOfficialNaiEndpoint(endpoint.value.id));
+/* —— 方案弹窗:来源 —— */
 
 const endpointOptions = computed(() =>
   settings.nai.endpoints.map(e => ({ value: e.id, label: e.name || '未命名接入点' })),
 );
 
-/** 下拉取「实际生效的那条」而非存的 id:悬空时 activeNaiEndpoint 回落首条,下拉要跟着显示。 */
-const activeEndpointId = computed<string>({
-  get: () => endpoint.value.id,
+/** 取解析后的那个:存的 id 悬空时下拉也显示实际生效的那条,不显示空白。 */
+const planEndpointId = computed<string>({
+  get: () => naiEndpointFor(plan.value).id,
   set: id => {
-    settings.nai.activeEndpointId = id;
+    plan.value.endpointId = id;
   },
 });
 
-/** 改名低频:平时只显示下拉,点「改名」才把选择器原地换成输入框(同画师串行)。 */
-const renamingEndpoint = ref(false);
-const endpointNameDraft = ref('');
-const endpointNameInput = ref<HTMLInputElement | null>(null);
-const endpointDeleteOpen = ref(false);
+/** BbiSelect 的 modelValue 是 string,而 model 是字面量联合;写入前对一遍 NAI_MODELS。 */
+const planModel = computed<string>({
+  get: () => plan.value.model,
+  set: v => {
+    const hit = NAI_MODELS.find(m => m.value === v);
+    if (hit) plan.value.model = hit.value;
+  },
+});
 
-function startRenameEndpoint() {
-  if (isOfficialEndpoint.value) return; // 官方条只读(按钮已禁用,双保险)
-  endpointNameDraft.value = endpoint.value.name;
-  renamingEndpoint.value = true;
-  nextTick(() => endpointNameInput.value?.focus());
+const samplerOptions = computed(() => naiSamplers(plan.value.model));
+
+/** 官方锁死参数的模型(V5 Full Medium):步数/采样器/Rescale/负面词不可调,面板照官方前端收起。 */
+const planFixed = computed(() => naiFixedSettings(plan.value.model));
+const planFixedSamplerLabel = computed(() => {
+  const value = planFixed.value?.sampler ?? '';
+  return NAI_SAMPLERS.find(s => s.value === value)?.label ?? value;
+});
+
+/* —— 方案弹窗:画风 —— */
+
+/** 取「实际生效的那一条」:id 悬空时 naiArtistFor 返回 null,入口跟着显示「不使用」。 */
+const planArtist = computed(() => naiArtistFor(plan.value));
+
+const planArtistBuiltin = computed(() =>
+  planArtist.value ? isBuiltinNaiArtist(planArtist.value.id) : false,
+);
+
+/** 同一条画师串还被哪些别的方案用着:内容是共享的,改之前得知道会连带谁。 */
+const artistSharedWith = computed(() => {
+  const a = planArtist.value;
+  if (!a) return [];
+  return settings.nai.plans.filter(p => p.id !== plan.value.id && p.artistId === a.id);
+});
+
+/** 挑选弹窗只服务正在编辑的这套方案(plan.id)。 */
+const artistPickerOpen = ref(false);
+
+/*
+ * 正/负面词只有一级回落:方案里的值 → 模型官方词。框里留空 = 跟随官方,
+ * 官方词就显示在占位文字里——「实际生效了什么」打开就能看到,不必再点进二级弹窗。
+ */
+const officialQuality = computed(() => naiDefaultQualityTags(plan.value.model));
+const officialNegative = computed(() => naiDefaultUndesired(plan.value.model));
+
+type WordsKey = 'qualityTags' | 'undesiredContent';
+
+function isCustomWords(key: WordsKey): boolean {
+  return plan.value[key].trim().length > 0;
 }
 
-/** Enter / 失焦都算确认;Esc 直接置 false 不经过这里,即为取消。 */
-function commitRenameEndpoint() {
-  if (renamingEndpoint.value && !isOfficialEndpoint.value) {
-    endpoint.value.name = endpointNameDraft.value.trim() || endpoint.value.name;
-  }
-  renamingEndpoint.value = false;
+/** 「在官方词上改」:把官方词抄进框里当起点;改完与官方一字不差也无妨,只是不再跟随模型。 */
+function fillOfficialWords(key: WordsKey) {
+  plan.value[key] = key === 'qualityTags' ? officialQuality.value : officialNegative.value;
+}
+
+function resetWords(key: WordsKey) {
+  plan.value[key] = '';
+}
+
+/**
+ * 画师串的「自带词」(智绘姬导入 / 方案化之前绑在画师串上的)出图不读,
+ * 只在这里给一个一键套用:与方案现值一样时按钮不出现,点了没变化的按钮不如不摆。
+ */
+const artistWordsApplicable = computed(() => {
+  const a = planArtist.value;
+  if (!a) return false;
+  const q = a.quality.trim();
+  const n = a.negative.trim();
+  return (
+    (!!q && q !== plan.value.qualityTags.trim()) || (!!n && n !== plan.value.undesiredContent.trim())
+  );
+});
+
+function applyArtistWords() {
+  const a = planArtist.value;
+  if (!a) return;
+  if (a.quality.trim()) plan.value.qualityTags = a.quality;
+  if (a.negative.trim()) plan.value.undesiredContent = a.negative;
+  toastr.success(`已把「${a.name}」自带的正/负面词填进本方案`, '画师串');
+}
+
+/* —— 方案弹窗:Vibe —— */
+
+/** 弹窗里的 vibe 搜索(与下方 Vibe 库的搜索各管各的)。 */
+const planVibeSearch = ref('');
+const planVibesSupported = computed(() => naiSupportsVibes(plan.value.model));
+const planVibeKey = computed(() => vibeModelKey(plan.value.model));
+const planVibeList = computed(() =>
+  settings.nai.vibes.filter(v => matchVibe(v, planVibeSearch.value)),
+);
+const planVibeCount = computed(() => {
+  const ids = new Set(plan.value.vibeIds);
+  return settings.nai.vibes.filter(v => ids.has(v.id)).length;
+});
+
+/** 勾/不勾一张 vibe。顺序无所谓:effectiveNai 按库内顺序取。 */
+function setPlanVibe(target: NaiPlan, id: string, on: boolean) {
+  const has = target.vibeIds.includes(id);
+  if (on && !has) target.vibeIds.push(id);
+  else if (!on && has) target.vibeIds = target.vibeIds.filter(x => x !== id);
+}
+
+/* ============ 接入点库 ============ */
+
+/**
+ * 接入点只管「站」的事(地址 / Key / 同时出图数):换站是「同一套设置换个出口」,
+ * 模型/画风/采样一概在方案里。列表只放名字,点行进弹窗编辑(与副 API 渠道同款):
+ * 弹窗改的是草稿,点「完成」才写回;× / 点遮罩丢弃。官方那条地址固定、不可删、不可改名。
+ */
+const epDraft = ref<NaiEndpoint | null>(null);
+/** 正在编辑的接入点 id;空串 = 新建(完成时 push)。 */
+const epEditingId = ref('');
+const epKeyShown = ref(false);
+const epDraftOfficial = computed(() => !!epDraft.value && isOfficialNaiEndpoint(epDraft.value.id));
+
+function openEndpoint(ep: NaiEndpoint) {
+  epKeyShown.value = false;
+  epEditingId.value = ep.id;
+  epDraft.value = { ...ep };
 }
 
 function addEndpoint() {
-  const preset = newNaiEndpoint(`接入点 ${settings.nai.endpoints.length + 1}`);
-  settings.nai.endpoints.push(preset);
-  settings.nai.activeEndpointId = preset.id;
+  epKeyShown.value = false;
+  epEditingId.value = '';
+  epDraft.value = newNaiEndpoint(`接入点 ${settings.nai.endpoints.length + 1}`);
 }
 
-function duplicateEndpoint() {
-  // 官方条也走这里:复制出来的是普通条目,地址可改 —— 这是「照着官方改个镜像」的捷径
-  const src = endpoint.value;
-  const preset: NaiEndpoint = { ...newNaiEndpoint(), name: `${src.name} 副本`, url: src.url, key: src.key };
-  settings.nai.endpoints.push(preset);
-  settings.nai.activeEndpointId = preset.id;
+function closeEndpoint() {
+  epDraft.value = null;
+  epEditingId.value = '';
 }
 
-function confirmRemoveEndpoint() {
-  endpointDeleteOpen.value = false;
-  if (isOfficialEndpoint.value) return; // 官方条不可删:endpoints 恒非空靠它保底
-  const list = settings.nai.endpoints;
-  const index = list.findIndex(e => e.id === endpoint.value.id);
-  if (index < 0) return;
-  list.splice(index, 1);
-  // 接位到原位置那一条(已是最后一条则退一格)。**不**像画师串那样回落空串:
-  // 地址是必需品,空了就出不了图 —— 与工作流库同口径。
-  settings.nai.activeEndpointId = list[Math.min(index, list.length - 1)].id;
+function confirmEndpoint() {
+  const draft = epDraft.value;
+  if (draft) {
+    const n = Math.round(Number(draft.concurrency));
+    draft.concurrency = Number.isFinite(n) ? Math.min(NAI_CONCURRENCY_MAX, Math.max(1, n)) : 1;
+    const list = settings.nai.endpoints;
+    const index = epEditingId.value ? list.findIndex(e => e.id === epEditingId.value) : -1;
+    // 编辑期间原条目被删等异常 → 兜底为新增
+    if (index >= 0) list[index] = draft;
+    else list.push(draft);
+  }
+  closeEndpoint();
 }
 
-/* ============ 画师串库(形制照搬 ComfyUI 工作流库) ============ */
-
-/**
- * 当前选中的画师串;null = 不使用(库为空、用户主动选了「不使用」、或 id 悬空)。
- * settings 是 reactive,直接把它的字段绑 v-model 即可就地编辑。
- */
-const artist = computed<NaiArtistPreset | null>(() => activeNaiArtist());
-
-/** 当前是否 V5 模型:控制画师串编辑区的 V5 差异提醒。 */
-const isV5Model = computed(() => isNai5(settings.nai.model));
-
-/** 「不使用」的下拉值。preset id 恒为 art_* / bi_* 形状,空串不会与任何一条相撞,无需装箱。 */
-const NO_ARTIST = '';
-
-const artistOptions = computed(() => [
-  { value: NO_ARTIST, label: '不使用' },
-  // 内置配方排用户库前面:新用户默认选中的是内置条,放在「不使用」旁边最顺;
-  // 名称后括注内置,与用户自建的同名条目区分开
-  ...BUILTIN_NAI_ARTISTS.map(a => ({ value: a.id, label: `${a.name}(内置)` })),
-  ...settings.nai.artistPresets.map(a => ({ value: a.id, label: a.name || '未命名画师串' })),
-]);
-
-/**
- * 下拉的值取「实际生效的那一条」而非存的 id:存的 id 悬空时 activeNaiArtist 返回 null,
- * 下拉也该跟着显示「不使用」,不能显示空白。
- */
-const activeArtistId = computed<string>({
-  get: () => artist.value?.id ?? NO_ARTIST,
-  set: id => {
-    settings.nai.activeArtistId = id;
-  },
+/** 删不了的原因;空串 = 可删。新建草稿还没入库,「删除」等于丢弃。 */
+const epRemoveBlock = computed(() => {
+  const draft = epDraft.value;
+  if (!draft || !epEditingId.value) return '';
+  if (isOfficialNaiEndpoint(draft.id)) return '官方接入点不可删除';
+  const users = plansUsingEndpoint(draft.id);
+  return users.length ? `正被${planNames(users)}使用,先给它们换一个再删` : '';
 });
 
-/** 改名/复制/删除都只对「真的选中了一条」有意义;选「不使用」时一律禁用。 */
-const hasArtist = computed(() => artist.value !== null);
-
-/** 当前选中的是内置配方:只读(改名/删除/内容编辑禁用),「复制」是自定义的唯一入口。 */
-const isBuiltinArtist = computed(() =>
-  artist.value ? isBuiltinNaiArtist(artist.value.id) : false,
-);
-
-/** 改名是低频操作:平时只显示下拉,点「改名」才把选择器原地换成输入框。 */
-const renamingArtist = ref(false);
-const artistNameDraft = ref('');
-const artistNameInput = ref<HTMLInputElement | null>(null);
-const artistDeleteOpen = ref(false);
-/** 管理器弹窗:搜索/预览图/勾选批量删除都在那边,下拉这里只留高频切换。 */
-const artistManagerOpen = ref(false);
-
-function startRenameArtist() {
-  if (!artist.value || isBuiltinArtist.value) return; // 内置只读(按钮已禁用,双保险)
-  artistNameDraft.value = artist.value.name;
-  renamingArtist.value = true;
-  nextTick(() => artistNameInput.value?.focus());
+function askRemoveEndpoint() {
+  const draft = epDraft.value;
+  if (!draft || epRemoveBlock.value) return;
+  if (!epEditingId.value) return closeEndpoint();
+  pendingDelete.value = { type: 'endpoint', id: draft.id, name: draft.name || '未命名接入点' };
 }
 
-/** Enter / 失焦都算确认;Esc 直接置 renamingArtist=false 不经过这里,即为取消。 */
-function commitRenameArtist() {
-  if (renamingArtist.value && artist.value) artist.value.name = artistNameDraft.value.trim();
-  renamingArtist.value = false;
+function removeEndpoint(id: string) {
+  // 官方条不可删(endpoints 恒非空靠它保底);被方案引用的也不给删
+  if (isOfficialNaiEndpoint(id) || plansUsingEndpoint(id).length) return;
+  const list = settings.nai.endpoints;
+  const index = list.findIndex(e => e.id === id);
+  if (index >= 0) list.splice(index, 1);
+  if (epEditingId.value === id) closeEndpoint();
 }
 
-function addArtist() {
-  const preset = newNaiArtist(`画师串 ${settings.nai.artistPresets.length + 1}`);
-  settings.nai.artistPresets.push(preset);
-  settings.nai.activeArtistId = preset.id;
-}
+const testingEndpoint = ref(false);
 
-function duplicateArtist() {
-  const src = artist.value;
-  if (!src) return;
-  // 只换 id 与名字;id 生成仍由 settings 统一口径。
-  // 内置配方也走这里:复制出来的副本是普通用户条目,随便改——这是内置条唯一的自定义路径。
-  // 显式逐字段拷贝,不带 previewPath:预览文件随原条目删除,共指一个路径会让副本日后破图。
-  const preset: NaiArtistPreset = {
-    id: newNaiArtist().id,
-    name: `${src.name} 副本`,
-    prompt: src.prompt,
-    quality: src.quality,
-    negative: src.negative,
-  };
-  settings.nai.artistPresets.push(preset);
-  settings.nai.activeArtistId = preset.id;
-}
-
-async function confirmRemoveArtist() {
-  artistDeleteOpen.value = false;
-  const list = settings.nai.artistPresets;
-  const index = list.findIndex(a => a.id === artist.value?.id);
-  if (index < 0) return;
-  // 预览图文件 best-effort 连带清理(与管理器删除同口径:文件删不掉不阻塞删条目)
-  const previewPath = list[index].previewPath;
-  if (previewPath) {
-    try {
-      await deleteUserImage(previewPath);
-    } catch (error) {
-      toastr.warning(`条目已删除,但预览图文件清理失败：${errorMessage(error)}`, '画师串');
-    }
+/** 测的是草稿:改完地址/Key 先测通再点完成。 */
+async function onTestEndpoint() {
+  const draft = epDraft.value;
+  if (!draft || testingEndpoint.value) return;
+  testingEndpoint.value = true;
+  const name = draft.name || '接入点';
+  try {
+    const result = await testNaiConnection(draft);
+    toastr.success(result.message, `NAI 连接 · ${name}`);
+  } catch (error) {
+    toastr.error(errorMessage(error), `NAI 连接失败 · ${name}`);
+  } finally {
+    testingEndpoint.value = false;
   }
-  list.splice(index, 1);
-  // 接位到原位置那一条(已是最后一条则退一格);删空了就回「不使用」——
-  // `?? ''` 正是画师串库与工作流库的分水岭(那边恒非空、回落 [0]),不能省。
-  settings.nai.activeArtistId = list[Math.min(index, list.length - 1)]?.id ?? '';
 }
 
 /* ============ 从智绘姬迁移提示词预设 ============ */
 
 /**
- * 智绘姬(st-chatu8)的提示词预设整批搬过来,映射与智绘姬拼装位置一致:
- * 前置固定正向 → 画师串,后置固定正向 → 正面质量词,固定负向 → 负面提示词(前面拼上当前模型官方基线)。
- * 与 vibe 迁移同原则:只建副本、不改源数据;同名条目重新导入会覆盖更新
- * (旧版迁移把正向整体塞进画师串的条目,重导即被修好),内容完全相同的跳过,随时可再来。
- * 纯逻辑在 chatu8Vibe.ts(collect/detect/import 三件套),这里只做检测展示、弹窗预览与落盘。
+ * 智绘姬(st-chatu8)的提示词预设整批搬进画师串库:
+ * 前置固定正向 → 画师串,后置固定正向 / 固定负向 → 画师串的自带正/负面词。
+ * 只建副本、不改源数据;同名覆盖更新、内容相同跳过,随时可再来。
+ * 纯逻辑在 chatu8Vibe.ts,这里只做检测展示、弹窗预览与落盘。
  *
  * 刻意不做「还剩 N 个可导入」的常驻提示:去重键是名字+内容,用户改过或删过
- * 本地副本后键就对不上,提示会反复复活,很吵。入口收进下方「从智绘姬迁移」
- * 折叠区,手动点开弹窗时才算预览,有没有新预设一看便知。
+ * 本地副本后键就对不上,提示会反复复活,很吵。
  */
 const chatu8ArtistDetect = ref<Chatu8ArtistDetectInfo>({ found: false, total: 0 });
-/** 弹窗打开时算一次的预览结果(纯函数,不落盘);plans 逐条带徽标状态。 */
 const artistImportResult = ref<Chatu8ArtistImportResult | null>(null);
 const artistImportOpen = ref(false);
-/** 导入后是否把智绘姬当前使用的预设设为柏宝绘当前画师串。 */
+/** 导入后是否让当前方案改用智绘姬当前使用的那条(连同它的正/负面词)。 */
 const switchActiveArtist = ref(true);
 
 const chatu8ActiveRef = computed(() => artistImportResult.value?.plans.find(p => p.active) ?? null);
 
 function openArtistImport() {
   const chatu8 = getContext()?.extensionSettings?.[CHATU8_SETTINGS_KEY];
-  artistImportResult.value = importArtistsFromChatu8(settings.nai.artistPresets, chatu8, settings.nai.model);
+  artistImportResult.value = importArtistsFromChatu8(settings.nai.artistPresets, chatu8, active.value.model);
   switchActiveArtist.value = true;
   artistImportOpen.value = true;
 }
@@ -305,169 +446,52 @@ function runArtistImport() {
   const result = artistImportResult.value;
   artistImportOpen.value = false;
   if (!result || (result.imported === 0 && result.overwritten === 0)) return;
-  for (const plan of result.plans) {
-    if (plan.state === 'import') {
-      settings.nai.artistPresets.push(plan.preset!);
-    } else if (plan.state === 'overwrite') {
-      const target = settings.nai.artistPresets.find(p => p.id === plan.targetId);
-      if (target && plan.preset) {
-        target.prompt = plan.preset.prompt;
-        target.quality = plan.preset.quality;
-        target.negative = plan.preset.negative;
+  for (const item of result.plans) {
+    if (item.state === 'import') {
+      settings.nai.artistPresets.push(item.preset!);
+    } else if (item.state === 'overwrite') {
+      const target = settings.nai.artistPresets.find(p => p.id === item.targetId);
+      if (target && item.preset) {
+        target.prompt = item.preset.prompt;
+        target.quality = item.preset.quality;
+        target.negative = item.preset.negative;
       }
     }
   }
-  if (switchActiveArtist.value && result.activeArtistId) {
-    settings.nai.activeArtistId = result.activeArtistId;
+  const switched = switchActiveArtist.value && !!result.activeArtistId;
+  if (switched) {
+    // 自带词出图不读,切换时顺手抄进方案——否则「切到智绘姬那套」只换了一半画风
+    const target = active.value;
+    target.artistId = result.activeArtistId;
+    const picked = settings.nai.artistPresets.find(p => p.id === result.activeArtistId);
+    if (picked?.quality.trim()) target.qualityTags = picked.quality;
+    if (picked?.negative.trim()) target.undesiredContent = picked.negative;
   }
   const parts = [`新增 ${result.imported} 个`];
   if (result.overwritten) parts.push(`覆盖更新 ${result.overwritten} 个`);
   if (result.duplicates) parts.push(`相同跳过 ${result.duplicates}`);
-  if (switchActiveArtist.value && result.activeArtistId) {
-    parts.push('已切换为智绘姬当前使用的预设');
-  }
+  if (switched) parts.push(`方案「${active.value.name}」已改用智绘姬当前使用的预设`);
   toastr.success(parts.join(', '), '从智绘姬导入');
   artistImportResult.value = null;
 }
 
-/* ============ 提示词:正/负面词分两级——画师串绑定值 → 渠道覆盖值 → 内置默认 ============ */
-
-/**
- * 一条正/负面词的编辑目标;渠道级与画师串绑定级共用同一个弹窗。
- *
- * fallback = 留空时跟随的下一级取值(渠道级 → 模型官方词;绑定级 → 渠道值 → 官方词)。
- * 打开弹窗预填它——框里空着就是把「看不到实际生效了什么」的老问题原地搬家;
- * 保存时与回落一致就存空串(与设置页 saveTagPrompt 同口径:不把下一级的值冗余存进来,
- * 保留「跟随」语义,下一级变了能跟着变)。
- *
- * fallback 必须是函数而非常量:它随 settings.nai.model / 渠道覆盖值变,要在读取时才求值。
- */
-interface NaiPromptTarget {
-  key: 'quality' | 'negative';
-  label: string;
-  hint: string;
-  /** 内置配方的绑定位只读:弹窗纯查看,不给保存(写进模块常量就糟了)。 */
-  readonly?: boolean;
-  fallback: () => string;
-  read: () => string;
-  write: (v: string) => void;
-}
-
-/** 渠道级两条:画师串未绑定对应字段时生效,再留空则按模型取官方词。 */
-const CHANNEL_PROMPT_TARGETS: NaiPromptTarget[] = [
-  {
-    key: 'quality',
-    label: '正面质量词',
-    hint: '拼在画面 tag 之后(整体顺序:画师串 → 画面 tag → 质量词)。画师串里设置了质量词时,会用画师串那份,这里的不生效。',
-    fallback: () => naiDefaultQualityTags(settings.nai.model),
-    read: () => settings.nai.qualityTags,
-    write: v => (settings.nai.qualityTags = v),
-  },
-  {
-    key: 'negative',
-    label: '负面提示词',
-    hint: '留空 = 按模型取官方负面词;要额外排除什么,直接往这一份里接。画师串里设置了负面词时,会用画师串那份,这里的不生效。',
-    fallback: () => naiDefaultUndesired(settings.nai.model),
-    read: () => settings.nai.undesiredContent,
-    write: v => (settings.nai.undesiredContent = v),
-  },
-];
-
-/**
- * 当前画师串的两个绑定位;read/write 直接落在选中条目上(settings 是 reactive,就地编辑)。
- * 只在真的选中了一条时存在(选「不使用」时没有绑定对象,列表整个不渲染)。
- */
-const artistBoundTargets = computed<NaiPromptTarget[]>(() => {
-  const a = artist.value;
-  if (!a) return [];
-  const readonly = isBuiltinArtist.value;
-  return [
-    {
-      key: 'quality',
-      label: '正面质量词',
-      readonly,
-      hint: readonly
-        ? '内置画师串的绑定位随插件版本更新,不可改;复制为我的画师串后可自定义。留空 = 用渠道级设置(渠道级也留空,则按模型取官方词)。'
-        : '这份质量词随当前画师串一起切换。留空 = 用渠道级设置(渠道级也留空,则按模型取官方词)。',
-      fallback: () => settings.nai.qualityTags.trim() || naiDefaultQualityTags(settings.nai.model),
-      read: () => a.quality,
-      write: v => (a.quality = v),
-    },
-    {
-      key: 'negative',
-      label: '负面提示词',
-      readonly,
-      hint: readonly
-        ? '内置画师串的绑定位随插件版本更新,不可改;复制为我的画师串后可自定义。留空 = 用渠道级设置(渠道级也留空,则按模型取官方负面词)。'
-        : '这份负面词随当前画师串一起切换。留空 = 用渠道级设置(渠道级也留空,则按模型取官方负面词)。',
-      fallback: () =>
-        settings.nai.undesiredContent.trim() || naiDefaultUndesired(settings.nai.model),
-      read: () => a.negative,
-      write: v => (a.negative = v),
-    },
-  ];
-});
-
-/** 该条是否已有自定义值(非空即视为覆盖下一级)。 */
-function isTargetCustom(target: NaiPromptTarget): boolean {
-  return target.read().trim().length > 0;
-}
-
-/** 当前画师串是否绑定了该字段——绑定时渠道值被覆盖,渠道列表的徽标要说出这件事。 */
-function isShadowedByArtist(key: NaiPromptTarget['key']): boolean {
-  const a = artist.value;
-  if (!a) return false;
-  return key === 'quality' ? !!a.quality.trim() : !!a.negative.trim();
-}
-
-// 正在编辑的那条;draft 是草稿,点「完成」才写回 settings(取消则丢弃)。
-const editingNaiPrompt = ref<NaiPromptTarget | null>(null);
-const naiPromptDraft = ref('');
-
-function openNaiPrompt(target: NaiPromptTarget) {
-  editingNaiPrompt.value = target;
-  // 已自定义→载入用户内容;未自定义→预填下一级回落值,方便直接在其上改
-  naiPromptDraft.value = target.read().trim() || target.fallback();
-}
-function closeNaiPrompt() {
-  editingNaiPrompt.value = null;
-  naiPromptDraft.value = '';
-}
-function saveNaiPrompt() {
-  const target = editingNaiPrompt.value;
-  if (!target || target.readonly) return; // 内置配方的绑定位只读(按钮已隐藏,双保险)
-  const v = naiPromptDraft.value.trim();
-  target.write(v === target.fallback().trim() ? '' : naiPromptDraft.value);
-  closeNaiPrompt();
-}
-/** 「恢复默认」:把草稿重置回落值(保存后即变回「跟随下一级」) */
-function resetNaiPromptDraft() {
-  const target = editingNaiPrompt.value;
-  if (target) naiPromptDraft.value = target.fallback();
-}
-
 /* ============ Vibe 库 ============ */
 
+/*
+ * 库是全局的,勾选(叠加哪几张)记在方案上。这里的勾选作用于**当前方案**;
+ * 编辑别的方案时在方案弹窗里勾。编码按当前方案的模型与接入点进行。
+ */
 const vibeEncoding = ref(false);
 const vibeFileInput = ref<HTMLInputElement | null>(null);
 const vibeImportInput = ref<HTMLInputElement | null>(null);
 
 let vibeSeq = 0;
 
-/** 当前模型的 vibe 编码 key;vibe 缺此 key 时生成会被跳过,列表里给「补编码」入口。 */
-const currentVibeKey = computed(() => vibeModelKey(settings.nai.model));
-const vibesSupported = computed(() => naiSupportsVibes(settings.nai.model));
-const samplerOptions = computed(() => naiSamplers(settings.nai.model));
+/** 当前方案模型的 vibe 编码 key;vibe 缺此 key 时生成会被跳过,列表里给「补编码」入口。 */
+const currentVibeKey = computed(() => vibeModelKey(active.value.model));
+const vibesSupported = computed(() => naiSupportsVibes(active.value.model));
 
-/** BbiSelect 的 modelValue 是 string,而 nai.model 是字面量联合;这层 get/set 只为搭桥。
- *  写入前对一遍 NAI_MODELS:下拉本就只发合法值,但少了这句类型断言就是空口无凭。 */
-const modelSel = computed<string>({
-  get: () => settings.nai.model,
-  set: v => {
-    const hit = NAI_MODELS.find(m => m.value === v);
-    if (hit) settings.nai.model = hit.value;
-  },
-});
+const activeVibeIds = computed(() => new Set(active.value.vibeIds));
 
 /** 生成 vibe 列表缩略图(最长边 96px 的 jpeg dataURL);失败回空串,由入库方按「无缩略图」处理。 */
 async function makeThumbnail(dataUrl: string): Promise<string> {
@@ -481,20 +505,27 @@ async function makeThumbnail(dataUrl: string): Promise<string> {
 /**
  * 取闸门槽位跑一次 vibe 编码。
  *
- * 编码是一次真实的 NAI 请求,所以与楼层卡片共用同一个闸门(floor/genQueue.ts):
+ * 编码是一次真实的 NAI 请求,所以与楼层卡片共用同一个接入点闸门(floor/genQueue.ts):
  * 否则「一边出图一边编码」在账号上就是两条并发,且完全绕过 429 冷却。
  * 代价是出图在跑时点编码会先等出图完 —— 这是对的,按钮那边有 vibeEncoding 转圈提示。
  */
 async function encodeVibeGated(imageBase64: string): Promise<string> {
-  const release = await acquireNaiSlot();
+  const nai = effectiveNai();
+  const release = await acquireNaiSlot(undefined, nai.endpointId);
   try {
-    return await encodeVibeImage(effectiveNai(), imageBase64, settings.nai.model);
+    return await encodeVibeImage(nai, imageBase64, active.value.model);
   } finally {
     release();
   }
 }
 
-/** 上传参考图 → 调 /ai/encode-vibe 编码(按当前模型)→ 入库。 */
+/** 新入库的 vibe 直接加进当前方案:上传/导入它就是为了马上用。 */
+function addVibeToLibrary(vibe: NaiVibe) {
+  settings.nai.vibes.push(vibe);
+  setPlanVibe(active.value, vibe.id, true);
+}
+
+/** 上传参考图 → 调 /ai/encode-vibe 编码(按当前方案的模型)→ 入库。 */
 async function onVibeFileChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -509,16 +540,17 @@ async function onVibeFileChange(event: Event) {
       reader.readAsDataURL(file);
     });
     const imageBase64 = dataUrl.split(',')[1] ?? '';
+    const model = active.value.model;
     const encoding = await encodeVibeGated(imageBase64);
     const thumbnail = await makeThumbnail(dataUrl);
     const id = `vibe_${Date.now()}_${++vibeSeq}`;
     const data = {
       image: imageBase64,
       thumbnail,
-      encodings: { [currentVibeKey.value]: { encoding, infoExtracted: 1 } },
+      encodings: { [vibeModelKey(model)]: { encoding, infoExtracted: 1 } },
     };
     const paths = await saveVibeFiles(data, null, id);
-    settings.nai.vibes.push(
+    addVibeToLibrary(
       vibeMetaFromData(
         id,
         file.name.replace(/\.[^.]+$/, '') || `Vibe ${settings.nai.vibes.length + 1}`,
@@ -526,10 +558,9 @@ async function onVibeFileChange(event: Event) {
         paths.thumbnailPath,
         data,
         0.6,
-        true,
       ),
     );
-    toastr.success(`已按 ${settings.nai.model} 编码并加入 Vibe 库`, 'Vibe');
+    toastr.success(`已按 ${modelLabel(model)} 编码,加入 Vibe 库并在当前方案启用`, 'Vibe');
   } catch (error) {
     toastr.error(errorMessage(error), 'Vibe 编码失败');
   } finally {
@@ -537,21 +568,22 @@ async function onVibeFileChange(event: Event) {
   }
 }
 
-/**  vibe 缺当前模型编码时单独补(切换模型后常见)。 */
+/** vibe 缺当前方案模型的编码时单独补(切换模型后常见)。 */
 async function reencodeVibe(vibe: NaiVibe) {
   if (!vibe.hasImage || vibeEncoding.value) return;
   vibeEncoding.value = true;
   try {
+    const model = active.value.model;
     const data = await loadVibeData(vibe);
     if (!data.image) throw new Error('该 Vibe 没有参考原图');
     const encoding = await encodeVibeGated(data.image);
-    data.encodings[currentVibeKey.value] = { encoding, infoExtracted: 1 };
+    data.encodings[vibeModelKey(model)] = { encoding, infoExtracted: 1 };
     const paths = await saveVibeFiles(data, vibe, vibe.id);
     vibe.dataPath = paths.dataPath;
     vibe.thumbnailPath = paths.thumbnailPath;
     vibe.modelKeys = Object.keys(data.encodings);
     vibe.fingerprint = vibeFingerprint(data.encodings);
-    toastr.success(`「${vibe.name}」已补 ${settings.nai.model} 编码`, 'Vibe');
+    toastr.success(`「${vibe.name}」已补 ${modelLabel(model)} 编码`, 'Vibe');
   } catch (error) {
     toastr.error(errorMessage(error), 'Vibe 编码失败');
   } finally {
@@ -615,24 +647,30 @@ function toggleGroup(key: string) {
 }
 
 function groupActive(group: VibeGroup): boolean {
-  return isGroupActive(group, settings.nai.vibes);
+  return isGroupActive(group, settings.nai.vibes, activeVibeIds.value);
 }
 
-/** 只开这组:清掉组外的勾选并开启本组。解决「换一套搭配」要逐条点的痛点。 */
+/** 只开这组:当前方案只叠加本组。解决「换一套搭配」要逐条点的痛点。 */
 function soloGroup(group: VibeGroup) {
-  const ids = new Set(group.all.map(v => v.id));
-  for (const vibe of settings.nai.vibes) vibe.enabled = ids.has(vibe.id);
+  active.value.vibeIds = group.all.map(v => v.id);
 }
 
 /** 全开/全关只动本组,组外不碰——想叠加两组就各点一次「全开」。 */
 function setGroupEnabled(group: VibeGroup, enabled: boolean) {
-  for (const vibe of group.all) vibe.enabled = enabled;
+  const ids = new Set(active.value.vibeIds);
+  for (const vibe of group.all) {
+    if (enabled) ids.add(vibe.id);
+    else ids.delete(vibe.id);
+  }
+  active.value.vibeIds = [...ids];
 }
 
-const enabledCount = computed(() => settings.nai.vibes.filter(v => v.enabled).length);
+const enabledCount = computed(
+  () => settings.nai.vibes.filter(v => activeVibeIds.value.has(v.id)).length,
+);
 
 function groupEnabledCount(group: VibeGroup): number {
-  return group.all.filter(v => v.enabled).length;
+  return group.all.filter(v => activeVibeIds.value.has(v.id)).length;
 }
 
 /** 重命名整组:对成员 group 字段批量赋值,不存在悬空引用。 */
@@ -653,7 +691,7 @@ function renameGroup(group: VibeGroup) {
   }
 }
 
-/** 解散分组:只清 group 字段,vibe 本体与启用状态都不动(不是删除)。 */
+/** 解散分组:只清 group 字段,vibe 本体与各方案的勾选都不动(不是删除)。 */
 function dissolveGroup(group: VibeGroup) {
   if (!group.name) return;
   for (const vibe of settings.nai.vibes) {
@@ -664,25 +702,25 @@ function dissolveGroup(group: VibeGroup) {
 /**
  * 旧版从智绘姬迁移时把组名拼进了显示名(「组名 · 原名」),分组结构因此丢失。
  * 这里按前缀还原:只动未分组的条目,不覆盖用户已手工分好的组。
- * 按钮仅在真有可整理的条目时出现——没得整理时摆一颗点不出反应的按钮不如不摆。
+ * 按钮仅在真有可整理的条目时出现。
  */
 const prefixGroupPlans = computed(() => planPrefixGroups(settings.nai.vibes));
 
 function applyPrefixGroups() {
-  const plans = prefixGroupPlans.value;
-  if (!plans.length) return;
+  const items = prefixGroupPlans.value;
+  if (!items.length) return;
   const byId = new Map(settings.nai.vibes.map(v => [v.id, v]));
-  for (const plan of plans) {
-    const vibe = byId.get(plan.id);
+  for (const item of items) {
+    const vibe = byId.get(item.id);
     if (!vibe) continue;
-    vibe.group = plan.group;
-    vibe.name = plan.name;
+    vibe.group = item.group;
+    vibe.name = item.name;
   }
-  const groups = new Set(plans.map(p => p.group)).size;
-  toastr.success(`已把 ${plans.length} 个 Vibe 整理进 ${groups} 个分组`, 'Vibe');
+  const groups = new Set(items.map(p => p.group)).size;
+  toastr.success(`已把 ${items.length} 个 Vibe 整理进 ${groups} 个分组`, 'Vibe');
 }
 
-/* ============ 从智绘姬迁移 ============ */
+/* ============ 从智绘姬迁移 vibe ============ */
 
 /**
  * 智绘姬 vibe 检测:面板挂载时做一次(读的是 settings 里的引用列表,同步廉价)。
@@ -709,12 +747,13 @@ async function runMigrate() {
         migrateMsg.value = `正在迁移 ${current}/${total}…`;
       },
     });
+    // 迁移进来的不加进任何方案:一次几十张,全叠上去画面就糊了
     settings.nai.vibes.push(...result.vibes);
     const parts = [`新增 ${result.imported} 个`];
     if (result.duplicates) parts.push(`重复跳过 ${result.duplicates}`);
     if (result.failed) parts.push(`失败 ${result.failed}`);
     migrateMsg.value = `迁移完成：${parts.join(' / ')}。`;
-    if (result.imported) migrateMsg.value += '新迁移的 Vibe 默认未启用，请按需开启。';
+    if (result.imported) migrateMsg.value += '新迁移的 Vibe 没有加进任何方案，请按需勾选。';
     if (result.failed) migrateMsg.value += '失败项可能不在本机浏览器，或保存文件时出错。';
     toastr.success(migrateMsg.value, '从智绘姬迁移');
   } catch (error) {
@@ -734,10 +773,10 @@ async function onVibeImportChange(event: Event) {
     const id = `vibe_${Date.now()}_${++vibeSeq}`;
     const data = { image: parsed.image, thumbnail: parsed.thumbnail, encodings: parsed.encodings };
     const paths = await saveVibeFiles(data, null, id);
-    settings.nai.vibes.push(
-      vibeMetaFromData(id, parsed.name, paths.dataPath, paths.thumbnailPath, data, parsed.strength, true),
+    addVibeToLibrary(
+      vibeMetaFromData(id, parsed.name, paths.dataPath, paths.thumbnailPath, data, parsed.strength),
     );
-    toastr.success(`已导入「${parsed.name}」`, 'Vibe');
+    toastr.success(`已导入「${parsed.name}」并在当前方案启用`, 'Vibe');
   } catch (error) {
     toastr.error(errorMessage(error), 'Vibe 导入失败');
   }
@@ -760,8 +799,7 @@ async function exportVibe(vibe: NaiVibe) {
 
 /**
  * 强度取值:滑块与数字框共用 clampVibeStrength(与设置反序列化、vibe 导入同一口径)。
- * 滑块步进 0.01 只是「拖着好用」的粒度,数字框 step="any" 才是真正的自由填值——
- * 想要 0.375 就填 0.375,不再被步进吸附到 5 的倍数上。
+ * 滑块步进 0.01 只是「拖着好用」的粒度,数字框 step="any" 才是真正的自由填值。
  */
 function setVibeStrength(vibe: NaiVibe, raw: unknown) {
   vibe.strength = clampVibeStrength(raw, vibe.strength);
@@ -787,496 +825,124 @@ async function removeVibe(vibe: NaiVibe) {
   }
   const index = settings.nai.vibes.indexOf(vibe);
   if (index >= 0) settings.nai.vibes.splice(index, 1);
+  // 各方案的勾选一并清掉,不留指向已删 vibe 的悬空 id
+  for (const p of settings.nai.plans) {
+    if (p.vibeIds.includes(vibe.id)) p.vibeIds = p.vibeIds.filter(id => id !== vibe.id);
+  }
   if (deleteError) toastr.warning(`索引已删除，但文件清理失败：${errorMessage(deleteError)}`, 'Vibe');
 }
 </script>
 
 <template>
   <div class="panel">
-    <p class="bbi-page-intro">
-      NovelAI 生图接口。地址默认为官方,填第三方兼容站(镜像/转发)即走第三方,协议一致。
-    </p>
-
     <div class="bbi-sections">
-      <Collapsible title="配置" :open="false">
-        <!-- 接入点库:公益站换着用的人不止一个出口,但换站只换地址+密钥,
-             模型/采样器/尺寸等出图参数一概留在下面,渠道级共用,切站不用重配 -->
-        <div class="art-row">
-          <span class="bbi-field-label">接入点</span>
-          <input
-            v-if="renamingEndpoint"
-            ref="endpointNameInput"
-            class="bbi-input"
-            type="text"
-            v-model="endpointNameDraft"
-            placeholder="接入点名称"
-            spellcheck="false"
-            title="Enter 确认，Esc 取消"
-            @keydown.enter.prevent="commitRenameEndpoint"
-            @keydown.esc.stop.prevent="renamingEndpoint = false"
-            @blur="commitRenameEndpoint"
-          />
-          <BbiSelect
-            v-else
-            class="art-select"
-            v-model="activeEndpointId"
-            :options="endpointOptions"
-            aria-label="当前接入点"
-          />
-          <span v-if="!renamingEndpoint" class="art-ops">
+      <Collapsible title="出图方案">
+        <!-- 一套方案 = 接入点 + 模型 + 画风 + 采样;点行整套切换,点 ✎ 才弹出它的全部设置 -->
+        <div class="grp" role="radiogroup" aria-label="出图方案">
+          <div
+            v-for="p in settings.nai.plans"
+            :key="p.id"
+            class="grp-item plan-item"
+            :class="{ 'is-on': p.id === active.id }"
+          >
             <button
-              class="bbi-icon-btn art-op"
+              class="item-main"
               type="button"
-              :disabled="isOfficialEndpoint"
-              :title="isOfficialEndpoint ? '官方接入点不可改名' : '重命名当前接入点'"
-              aria-label="重命名当前接入点"
-              @click="startRenameEndpoint"
+              role="radio"
+              :aria-checked="p.id === active.id"
+              :title="p.id === active.id ? '当前出图用的方案' : '改用这套方案出图'"
+              @click="switchTo(p)"
             >
-              <Icon name="edit" :size="14" />
+              <span class="plan-radio" aria-hidden="true"></span>
+              <span class="item-name">{{ p.name || '未命名方案' }}</span>
             </button>
-            <button
-              class="bbi-icon-btn art-op"
-              type="button"
-              title="新建一条空接入点"
-              aria-label="新建一条空接入点"
-              @click="addEndpoint"
-            >
-              <Icon name="plus" :size="14" />
-            </button>
-            <button
-              class="bbi-icon-btn art-op"
-              type="button"
-              :title="
-                isOfficialEndpoint
-                  ? '照官方复制一条,复制出来的地址可以改'
-                  : '复制当前接入点(含地址与密钥)'
-              "
-              aria-label="复制当前接入点"
-              @click="duplicateEndpoint"
-            >
-              <Icon name="copy" :size="14" />
-            </button>
-            <button
-              class="bbi-icon-btn art-op art-remove"
-              type="button"
-              :disabled="isOfficialEndpoint"
-              :title="isOfficialEndpoint ? '官方接入点不可删除' : '删除当前接入点'"
-              aria-label="删除当前接入点"
-              @click="endpointDeleteOpen = true"
-            >
-              <Icon name="trash" :size="14" />
-            </button>
-          </span>
-        </div>
-
-        <div class="bbi-field">
-          <div class="bbi-field-head">
-            <span class="bbi-field-label">接口地址</span>
+            <span class="item-ops">
+              <button class="icon-btn" type="button" title="编辑这套方案" aria-label="编辑这套方案" @click="openPlan(p)">
+                <Icon name="edit" :size="14" />
+              </button>
+              <button class="icon-btn" type="button" title="复制这套方案" aria-label="复制这套方案" @click="duplicatePlan(p)">
+                <Icon name="copy" :size="14" />
+              </button>
+              <button
+                class="icon-btn is-danger"
+                type="button"
+                :disabled="!canRemove"
+                :title="canRemove ? '删除这套方案' : '至少要保留一套方案'"
+                aria-label="删除这套方案"
+                @click="askRemovePlan(p)"
+              >
+                <Icon name="trash" :size="14" />
+              </button>
+            </span>
           </div>
-          <input
-            class="bbi-input"
-            type="text"
-            v-model="endpoint.url"
-            :readonly="isOfficialEndpoint"
-            :placeholder="NAI_OFFICIAL_URL"
-            spellcheck="false"
-            :title="isOfficialEndpoint ? '官方接入点地址固定,不可修改' : ''"
-          />
-          <p class="bbi-field-hint">
-            {{
-              isOfficialEndpoint
-                ? '官方接入点,地址固定;要用第三方站请点上方「+」新建一条。'
-                : '第三方站填域名即可,自动补全 /ai 端点。'
-            }}
-          </p>
         </div>
-
-        <div class="bbi-field">
-          <div class="bbi-field-head">
-            <span class="bbi-field-label">API Key</span>
-          </div>
-          <div class="key-row">
-            <input
-              class="bbi-input"
-              :type="showKey ? 'text' : 'password'"
-              v-model="endpoint.key"
-              placeholder="nai-..."
-              spellcheck="false"
-            />
-            <button
-              class="bbi-btn"
-              type="button"
-              :title="showKey ? '隐藏' : '显示'"
-              @click="showKey = !showKey"
-            >
-              <Icon :name="showKey ? 'eye-off' : 'eye'" />
-            </button>
-          </div>
-          <!-- key 随条目走而非渠道级共用:公益站各有各的 key,共用一份等于每次换站都要重填 -->
-          <p class="bbi-field-hint">
-            {{
-              isOfficialEndpoint
-                ? '在 NovelAI 设置页生成。每条接入点各存各的 key。'
-                : '该站自己的 key;每条接入点各存各的,切回官方不会串。'
-            }}
-          </p>
-        </div>
-
-        <div class="conn-actions">
-          <span v-if="inUse" class="conn-inuse"><Icon name="check" :size="13" /> 当前出图渠道</span>
+        <div class="list-foot">
+          <button class="bbi-btn bbi-btn-sm" type="button" @click="addPlan">
+            <Icon name="plus" :size="12" />
+            新建方案
+          </button>
+          <span class="list-foot-spacer"></span>
+          <button
+            class="quiet-btn"
+            type="button"
+            :disabled="testing"
+            title="测试当前方案所用的接入点"
+            @click="onTestConnection"
+          >
+            <Icon name="plug" :size="13" />
+            {{ testing ? '连接中…' : '测试连接' }}
+          </button>
+          <span v-if="inUse" class="in-use"><Icon name="check" :size="13" /> 正在用 NovelAI 出图</span>
           <button
             v-else
-            class="bbi-btn conn-use"
+            class="bbi-btn bbi-btn-sm bbi-btn-primary"
             type="button"
             title="tag 书写规范会切到 NAI"
             @click="settings.defaultBackend = 'nai'"
           >
-            使用此渠道出图
-          </button>
-          <button class="bbi-btn" type="button" :disabled="testing" @click="onTestConnection">
-            <Icon name="plug" />
-            {{ testing ? '连接中…' : '测试连接' }}
+            用 NovelAI 出图
           </button>
         </div>
       </Collapsible>
 
-      <Collapsible title="提示词" :open="false">
-        <!-- 画师串库:形制与 ComfyUI 工作流库一致,多一个「不使用」选项 -->
-        <div class="art-row">
-          <span class="bbi-field-label">画师串</span>
-          <input
-            v-if="renamingArtist"
-            ref="artistNameInput"
-            class="bbi-input"
-            type="text"
-            v-model="artistNameDraft"
-            placeholder="画师串名称"
-            spellcheck="false"
-            title="Enter 确认，Esc 取消"
-            @keydown.enter.prevent="commitRenameArtist"
-            @keydown.esc.stop.prevent="renamingArtist = false"
-            @blur="commitRenameArtist"
-          />
-          <BbiSelect
-            v-else
-            class="art-select"
-            v-model="activeArtistId"
-            :options="artistOptions"
-            aria-label="当前画师串"
-          />
-          <span v-if="!renamingArtist" class="art-ops">
-            <button
-              class="bbi-icon-btn art-op"
-              type="button"
-              title="管理画师串库:搜索、预览图、批量删除"
-              aria-label="管理画师串库"
-              @click="artistManagerOpen = true"
-            >
-              <Icon name="grid" :size="14" />
+      <Collapsible title="接入点" :open="false">
+        <!-- 只列名字,点行进弹窗编辑(与副 API 渠道同款) -->
+        <div class="grp">
+          <div v-for="ep in settings.nai.endpoints" :key="ep.id" class="grp-item ep-item">
+            <button class="item-main" type="button" title="编辑这个接入点" @click="openEndpoint(ep)">
+              <span class="item-name">{{ ep.name || '未命名接入点' }}</span>
+              <Icon name="chevron" class="ep-chevron" :size="14" />
             </button>
-            <button
-              class="bbi-icon-btn art-op"
-              type="button"
-              :disabled="!hasArtist || isBuiltinArtist"
-              :title="
-                !hasArtist
-                  ? '未选中画师串'
-                  : isBuiltinArtist
-                    ? '内置画师串不可改名,点复制建一条自己的'
-                    : '重命名当前画师串'
-              "
-              aria-label="重命名当前画师串"
-              @click="startRenameArtist"
-            >
-              <Icon name="edit" :size="14" />
-            </button>
-            <button
-              class="bbi-icon-btn art-op"
-              type="button"
-              title="新建一条空画师串"
-              aria-label="新建一条空画师串"
-              @click="addArtist"
-            >
-              <Icon name="plus" :size="14" />
-            </button>
-            <button
-              class="bbi-icon-btn art-op"
-              type="button"
-              :disabled="!hasArtist"
-              :title="
-                !hasArtist
-                  ? '未选中画师串'
-                  : isBuiltinArtist
-                    ? '复制为我的画师串,复制出来的可以随便改'
-                    : '复制当前画师串'
-              "
-              aria-label="复制当前画师串"
-              @click="duplicateArtist"
-            >
-              <Icon name="copy" :size="14" />
-            </button>
-            <button
-              class="bbi-icon-btn art-op art-remove"
-              type="button"
-              :disabled="!hasArtist || isBuiltinArtist"
-              :title="
-                !hasArtist
-                  ? '未选中画师串'
-                  : isBuiltinArtist
-                    ? '内置画师串不可删除,它会随插件版本更新'
-                    : '删除当前画师串'
-              "
-              aria-label="删除当前画师串"
-              @click="artistDeleteOpen = true"
-            >
-              <Icon name="trash" :size="14" />
-            </button>
-          </span>
+          </div>
         </div>
-
-        <!-- 从智绘姬导入提示词预设的入口在下方「从智绘姬迁移」折叠区,这里不做常驻提示 -->
-
-        <!-- 内容内联编辑:画师串通常就几个 tag,让「选中哪条」与「这条写了什么」一眼同框 -->
-        <template v-if="artist">
-          <BbiTextarea
-            v-model="artist.prompt"
-            :rows="3"
-            :max-rows="8"
-            mono
-            :readonly="isBuiltinArtist"
-            placeholder="artist:xxx, artist:yyy"
-          />
-          <p v-if="isBuiltinArtist" class="bbi-field-hint art-hint">
-            内置画师串随插件版本更新,不可直接改;点上方复制按钮建一条自己的再改。
-          </p>
-          <!-- 仅 V5 模型下提醒:V5 与 4.5 的画师串响应差异大,4.5 及以下不需要这条噪音 -->
-          <p v-if="isV5Model" class="bbi-field-hint art-hint art-hint-warn">
-            NAI 5 对画师串的响应与 4.5 差异很大,旧画师串直接套用效果可能跑偏,建议重新调试。
-          </p>
-
-          <!-- 随画师串一起切换的正/负面词:设置了覆盖下面渠道级,没设置就用下面的 -->
-          <ul class="bbi-prompt-list art-bound-list">
-            <li v-for="t in artistBoundTargets" :key="t.key" class="bbi-prompt-item">
-              <button class="bbi-prompt-open" type="button" @click="openNaiPrompt(t)">
-                <span class="bbi-prompt-name">{{ t.label }}</span>
-                <span class="bbi-prompt-state" :class="{ 'is-custom': isTargetCustom(t) }">
-                  {{ isTargetCustom(t) ? '已设置' : '未设置' }}
-                </span>
-                <Icon name="edit" class="bbi-prompt-edit" />
-              </button>
-            </li>
-          </ul>
-          <p class="bbi-field-hint art-hint">
-            这里设置的提示词会覆盖下面的，随画师串一起切换;这里没设置，就会用下面的。
-          </p>
-        </template>
-        <!-- 不选画师串时无提示:下拉里「不使用」已自明 -->
-
-        <hr class="art-divider" />
-
-        <!-- 渠道级质量词/负面词:只读列表行,点行进弹窗编辑(与设置页「自定义提示词」同款) -->
-        <ul class="bbi-prompt-list">
-          <li v-for="t in CHANNEL_PROMPT_TARGETS" :key="t.key" class="bbi-prompt-item">
-            <button class="bbi-prompt-open" type="button" @click="openNaiPrompt(t)">
-              <span class="bbi-prompt-name">{{ t.label }}</span>
-              <span v-if="isShadowedByArtist(t.key)" class="bbi-prompt-state is-shadowed">
-                已被画师串覆盖
-              </span>
-              <span v-else class="bbi-prompt-state" :class="{ 'is-custom': isTargetCustom(t) }">
-                {{ isTargetCustom(t) ? '已自定义' : '默认' }}
-              </span>
-              <Icon name="edit" class="bbi-prompt-edit" />
-            </button>
-          </li>
-        </ul>
-        <p class="bbi-field-hint art-hint">
-          画师串里没设置正/负面词时，就会用这里的;这里也留空，则按模型取官方词。
-        </p>
+        <div class="list-foot">
+          <button class="bbi-btn bbi-btn-sm" type="button" @click="addEndpoint">
+            <Icon name="plus" :size="12" />
+            添加接入点
+          </button>
+        </div>
       </Collapsible>
 
-      <Collapsible title="默认参数" :open="false">
-        <!-- 语义配对紧凑行:双字段行两列、数字参数行四列;说明统一收进行下的一行 hint -->
-        <div class="bbi-field">
-          <div class="bbi-field-head">
-            <span class="bbi-field-label">模型</span>
-          </div>
-          <BbiSelect
-            class="be-select"
-            v-model="modelSel"
-            :options="NAI_MODELS"
-            aria-label="NAI 模型"
-          />
-        </div>
-
-        <label class="bbi-switch-row">
-          <span class="bbi-field-label">生成自然语言</span>
-          <input v-model="settings.nai.naturalLanguage" type="checkbox" class="bbi-checkbox" />
-        </label>
-        <p class="bbi-field-hint">
-          开:自动 tag 为画面与每个角色额外写一段英文描述;关:只写 tag。4.5 的提示词上限约 512 token
-          (画面与所有角色共用),自然语言最占篇幅,超了会被截断、画面走样,可以关掉试试。
-          只影响之后新写的提示词:正文里已有的自然语言照常发送,想对比可在「编辑提示词」里点「AI 重写提示词」。
-          多角色提示照常按角色拆分,只是每个角色同样只写 tag。
-        </p>
-
-        <div class="be-row">
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">竖屏尺寸(宽×高)</span>
-            </div>
-            <input
-              class="bbi-input"
-              type="text"
-              v-model="settings.nai.portraitSize"
-              list="nai-portrait-presets"
-              placeholder="832×1216"
-              spellcheck="false"
-            />
-            <datalist id="nai-portrait-presets">
-              <option value="832×1216">竖版</option>
-              <option value="1024×1536">大竖版</option>
-              <option value="1024×1024">方图</option>
-            </datalist>
-          </div>
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">横屏尺寸(宽×高)</span>
-            </div>
-            <input
-              class="bbi-input"
-              type="text"
-              v-model="settings.nai.landscapeSize"
-              list="nai-landscape-presets"
-              placeholder="1216×832"
-              spellcheck="false"
-            />
-            <datalist id="nai-landscape-presets">
-              <option value="1216×832">横版</option>
-              <option value="1536×1024">大横版</option>
-              <option value="1024×1024">方图</option>
-            </datalist>
-          </div>
-        </div>
-        <div class="bbi-select-row">
-          <span class="bbi-field-label">画幅方向</span>
-          <div class="bbi-segmented" role="tablist" aria-label="NAI 画幅方向">
-            <button
-              v-for="opt in ORIENTATION_LOCKS"
-              :key="opt.value"
-              class="bbi-seg"
-              :class="{ 'is-on': settings.nai.orientationLock === opt.value }"
-              type="button"
-              role="tab"
-              :aria-selected="settings.nai.orientationLock === opt.value"
-              @click="settings.nai.orientationLock = opt.value"
-            >
-              {{ opt.label }}
-            </button>
-          </div>
-        </div>
-        <p class="bbi-field-hint">
-          竖屏用于单人、特写、立绘;横屏用于群像、远景、全景。「自动」由自动 tag 按画面判定;
-          锁定后每张图都按该方向出,自动 tag 也按这个画幅构图。正文里已记下的方向不会被改写,改回「自动」即恢复。
-        </p>
-
-        <div class="be-row">
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">采样器</span>
-            </div>
-            <BbiSelect
-              class="be-select"
-              v-model="settings.nai.sampler"
-              :options="samplerOptions"
-              aria-label="采样器"
-            />
-          </div>
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">噪声表</span>
-            </div>
-            <BbiSelect
-              class="be-select"
-              v-model="settings.nai.noiseSchedule"
-              :options="NAI_NOISE_SCHEDULES"
-              aria-label="噪声表"
-            />
-          </div>
-        </div>
-
-        <div class="be-row be-row--nums">
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">步数</span>
-            </div>
-            <input class="bbi-input" type="number" v-model.number="settings.nai.steps" min="1" max="50" />
-          </div>
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">Scale</span>
-            </div>
-            <input
-              class="bbi-input"
-              type="number"
-              v-model.number="settings.nai.scale"
-              min="0"
-              max="35"
-              step="0.1"
-            />
-          </div>
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">Rescale</span>
-            </div>
-            <input
-              class="bbi-input"
-              type="number"
-              v-model.number="settings.nai.cfgRescale"
-              min="0"
-              max="1"
-              step="0.05"
-            />
-          </div>
-          <div class="bbi-field">
-            <div class="bbi-field-head">
-              <span class="bbi-field-label">种子</span>
-            </div>
-            <input class="bbi-input" type="number" v-model.number="settings.nai.seed" min="0" />
-          </div>
-        </div>
-        <p class="bbi-field-hint">Scale = 提示词相关性;Rescale = 相关性调整;种子 0 = 随机。</p>
-
-        <label class="bbi-switch-row">
-          <span class="bbi-field-label">Variety Boost(画面多样性,按尺寸自动计算)</span>
-          <input v-model="settings.nai.varietyBoost" type="checkbox" class="bbi-checkbox" />
-        </label>
-
-        <div class="bbi-num-row">
-          <span class="bbi-field-label">同时出图数</span>
-          <input
-            class="bbi-input bbi-num"
-            type="number"
-            v-model.number="settings.nai.concurrency"
-            min="1"
-            max="4"
-          />
-        </div>
-        <p class="bbi-field-hint">
-          NAI 服务端不排队,并发高容易被限流(429),建议保持 1;超出的请求自动排队等待。
-          被限流时会自动退避重试(最多 3 次),并让所有排队任务一起冷却,不会连着撞上去。
-        </p>
+      <Collapsible title="画师串库" :open="false">
+        <NaiArtistLibrary />
       </Collapsible>
 
       <Collapsible title="Vibe 库(氛围转移)" :open="false">
         <p v-if="vibesSupported" class="bbi-field-hint vibe-hint">
-          上传参考图,生成时叠加其风格/氛围;编码按当前选中的模型进行,会消耗一次接口调用。
+          上传参考图,生成时叠加其风格/氛围;编码按当前方案「{{ active.name }}」的模型进行,会消耗一次接口调用。
+          这里的勾选作用于当前方案,别的方案在它的编辑窗里勾。
         </p>
         <p v-else class="bbi-field-hint vibe-hint">
-          Current model does not support Vibe Transfer.
+          当前方案用的是 NAI 5,官方暂不支持 Vibe:勾选会保留,但出图时跳过;编码要先切到 4.5 方案。
         </p>
 
         <div class="vibe-actions">
-          <button class="bbi-btn" type="button" :disabled="vibeEncoding || !vibesSupported" @click="vibeFileInput?.click()">
+          <button
+            class="bbi-btn"
+            type="button"
+            :disabled="vibeEncoding || !vibesSupported"
+            @click="vibeFileInput?.click()"
+          >
             <Icon name="plus" />
             {{ vibeEncoding ? '编码中…' : '上传图片编码' }}
           </button>
@@ -1284,10 +950,6 @@ async function removeVibe(vibe: NaiVibe) {
             <Icon name="download" />
             导入 .naiv4vibe
           </button>
-          <label class="bbi-switch-row vibe-normalize">
-            <span class="bbi-field-label">强度归一化</span>
-            <input v-model="settings.nai.normalizeRefStrength" type="checkbox" class="bbi-checkbox" :disabled="!vibesSupported" />
-          </label>
           <input ref="vibeFileInput" type="file" accept="image/*" hidden @change="onVibeFileChange" />
           <input ref="vibeImportInput" type="file" accept=".naiv4vibe" hidden @change="onVibeImportChange" />
         </div>
@@ -1305,7 +967,7 @@ async function removeVibe(vibe: NaiVibe) {
               aria-label="搜索 Vibe"
             />
             <span class="vibe-count">
-              共 {{ settings.nai.vibes.length }} 个 · 已启用 {{ enabledCount }}
+              共 {{ settings.nai.vibes.length }} 个 · 当前方案叠加 {{ enabledCount }}
             </span>
             <button
               v-if="prefixGroupPlans.length"
@@ -1350,7 +1012,7 @@ async function removeVibe(vibe: NaiVibe) {
                 <button
                   class="bbi-btn bbi-btn-sm bbi-btn-primary"
                   type="button"
-                  title="只叠加这一组:关掉组外全部勾选,开启本组"
+                  title="当前方案只叠加这一组:关掉组外全部勾选,开启本组"
                   @click="soloGroup(group)"
                 >
                   只开这组
@@ -1408,9 +1070,14 @@ async function removeVibe(vibe: NaiVibe) {
                 <div class="vibe-main">
                   <div class="vibe-head">
                     <input class="bbi-input vibe-name" type="text" v-model="vibe.name" spellcheck="false" />
-                    <label class="vibe-enable" title="生成时叠加此 vibe">
-                      <input v-model="vibe.enabled" type="checkbox" class="bbi-checkbox" />
-                      启用
+                    <label class="vibe-enable" title="当前方案出图时叠加此 vibe">
+                      <input
+                        type="checkbox"
+                        class="bbi-checkbox"
+                        :checked="activeVibeIds.has(vibe.id)"
+                        @change="setPlanVibe(active, vibe.id, ($event.target as HTMLInputElement).checked)"
+                      />
+                      叠加
                     </label>
                   </div>
                   <div class="vibe-strength">
@@ -1449,15 +1116,15 @@ async function removeVibe(vibe: NaiVibe) {
                       class="bbi-btn bbi-btn-sm"
                       type="button"
                       :disabled="vibeEncoding"
-                      title="该 vibe 缺当前模型的编码,生成时会被跳过;点击按当前模型补编码"
+                      title="该 vibe 缺当前方案模型的编码,生成时会被跳过;点击补编码"
                       @click="reencodeVibe(vibe)"
                     >
                       <Icon name="refresh" :size="12" /> 补当前模型编码
                     </button>
-                    <span v-else-if="!vibesSupported" class="vibe-missing">
-                      当前模型暂不支持 Vibe
-                    </span>
-                    <span v-else-if="!vibe.modelKeys.includes(currentVibeKey)" class="vibe-missing">
+                    <span
+                      v-else-if="vibesSupported && !vibe.modelKeys.includes(currentVibeKey)"
+                      class="vibe-missing"
+                    >
                       缺当前模型编码且无原图,无法使用
                     </span>
                     <button
@@ -1468,7 +1135,12 @@ async function removeVibe(vibe: NaiVibe) {
                     >
                       <Icon name="upload" :size="12" /> 导出
                     </button>
-                    <button class="bbi-btn bbi-btn-sm" type="button" title="删除" @click="removeVibe(vibe)">
+                    <button
+                      class="bbi-btn bbi-btn-sm"
+                      type="button"
+                      title="从库里删除(所有方案的勾选一并移除)"
+                      @click="removeVibe(vibe)"
+                    >
                       <Icon name="trash" :size="12" /> 删除
                     </button>
                   </div>
@@ -1508,7 +1180,7 @@ async function removeVibe(vibe: NaiVibe) {
 
         <!-- 提示词预设导入:与 vibe 同区同级;有没有新预设不在这里报,点开弹窗看预览 -->
         <p class="bbi-field-hint vibe-hint">
-          提示词预设同理:前置固定正向 → 画师串，后置固定正向 → 正面质量词，固定负向 → 负面提示词（自动带上当前模型官方基线）。
+          提示词预设同理:前置固定正向 → 画师串，后置固定正向 / 固定负向 → 画师串自带的正/负面词（在方案编辑里一键套用）。
         </p>
         <p class="bbi-field-hint">
           <template v-if="!chatu8ArtistDetect.found">未检测到智绘姬（插件未安装或未启用）。</template>
@@ -1529,6 +1201,513 @@ async function removeVibe(vibe: NaiVibe) {
       </Collapsible>
     </div>
 
+    <ConfirmDialog
+      v-model:open="deleteOpen"
+      :title="pendingDelete ? DELETE_TITLES[pendingDelete.type] : ''"
+      confirm-text="删除"
+      confirm-icon="trash"
+      tone="danger"
+      top-layer
+      @confirm="confirmDelete"
+    >
+      确定删除「{{ pendingDelete?.name }}」？删除后无法恢复。
+    </ConfirmDialog>
+
+    <!-- ===== 接入点编辑弹窗:改的是草稿,点「完成」才写回 ===== -->
+    <ModalMask :open="!!epDraft" @close="closeEndpoint">
+      <div v-if="epDraft" class="bbi-modal ep-modal" role="dialog" aria-modal="true" aria-label="编辑接入点">
+        <header class="bbi-modal-head">
+          <span class="bbi-modal-title">{{ epEditingId ? '编辑接入点' : '添加接入点' }}</span>
+          <button class="bbi-icon-mini" type="button" title="关闭" aria-label="关闭" @click="closeEndpoint">
+            <Icon name="close" />
+          </button>
+        </header>
+
+        <label class="bbi-modal-field">
+          <span class="bbi-modal-label">名称</span>
+          <input
+            v-model="epDraft.name"
+            class="bbi-input"
+            type="text"
+            placeholder="名称"
+            spellcheck="false"
+            :readonly="epDraftOfficial"
+          />
+        </label>
+        <label class="bbi-modal-field">
+          <span class="bbi-modal-label">地址</span>
+          <input
+            v-model="epDraft.url"
+            class="bbi-input"
+            type="text"
+            :placeholder="NAI_OFFICIAL_URL"
+            spellcheck="false"
+            :readonly="epDraftOfficial"
+          />
+        </label>
+        <label class="bbi-modal-field">
+          <span class="bbi-modal-label">API Key</span>
+          <span class="ep-key-row">
+            <input
+              v-model="epDraft.key"
+              class="bbi-input"
+              :type="epKeyShown ? 'text' : 'password'"
+              placeholder="nai-..."
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button
+              class="bbi-icon-mini ep-key-eye"
+              type="button"
+              :title="epKeyShown ? '隐藏 Key' : '显示 Key'"
+              :aria-label="epKeyShown ? '隐藏 Key' : '显示 Key'"
+              :aria-pressed="epKeyShown"
+              @click.prevent="epKeyShown = !epKeyShown"
+            >
+              <Icon :name="epKeyShown ? 'eye-off' : 'eye'" :size="14" />
+            </button>
+          </span>
+        </label>
+        <label class="ep-conc-row" title="并发高容易被限流(429),官方站建议 1">
+          <span class="bbi-modal-label">同时出图数</span>
+          <input
+            v-model.number="epDraft.concurrency"
+            class="bbi-input ep-conc"
+            type="number"
+            min="1"
+            :max="NAI_CONCURRENCY_MAX"
+          />
+        </label>
+
+        <footer class="bbi-modal-foot">
+          <!-- 删除靠左、与「完成」拉开,降低误触;删不了时置灰并在 title 里说原因 -->
+          <button
+            class="bbi-btn bbi-btn-danger"
+            type="button"
+            :disabled="!!epRemoveBlock"
+            :title="epRemoveBlock || '删除这个接入点'"
+            @click="askRemoveEndpoint"
+          >
+            <Icon name="trash" :size="13" /> 删除
+          </button>
+          <span class="bbi-modal-foot-spacer"></span>
+          <button class="bbi-btn" type="button" :disabled="testingEndpoint" @click="onTestEndpoint">
+            <Icon :name="testingEndpoint ? 'refresh' : 'plug'" :size="13" /> {{ testingEndpoint ? '连接中…' : '测试' }}
+          </button>
+          <button class="bbi-btn bbi-btn-primary" type="button" @click="confirmEndpoint">完成</button>
+        </footer>
+      </div>
+    </ModalMask>
+
+    <!-- ===== 方案编辑弹窗:按「来源 / 画风 / Vibe / 画面 / 采样」分组,改动即时生效 ===== -->
+    <ModalMask :open="planOpen" @close="closePlan">
+      <div v-if="planOpen" class="bbi-modal plan-modal" role="dialog" aria-modal="true" aria-label="编辑出图方案">
+        <header class="bbi-modal-head">
+          <span class="bbi-modal-title">编辑方案</span>
+          <button class="bbi-icon-mini" type="button" title="关闭" aria-label="关闭" @click="closePlan">
+            <Icon name="close" />
+          </button>
+        </header>
+
+        <input
+          v-model="plan.name"
+          class="bbi-input plan-name-input"
+          type="text"
+          placeholder="方案名称"
+          spellcheck="false"
+          aria-label="方案名称"
+        />
+
+        <section class="grp-sec">
+          <div class="grp-cap">来源</div>
+          <div class="grp">
+            <div class="grp-row">
+              <span class="grp-label">接入点</span>
+              <BbiSelect
+                class="grp-ctl-w"
+                v-model="planEndpointId"
+                :options="endpointOptions"
+                aria-label="方案使用的接入点"
+              />
+            </div>
+            <div class="grp-row">
+              <span class="grp-label">模型</span>
+              <BbiSelect class="grp-ctl-w" v-model="planModel" :options="NAI_MODELS" aria-label="NAI 模型" />
+            </div>
+          </div>
+          <p class="grp-foot">接入点的地址与 Key 在面板的「接入点」里管理。</p>
+        </section>
+
+        <section class="grp-sec">
+          <div class="grp-cap">
+            画风
+            <span class="grp-cap-tools">
+              <button
+                v-if="artistWordsApplicable"
+                class="quiet-btn"
+                type="button"
+                title="把画师串自带的正/负面词填进本方案(覆盖下面两栏)"
+                @click="applyArtistWords"
+              >
+                <Icon name="download" :size="13" />
+                套用画师串自带词
+              </button>
+            </span>
+          </div>
+          <div class="grp">
+            <div class="grp-row">
+              <span class="grp-label">画师串</span>
+              <span class="grp-ctl">
+                <button
+                  class="art-trigger grp-ctl-w"
+                  type="button"
+                  aria-haspopup="dialog"
+                  :title="planArtist ? planArtist.prompt : '挑选画师串'"
+                  @click="artistPickerOpen = true"
+                >
+                  <img
+                    v-if="planArtist?.previewPath"
+                    class="art-trigger-thumb"
+                    :src="artistPreviewSrc(planArtist)"
+                    alt=""
+                    decoding="async"
+                  />
+                  <span class="art-trigger-name" :class="{ 'is-none': !planArtist }">
+                    {{ planArtist ? planArtist.name || '未命名画师串' : '不使用' }}
+                  </span>
+                  <span v-if="planArtistBuiltin" class="art-trigger-tag">内置</span>
+                  <Icon name="chevron" class="ep-chevron" :size="14" />
+                </button>
+              </span>
+            </div>
+            <div v-if="planArtist" class="grp-row is-stack">
+              <span class="grp-note">
+                <template v-if="planArtistBuiltin">内置画师串随插件更新,不可直接改;到画师串库里复制一条再改。</template>
+                <template v-else-if="artistSharedWith.length">
+                  拼在提示词最前面。{{ planNames(artistSharedWith) }}也在用这条,改动会一起生效。
+                </template>
+                <template v-else>拼在提示词最前面。</template>
+              </span>
+              <BbiTextarea
+                v-model="planArtist.prompt"
+                class="grp-textarea"
+                :rows="2"
+                :max-rows="8"
+                mono
+                :readonly="planArtistBuiltin"
+                placeholder="artist:xxx, artist:yyy"
+              />
+            </div>
+            <div class="grp-row is-stack">
+              <span class="words-head">
+                <span class="grp-label">正面质量词</span>
+                <span class="bbi-prompt-state" :class="{ 'is-custom': isCustomWords('qualityTags') }">
+                  {{ isCustomWords('qualityTags') ? '已自定义' : '官方' }}
+                </span>
+                <span class="list-foot-spacer"></span>
+                <button
+                  v-if="isCustomWords('qualityTags')"
+                  class="quiet-btn"
+                  type="button"
+                  title="清空,改回跟随模型官方词"
+                  @click="resetWords('qualityTags')"
+                >
+                  <Icon name="refresh" :size="13" /> 恢复官方
+                </button>
+                <button v-else class="quiet-btn" type="button" @click="fillOfficialWords('qualityTags')">
+                  <Icon name="edit" :size="13" /> 在官方词上改
+                </button>
+              </span>
+              <BbiTextarea
+                v-model="plan.qualityTags"
+                class="grp-textarea"
+                :rows="2"
+                :max-rows="8"
+                mono
+                :placeholder="officialQuality"
+              />
+            </div>
+            <div v-if="planFixed" class="grp-row is-stack">
+              <span class="words-head">
+                <span class="grp-label">负面提示词</span>
+                <span class="bbi-prompt-state">官方固定</span>
+              </span>
+              <BbiTextarea
+                :model-value="officialNegative"
+                class="grp-textarea"
+                :rows="3"
+                :max-rows="10"
+                mono
+                readonly
+              />
+            </div>
+            <div v-else class="grp-row is-stack">
+              <span class="words-head">
+                <span class="grp-label">负面提示词</span>
+                <span class="bbi-prompt-state" :class="{ 'is-custom': isCustomWords('undesiredContent') }">
+                  {{ isCustomWords('undesiredContent') ? '已自定义' : '官方' }}
+                </span>
+                <span class="list-foot-spacer"></span>
+                <button
+                  v-if="isCustomWords('undesiredContent')"
+                  class="quiet-btn"
+                  type="button"
+                  title="清空,改回跟随模型官方词"
+                  @click="resetWords('undesiredContent')"
+                >
+                  <Icon name="refresh" :size="13" /> 恢复官方
+                </button>
+                <button v-else class="quiet-btn" type="button" @click="fillOfficialWords('undesiredContent')">
+                  <Icon name="edit" :size="13" /> 在官方词上改
+                </button>
+              </span>
+              <BbiTextarea
+                v-model="plan.undesiredContent"
+                class="grp-textarea"
+                :rows="3"
+                :max-rows="10"
+                mono
+                :placeholder="officialNegative"
+              />
+            </div>
+          </div>
+          <p class="grp-foot">
+            顺序:画师串 → 画面 tag → 质量词。两栏留空 = 用当前模型的官方词(灰字就是实际生效的内容),换模型自动跟着换。
+          </p>
+          <p v-if="planFixed" class="grp-foot">
+            Medium 档的负面词由官方固定,不能自定义,上面显示的就是实际发出去的内容;方案里自填过的负面词仍保留着,换回其它模型照常生效。
+          </p>
+          <p v-if="planArtist && isNai5(plan.model)" class="grp-foot is-warn">
+            NAI 5 对画师串的响应与 4.5 差异很大,旧画师串直接套用效果可能跑偏,建议重新调试。
+          </p>
+        </section>
+
+        <section class="grp-sec">
+          <div class="grp-cap">
+            Vibe
+            <span class="grp-cap-tools">
+              <span class="cap-count">已选 {{ planVibeCount }} 张</span>
+            </span>
+          </div>
+          <div class="grp">
+            <label class="grp-row is-clickable">
+              <span class="grp-label">
+                强度归一化
+                <small class="grp-sub">多张 vibe 强度总和超过 1 时按比例压回 1</small>
+              </span>
+              <input v-model="plan.normalizeRefStrength" type="checkbox" class="bbi-checkbox" />
+            </label>
+            <div v-if="!settings.nai.vibes.length" class="grp-row">
+              <span class="grp-note">Vibe 库是空的;在面板的「Vibe 库」里上传或导入。</span>
+            </div>
+            <template v-else>
+              <div class="grp-row">
+                <input
+                  v-model="planVibeSearch"
+                  class="bbi-input pv-search"
+                  type="search"
+                  placeholder="搜索名称或分组…"
+                  spellcheck="false"
+                  aria-label="搜索 Vibe"
+                />
+              </div>
+              <div class="pv-list">
+                <label v-for="v in planVibeList" :key="v.id" class="grp-row pv-row is-clickable">
+                  <img
+                    v-if="v.thumbnailPath"
+                    class="pv-thumb"
+                    :src="v.thumbnailPath"
+                    :alt="v.name"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <span v-else class="pv-thumb pv-thumb--empty"><Icon name="generate" :size="14" /></span>
+                  <span class="pv-name">
+                    {{ v.name }}
+                    <small v-if="v.group" class="grp-sub">{{ v.group }} · 强度 {{ v.strength }}</small>
+                    <small v-else class="grp-sub">强度 {{ v.strength }}</small>
+                  </span>
+                  <span
+                    v-if="planVibesSupported && !v.modelKeys.includes(planVibeKey)"
+                    class="vibe-missing"
+                    title="缺这个模型的编码,出图时会跳过;在 Vibe 库里补编码"
+                  >
+                    缺编码
+                  </span>
+                  <input
+                    type="checkbox"
+                    class="bbi-checkbox"
+                    :checked="plan.vibeIds.includes(v.id)"
+                    @change="setPlanVibe(plan, v.id, ($event.target as HTMLInputElement).checked)"
+                  />
+                </label>
+                <div v-if="!planVibeList.length" class="grp-row">
+                  <span class="grp-note">没有匹配「{{ planVibeSearch }}」的 Vibe。</span>
+                </div>
+              </div>
+            </template>
+          </div>
+          <p v-if="!planVibesSupported" class="grp-foot is-warn">
+            {{ modelLabel(plan.model) }} 官方暂不支持 Vibe:出图时整批跳过,勾选照样保留——切回 4.5,或官方日后开放,就会生效。
+          </p>
+          <p v-else class="grp-foot">强度挂在 vibe 上、所有方案共用,在面板的「Vibe 库」里调。</p>
+        </section>
+
+        <section class="grp-sec">
+          <div class="grp-cap">画面</div>
+          <div class="grp">
+            <div class="grp-row">
+              <span class="grp-label">画幅方向</span>
+              <div
+                class="bbi-segmented seg-sm"
+                role="radiogroup"
+                aria-label="画幅方向"
+                title="正文里已记下的方向不会被改写,改回「自动」即恢复"
+              >
+                <button
+                  v-for="opt in ORIENTATION_LOCKS"
+                  :key="opt.value"
+                  class="bbi-seg"
+                  :class="{ 'is-on': plan.orientationLock === opt.value }"
+                  type="button"
+                  role="radio"
+                  :aria-checked="plan.orientationLock === opt.value"
+                  @click="plan.orientationLock = opt.value"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+            </div>
+            <label class="grp-row">
+              <span class="grp-label">竖屏尺寸</span>
+              <input
+                class="bbi-input grp-short"
+                type="text"
+                v-model="plan.portraitSize"
+                list="nai-portrait-presets"
+                placeholder="832×1216"
+                spellcheck="false"
+              />
+            </label>
+            <label class="grp-row">
+              <span class="grp-label">横屏尺寸</span>
+              <input
+                class="bbi-input grp-short"
+                type="text"
+                v-model="plan.landscapeSize"
+                list="nai-landscape-presets"
+                placeholder="1216×832"
+                spellcheck="false"
+              />
+            </label>
+            <label class="grp-row is-clickable">
+              <span class="grp-label">
+                生成自然语言
+                <small class="grp-sub">
+                  开:AI 为画面与每个角色额外写一段英文描述;关:只写 tag。4.5 的提示词上限约 512 token,自然语言最占篇幅,画得怪可以关掉试试
+                </small>
+              </span>
+              <input v-model="plan.naturalLanguage" type="checkbox" class="bbi-checkbox" />
+            </label>
+          </div>
+          <p class="grp-foot">「自动」由 AI 按画面定横竖;锁定后这套方案每张都按该方向出,AI 也按此构图。</p>
+          <datalist id="nai-portrait-presets">
+            <option value="832×1216">竖版</option>
+            <option value="1024×1536">大竖版</option>
+            <option value="1024×1024">方图</option>
+          </datalist>
+          <datalist id="nai-landscape-presets">
+            <option value="1216×832">横版</option>
+            <option value="1536×1024">大横版</option>
+            <option value="1024×1024">方图</option>
+          </datalist>
+        </section>
+
+        <section class="grp-sec">
+          <div class="grp-cap">采样</div>
+          <div class="grp">
+            <div class="grp-row">
+              <span class="grp-label">采样器</span>
+              <span v-if="planFixed" class="grp-note">官方固定 {{ planFixedSamplerLabel }}</span>
+              <BbiSelect v-else class="grp-ctl-w" v-model="plan.sampler" :options="samplerOptions" aria-label="采样器" />
+            </div>
+            <div class="grp-row">
+              <span class="grp-label">噪声表</span>
+              <BbiSelect
+                class="grp-ctl-w"
+                v-model="plan.noiseSchedule"
+                :options="NAI_NOISE_SCHEDULES"
+                aria-label="噪声表"
+              />
+            </div>
+            <div v-if="planFixed" class="grp-row">
+              <span class="grp-label">步数</span>
+              <span class="grp-note">官方固定 {{ planFixed.steps }}</span>
+            </div>
+            <label v-else class="grp-row">
+              <span class="grp-label">步数</span>
+              <input class="bbi-input grp-short" type="number" v-model.number="plan.steps" min="1" max="50" />
+            </label>
+            <label class="grp-row">
+              <span class="grp-label">
+                Scale
+                <small class="grp-sub">提示词相关性</small>
+              </span>
+              <input
+                class="bbi-input grp-short"
+                type="number"
+                v-model.number="plan.scale"
+                min="0"
+                max="35"
+                step="0.1"
+              />
+            </label>
+            <label v-if="!planFixed" class="grp-row">
+              <span class="grp-label">
+                Rescale
+                <small class="grp-sub">相关性调整</small>
+              </span>
+              <input
+                class="bbi-input grp-short"
+                type="number"
+                v-model.number="plan.cfgRescale"
+                min="0"
+                max="1"
+                step="0.05"
+              />
+            </label>
+            <label class="grp-row">
+              <span class="grp-label">
+                种子
+                <small class="grp-sub">0 = 每次随机</small>
+              </span>
+              <input class="bbi-input grp-short" type="number" v-model.number="plan.seed" min="0" />
+            </label>
+            <label class="grp-row is-clickable">
+              <span class="grp-label">
+                Variety Boost
+                <small class="grp-sub">画面多样性,按尺寸自动计算</small>
+              </span>
+              <input v-model="plan.varietyBoost" type="checkbox" class="bbi-checkbox" />
+            </label>
+          </div>
+          <p v-if="planFixed" class="grp-foot">
+            Medium 档是官方的省点数版本:采样器、步数固定,不支持 Rescale。想自己调,换回 NAI 5 Full。
+          </p>
+        </section>
+
+        <footer class="bbi-modal-foot">
+          <span v-if="plan.id === active.id" class="plan-current"><Icon name="check" :size="13" /> 当前方案</span>
+          <button v-else class="bbi-btn" type="button" @click="switchTo(plan)">设为当前方案</button>
+          <span class="bbi-modal-foot-spacer"></span>
+          <button class="bbi-btn bbi-btn-primary" type="button" @click="closePlan">完成</button>
+        </footer>
+      </div>
+    </ModalMask>
+
+    <!-- 只从方案弹窗里唤起,叠在它上面 -->
+    <NaiArtistPicker v-model:open="artistPickerOpen" :plan-id="plan.id" />
+
     <ModalMask :open="migrateConfirmOpen" @close="migrateConfirmOpen = false">
       <div class="bbi-modal" role="dialog" aria-modal="true" aria-label="从智绘姬迁移">
         <header class="bbi-modal-head">
@@ -1540,6 +1719,7 @@ async function removeVibe(vibe: NaiVibe) {
         <p class="bbi-modal-label">
           将把智绘姬的 {{ chatu8Detect.total }} 个 vibe 复制到柏宝绘 Vibe
           库，只是创建副本，不会改动智绘姬的数据。内容相同的会自动跳过，重复迁移不会产生重复条目。
+          迁移来的 vibe 不会自动叠加到任何方案，需要时在方案里勾选。
         </p>
         <p class="bbi-modal-label">
           注意：智绘姬未开「酒馆储存」时 vibe 存在浏览器本地存储里，只有本设备本浏览器读得到。
@@ -1562,28 +1742,29 @@ async function removeVibe(vibe: NaiVibe) {
           </button>
         </header>
         <p class="bbi-modal-label">
-          把智绘姬的全部 {{ artistImportResult?.plans.length ?? 0 }} 个提示词预设复制到柏宝绘，只建副本、不改动智绘姬的数据。
-          映射：前置固定正向 → 画师串，后置固定正向 → 正面质量词，固定负向 → 负面提示词（前面自动拼上当前模型的官方基线）。
+          把智绘姬的全部 {{ artistImportResult?.plans.length ?? 0 }} 个提示词预设复制到柏宝绘的画师串库，只建副本、不改动智绘姬的数据。
+          映射：前置固定正向 → 画师串，后置固定正向 / 固定负向 → 画师串的自带正 / 负面词（负向前面自动拼上当前模型的官方基线）。
+          自带词不会自动生效，在方案里点「套用画师串自带词」才写进方案。
           同名条目会覆盖更新（之前导入过的可直接重新导入修复），内容完全相同的自动跳过。
         </p>
         <ul class="art-import-list">
-          <li v-for="(plan, i) in artistImportResult?.plans ?? []" :key="i" class="art-import-item">
+          <li v-for="(item, i) in artistImportResult?.plans ?? []" :key="i" class="art-import-item">
             <div class="art-import-head">
-              <span class="art-import-name" :title="plan.source">{{ plan.source || '(未命名)' }}</span>
-              <span class="art-import-badge" :class="`is-${plan.state}`">
-                {{ plan.state === 'import' ? '将导入' : plan.state === 'overwrite' ? '将覆盖' : '已存在' }}
+              <span class="art-import-name" :title="item.source">{{ item.source || '(未命名)' }}</span>
+              <span class="art-import-badge" :class="`is-${item.state}`">
+                {{ item.state === 'import' ? '将导入' : item.state === 'overwrite' ? '将覆盖' : '已存在' }}
               </span>
-              <span v-if="plan.active" class="art-import-badge is-active">当前使用中</span>
+              <span v-if="item.active" class="art-import-badge is-active">当前使用中</span>
             </div>
             <div class="art-import-fields">
-              <code class="art-import-line" :title="plan.prompt"
-                ><span class="art-import-key">画师串</span>{{ plan.prompt || '(空)' }}</code
+              <code class="art-import-line" :title="item.prompt"
+                ><span class="art-import-key">画师串</span>{{ item.prompt || '(空)' }}</code
               >
-              <code class="art-import-line" :title="plan.quality"
-                ><span class="art-import-key">正向</span>{{ plan.quality || '(空)' }}</code
+              <code class="art-import-line" :title="item.quality"
+                ><span class="art-import-key">正向</span>{{ item.quality || '(空)' }}</code
               >
-              <code class="art-import-line" :title="plan.negative"
-                ><span class="art-import-key">负向</span>{{ plan.negative || '(空)' }}</code
+              <code class="art-import-line" :title="item.negative"
+                ><span class="art-import-key">负向</span>{{ item.negative || '(空)' }}</code
               >
             </div>
           </li>
@@ -1591,8 +1772,9 @@ async function removeVibe(vibe: NaiVibe) {
         <label v-if="chatu8ActiveRef" class="art-import-switch">
           <input type="checkbox" v-model="switchActiveArtist" />
           <span>
-            导入后切换到智绘姬当前使用的预设
+            导入后让当前方案「{{ active.name || '未命名方案' }}」改用智绘姬当前使用的预设
             <code>{{ chatu8ActiveRef.source }}</code>
+            （连同它的正 / 负面词）
           </span>
         </label>
         <footer class="bbi-modal-foot">
@@ -1609,211 +1791,503 @@ async function removeVibe(vibe: NaiVibe) {
         </footer>
       </div>
     </ModalMask>
-
-    <!-- ===== 画师串库管理器:搜索/预览图/勾选批量删除 ===== -->
-    <NaiArtistManager v-model:open="artistManagerOpen" />
-
-    <ConfirmDialog
-      v-model:open="endpointDeleteOpen"
-      title="删除接入点"
-      confirm-text="删除"
-      confirm-icon="trash"
-      tone="danger"
-      @confirm="confirmRemoveEndpoint"
-    >
-      确定删除接入点「{{ endpoint.name || '未命名接入点' }}」？地址与 API Key 会一并删除。
-    </ConfirmDialog>
-
-    <ConfirmDialog
-      v-model:open="artistDeleteOpen"
-      title="删除画师串"
-      confirm-text="删除"
-      confirm-icon="trash"
-      tone="danger"
-      @confirm="confirmRemoveArtist"
-    >
-      确定删除画师串「{{ artist?.name || '未命名画师串' }}」？删除后无法恢复。
-    </ConfirmDialog>
-
-    <!-- ===== 质量词 / 负面词编辑弹窗(与设置页自定义提示词同款) ===== -->
-    <ModalMask :open="!!editingNaiPrompt" @close="closeNaiPrompt">
-      <div
-        v-if="editingNaiPrompt"
-        class="bbi-modal bbi-modal-wide"
-        role="dialog"
-        aria-modal="true"
-        :aria-label="`编辑${editingNaiPrompt.label}`"
-      >
-        <header class="bbi-modal-head">
-          <span class="bbi-modal-title">
-            {{ editingNaiPrompt.readonly ? '查看' : '编辑' }}{{ editingNaiPrompt.label }}
-          </span>
-          <button class="bbi-icon-mini" type="button" title="关闭" @click="closeNaiPrompt">
-            <Icon name="close" />
-          </button>
-        </header>
-
-        <p class="bbi-modal-label">{{ editingNaiPrompt.hint }}</p>
-
-        <BbiTextarea
-          v-model="naiPromptDraft"
-          class="bbi-prompt-area"
-          :rows="12"
-          :max-rows="28"
-          mono
-          :readonly="editingNaiPrompt.readonly"
-        />
-
-        <footer class="bbi-modal-foot">
-          <template v-if="!editingNaiPrompt.readonly">
-            <button class="bbi-btn bbi-btn-danger" type="button" @click="resetNaiPromptDraft">
-              <Icon name="refresh" /> 恢复默认
-            </button>
-            <span class="bbi-modal-foot-spacer"></span>
-            <button class="bbi-btn" type="button" @click="closeNaiPrompt">取消</button>
-            <button class="bbi-btn bbi-btn-primary" type="button" @click="saveNaiPrompt">完成</button>
-          </template>
-          <template v-else>
-            <span class="bbi-modal-foot-spacer"></span>
-            <button class="bbi-btn bbi-btn-primary" type="button" @click="closeNaiPrompt">关闭</button>
-          </template>
-        </footer>
-      </div>
-    </ModalMask>
   </div>
 </template>
 
 <style scoped>
-/* 默认参数的语义配对紧凑行:双字段行两列、数字参数行四列;
-   窄屏双字段行落单列、数字行落 2×2。
-   垂直节奏由行容器统一管(行内字段的 margin-bottom 归零),
-   不靠 .bbi-field 自带的:last-child 规则——行尾字段会被它吃掉下间距。 */
-.be-row {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0 12px;
-  margin-bottom: 18px;
+/* ==========================================================================
+   分组列表:与 ComfyUIPanel 同一套排布语言(小标题 grp-cap + 白卡 grp + 卡内行 grp-row / grp-item)。
+   scoped 不跨组件,故整套规则在这里补一份——两个面板读起来要是一个产品。
+   ========================================================================== */
+.grp {
+  --ctl-w: 260px;
+  border: 1px solid var(--bbi-line);
+  border-radius: var(--bbi-radius);
+  background: var(--bbi-surface);
+  overflow: hidden;
 }
-
-.be-row .bbi-field {
-  margin-bottom: 0;
-}
-
-/* 参数区的自绘下拉吃满字段宽:与同行的 .bbi-input(模型名/尺寸)左右对齐,
-   子组件根类默认 180px/flex:none,这里压过去。 */
-.be-select {
-  width: 100%;
-}
-
-.be-row--nums {
-  grid-template-columns: repeat(4, 1fr);
-}
-
-@media (max-width: 640px) {
-  .be-row {
-    grid-template-columns: 1fr;
-  }
-
-  .be-row--nums {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-.key-row {
+.grp-sec {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.grp-cap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-height: 28px;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--bbi-ink-soft);
+}
+.grp-cap-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: 0;
+}
+.cap-count {
+  font-weight: 400;
+  color: var(--bbi-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+.grp-foot {
+  margin: 0 4px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--bbi-ink-muted);
+}
+.grp-foot.is-warn {
+  color: var(--bbi-warning);
+}
+.list-foot + .grp-foot {
+  margin-top: 10px;
+}
+
+/* —— 设置行:左标签 / 右控件 —— */
+.grp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 46px;
+  padding: 7px 12px 7px 14px;
+}
+.grp-row + .grp-row,
+.grp-item + .grp-item {
+  border-top: 1px solid var(--bbi-line);
+}
+.grp-row.is-clickable {
+  cursor: pointer;
+}
+.grp-row.is-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 12px 12px 14px;
+}
+.grp-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--bbi-ink);
+  white-space: nowrap;
+}
+.grp-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--bbi-ink-muted);
+  white-space: normal;
+}
+.grp-note {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bbi-ink-muted);
+}
+.grp-ctl {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.grp .grp-ctl-w {
+  width: var(--ctl-w);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* —— 方案弹窗:画师串入口。外观对齐 BbiSelect 的触发器,有预览图时左侧多一枚 3:4 小图 —— */
+.art-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 10px;
+  border: 1px solid var(--bbi-line-strong);
+  border-radius: var(--bbi-radius-sm);
+  background: var(--bbi-surface);
+  color: var(--bbi-ink);
+  font-family: var(--bbi-font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--bbi-dur) var(--bbi-ease),
+    background var(--bbi-dur) var(--bbi-ease);
+}
+.art-trigger:hover {
+  background: var(--bbi-surface-2);
+}
+.art-trigger:hover .ep-chevron {
+  color: var(--bbi-accent);
+}
+.art-trigger:focus-visible {
+  outline: 2px solid var(--bbi-accent);
+  outline-offset: 1px;
+}
+.art-trigger-thumb {
+  flex: none;
+  width: 24px;
+  height: 32px;
+  margin-left: -6px;
+  border-radius: 3px;
+  object-fit: cover;
+  background: var(--bbi-surface-2);
+}
+.art-trigger-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.art-trigger-name.is-none {
+  color: var(--bbi-ink-muted);
+}
+.art-trigger-tag {
+  flex: none;
+  font-size: 11px;
+  color: var(--bbi-ink-muted);
+}
+.grp :deep(.bbi-input) {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  line-height: 1.5;
+}
+.grp-short {
+  width: 124px;
+  flex: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.grp .grp-textarea {
+  border-color: transparent;
+  background: var(--bbi-surface-2);
+}
+.grp .grp-textarea:focus {
+  border-color: var(--bbi-accent);
+  background: var(--bbi-surface);
+}
+/* 质量词 / 负面词的行头:标签 + 状态药丸 + 右侧一个动作 */
+.words-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.seg-sm {
+  flex: none;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--bbi-radius-sm);
+}
+.seg-sm .bbi-seg {
+  padding: 4px 12px;
+  font-size: 12.5px;
+  border-radius: 6px;
+}
+
+/* —— 列表行:主体可点(选中),操作钮挂在行尾 —— */
+.grp-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+}
+.item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 6px 10px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--bbi-ink);
+  font-family: var(--bbi-font-sans);
+  text-align: left;
+  cursor: pointer;
+}
+.item-main:focus-visible {
+  outline: 2px solid var(--bbi-accent);
+  outline-offset: -2px;
+  border-radius: var(--bbi-radius-sm);
+}
+.item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+  transition: color var(--bbi-dur) var(--bbi-ease);
+}
+.item-main:hover .item-name {
+  color: var(--bbi-accent);
+}
+.item-ops {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+/* 方案行:只有圆点 + 名字;圆点 = 当前出图用的那套 */
+.plan-item .item-main {
+  min-height: 46px;
+}
+.plan-item.is-on {
+  background: linear-gradient(90deg, var(--bbi-accent-soft), transparent 70%);
+}
+.plan-radio {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--bbi-line-strong);
+  border-radius: 50%;
+  transition: border-color var(--bbi-dur) var(--bbi-ease);
+}
+.item-main:hover .plan-radio,
+.plan-item.is-on .plan-radio {
+  border-color: var(--bbi-accent);
+}
+/* 不用 inset 简写:部分移动端 WebView 不认(同 base.css .bbi-overlay) */
+.plan-item.is-on .plan-radio::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  bottom: 3px;
+  left: 3px;
+  border-radius: 50%;
+  background: var(--bbi-accent);
+}
+
+/* 接入点行:只有名字,整行可点进弹窗;行尾小箭头提示「点开编辑」 */
+.ep-item {
+  padding-right: 0;
+}
+.ep-item .item-main {
+  min-height: 44px;
+  padding-right: 14px;
+}
+.ep-chevron {
+  flex: none;
+  margin-left: auto;
+  color: var(--bbi-ink-muted);
+  transform: rotate(-90deg);
+  transition: color var(--bbi-dur) var(--bbi-ease);
+}
+.ep-item .item-main:hover .ep-chevron {
+  color: var(--bbi-accent);
+}
+
+/* —— 接入点弹窗 —— */
+.ep-modal {
+  max-width: 440px;
+}
+.ep-modal .bbi-input[readonly] {
+  color: var(--bbi-ink-soft);
+}
+.ep-key-row {
+  display: flex;
+  align-items: stretch;
   gap: 8px;
 }
-.key-row .bbi-input {
+.ep-key-row .bbi-input {
   flex: 1 1 auto;
   min-width: 0;
 }
-.conn-actions {
+/* 拉伸到与输入框等高;选择器要压过文件末尾借来的 .bbi-icon-mini 基础规则(26px) */
+.ep-key-row .ep-key-eye {
+  width: 34px;
+  height: auto;
+}
+.ep-conc-row {
   display: flex;
-  justify-content: flex-end;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ep-conc-row .bbi-modal-label {
+  font-size: 13px;
+  color: var(--bbi-ink);
+}
+.ep-conc {
+  width: 88px;
+}
+
+
+.list-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   margin-top: 12px;
 }
-/* 左侧「使用此渠道 / 当前出图渠道」与右侧测试连接分据两端 */
-.conn-use,
-.conn-inuse {
-  margin-right: auto;
+.list-foot-spacer {
+  flex: 1 1 auto;
 }
-.conn-inuse {
+.in-use,
+.plan-current {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--bbi-accent);
+  white-space: nowrap;
 }
+
+/* —— 按钮:图标钮(行尾操作)与文字钮(次要动作),都不带框 —— */
+.icon-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--bbi-radius-sm);
+  background: transparent;
+  color: var(--bbi-ink-soft);
+  cursor: pointer;
+  transition:
+    color var(--bbi-dur) var(--bbi-ease),
+    background var(--bbi-dur) var(--bbi-ease);
+}
+.icon-btn:hover:not(:disabled) {
+  color: var(--bbi-ink);
+  background: var(--bbi-surface-2);
+}
+.icon-btn.is-danger:not(:disabled) {
+  color: var(--bbi-danger);
+}
+.icon-btn.is-danger:not(:disabled):hover {
+  background: var(--bbi-danger-soft);
+}
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.icon-btn:focus-visible,
+.quiet-btn:focus-visible {
+  outline: 2px solid var(--bbi-accent);
+  outline-offset: -2px;
+}
+.quiet-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--bbi-radius-sm);
+  background: transparent;
+  color: var(--bbi-ink-soft);
+  font-family: var(--bbi-font-sans);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color var(--bbi-dur) var(--bbi-ease),
+    background var(--bbi-dur) var(--bbi-ease);
+}
+.quiet-btn:hover:not(:disabled) {
+  color: var(--bbi-accent);
+  background: var(--bbi-accent-soft);
+}
+.quiet-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* —— 方案弹窗 —— */
+.plan-modal {
+  max-width: 600px;
+  gap: 16px;
+}
+.plan-name-input {
+  padding: 9px 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+/* 底栏钉在底部:弹窗内容长,滚到哪都能一键「完成」。负 margin 抵消 .bbi-modal 内边距(同 .bbi-modal-head) */
+.plan-modal .bbi-modal-foot {
+  position: sticky;
+  bottom: -18px;
+  z-index: 1;
+  align-items: center;
+  margin: 0 -18px -18px;
+  padding: 12px 18px 18px;
+  border-top: 1px solid var(--bbi-line);
+  background: var(--bbi-bg);
+}
+
+/* 方案弹窗里的 vibe 勾选清单:库可能上百张,框定高度自己滚,不把下面的「画面 / 采样」推出视野 */
+.pv-search {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.pv-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border-top: 1px solid var(--bbi-line);
+}
+.pv-row {
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 0;
+  padding: 6px 12px 6px 14px;
+}
+.pv-thumb {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+.pv-thumb--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bbi-surface-2);
+  color: var(--bbi-ink-muted);
+}
+.pv-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.pv-name .grp-sub {
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .vibe-hint {
   margin-top: 0;
 }
-
-/* —— 画师串库(形制照搬 ComfyUIPanel 的 .wf-*) —— */
-/* 选择行:grid 而非 flex——靠 flex-basis 撑出的对齐一 wrap 就散,
-   固定首列宽让标签列与下方各行的标签列同起点。 */
-.art-row {
-  display: grid;
-  grid-template-columns: 5.5em minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-}
-.art-row > .bbi-field-label:first-child {
-  white-space: nowrap;
-}
-.art-row > .bbi-input {
-  min-width: 0;
-}
-/* 下拉不吃满:名称通常很短,拉满只会拖出半截空白(子组件根类默认 180px/不伸缩,此处 0,2,0 压过) */
-.art-row > .art-select {
-  width: auto;
-  max-width: 320px;
-  min-width: 0;
-}
-.art-ops {
-  display: flex;
-  gap: 4px;
-  justify-self: end;
-}
-/* 四个操作低频且同级,图标化后整行只剩下拉一个视觉重点;文案退到 title/aria-label */
-.art-op {
-  width: 30px;
-  height: 30px;
-  font-size: 13px;
-}
-.art-op:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-.art-remove:not(:disabled) {
-  color: var(--bbi-danger);
-}
-.art-remove:not(:disabled):hover {
-  color: var(--bbi-danger);
-  background: var(--bbi-danger-soft);
-}
-.art-hint {
-  margin-top: 8px;
-}
-
-/* V5 画师串差异提醒:警示色,与常规说明区分开 */
-.art-hint-warn {
-  color: var(--bbi-warning);
-}
-/* 画师串与下方质量词/负面词的分界 */
 .art-divider {
   border: 0;
   border-top: 1px dashed var(--bbi-line);
   margin: 12px 0;
-}
-/* 绑定列表与上方画师串编辑区拉开一点;「已被画师串覆盖」用警示色——渠道值正被覆盖,
-   用户在渠道行改了却不生效,需要一眼看出原因 */
-.art-bound-list {
-  margin-top: 10px;
-}
-.bbi-prompt-state.is-shadowed {
-  color: var(--bbi-warning);
-  background: transparent;
 }
 
 /* —— 从智绘姬迁移提示词预设 —— */
@@ -1900,115 +2374,19 @@ async function removeVibe(vibe: NaiVibe) {
   padding: 0 4px;
 }
 
-/* 操作按钮基类:.bbi-icon-btn 只在 App.vue 的 scoped 块里声明,此处补一份
-   (与 ComfyUIPanel 同款处理;漏了会渲染成浏览器原生按钮,shadow DOM 里也拿不到 ST 样式) */
-.bbi-icon-btn {
-  width: 36px;
-  height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--bbi-radius-sm);
-  background: var(--bbi-surface-2);
-  color: var(--bbi-ink-soft);
-  cursor: pointer;
-  font-size: 15px;
-  transition:
-    color var(--bbi-dur) var(--bbi-ease),
-    background var(--bbi-dur) var(--bbi-ease);
-}
-.bbi-icon-btn:hover {
-  color: var(--bbi-ink);
-  background: var(--bbi-line-strong);
-}
-
-/* —— 质量词/负面词列表行 + 弹窗:样式随设置页「自定义提示词」,scoped 不跨组件故补一份 —— */
-.bbi-prompt-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-/* 整行可点进弹窗编辑(状态药丸 .bbi-prompt-state 在 base.css 全局,无需补) */
-.bbi-prompt-open {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border: 1px solid var(--bbi-line);
-  border-radius: var(--bbi-radius);
-  background: var(--bbi-surface-2);
-  color: var(--bbi-ink);
-  font-family: var(--bbi-font-sans);
-  cursor: pointer;
-  text-align: left;
-  transition:
-    border-color var(--bbi-dur) var(--bbi-ease),
-    background var(--bbi-dur) var(--bbi-ease);
-}
-.bbi-prompt-open:hover {
-  border-color: var(--bbi-accent);
-  background: var(--bbi-surface);
-}
-.bbi-prompt-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 600;
-}
-.bbi-prompt-edit {
-  flex: 0 0 auto;
-  font-size: 16px;
-  color: var(--bbi-ink-muted);
-}
-.bbi-prompt-open:hover .bbi-prompt-edit {
-  color: var(--bbi-accent);
-}
-/* 弹窗:更宽 + 大文本框 */
-.bbi-modal-wide {
-  max-width: 680px;
-}
-.bbi-prompt-area {
-  line-height: 1.6;
-  font-size: 12.5px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  tab-size: 2;
-}
-/* 把「恢复默认」推到最左(本文件的迁移弹窗此前裸用过此类名,靠 foot 的 flex-end 蒙对) */
-.bbi-modal-foot-spacer {
-  flex: 1 1 auto;
-}
-/* 危险按钮:与设置页/ConfirmDialog 同一份口径。base 规则不能只写 :hover ——
-   scoped 不跨组件、base.css 里也没有,只写 hover 的话平时是默认墨色,鼠标一过才变红。 */
-.bbi-btn-danger {
-  color: var(--bbi-danger);
-  border-color: var(--bbi-line-strong);
-}
-.bbi-btn-danger:hover {
-  color: var(--bbi-danger);
-  border-color: var(--bbi-danger);
-  background: var(--bbi-danger-soft);
-}
-
 .migrate-actions {
   display: flex;
   align-items: center;
   gap: 8px;
 }
+
+/* —— Vibe 库 —— */
 .vibe-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 10px;
-}
-.vibe-normalize {
-  margin-left: auto;
 }
 .vibe-item {
   display: flex;
@@ -2097,14 +2475,13 @@ async function removeVibe(vibe: NaiVibe) {
   flex-wrap: wrap;
 }
 .vibe-missing {
+  flex: none;
   font-size: 12px;
   color: #c44747;
 }
 
 /* —— 分组 —— */
-/* 工具条:搜索框吃满,计数与「整理分组」靠右。长列表口径与设置页排除弹窗一致
-   (搜索 + 子串匹配收敛渲染量),故不做分页——vibe 靠缩略图认人,翻页只会
-   把「我那张图在第几页」变成新的记忆负担。 */
+/* 长列表口径与设置页排除弹窗一致(搜索 + 子串匹配收敛渲染量),故不做分页 */
 .vibe-toolbar {
   display: flex;
   align-items: center;
@@ -2123,7 +2500,6 @@ async function removeVibe(vibe: NaiVibe) {
   color: var(--bbi-ink-muted);
   white-space: nowrap;
 }
-/* 组头:整块浅底,把「组」和组内条目在视觉上分层;粘顶让长组滚动时组名不丢 */
 .vibe-group {
   margin-top: 10px;
 }
@@ -2136,7 +2512,6 @@ async function removeVibe(vibe: NaiVibe) {
   border-radius: var(--bbi-radius-sm);
   background: var(--bbi-surface-2);
 }
-/* 组名区整体可点(折叠):按钮撑满剩余宽度,点空白处也能收起 */
 .vibe-group-toggle {
   display: inline-flex;
   align-items: center;
@@ -2158,7 +2533,6 @@ async function removeVibe(vibe: NaiVibe) {
   color: var(--bbi-ink-muted);
   transition: transform var(--bbi-dur) var(--bbi-ease);
 }
-/* 展开态朝下(与 Collapsible 同口径:收起时回到未旋转的朝右/朝上) */
 .vibe-group-chevron.is-collapsed {
   transform: rotate(-90deg);
 }
@@ -2174,7 +2548,6 @@ async function removeVibe(vibe: NaiVibe) {
   color: var(--bbi-ink-muted);
   font-variant-numeric: tabular-nums;
 }
-/* 「生效中」复用状态药丸基样式,上色口径与 wf-state.is-ok 一致 */
 .vibe-group-active {
   color: var(--bbi-accent);
   background: var(--bbi-accent-soft);
@@ -2186,18 +2559,18 @@ async function removeVibe(vibe: NaiVibe) {
   gap: 4px;
   flex: 0 0 auto;
 }
-/* 组内条目左缩进一格,读得出层级 */
 .vibe-group-body {
   padding-left: 10px;
 }
-/* 组头本身就是一条分界,组内首条不再画上边线(否则紧贴组头是两道线) */
 .vibe-group-body > .vibe-item:first-child {
   border-top: 0;
 }
 .vibe-group-select {
   width: 130px;
 }
-/* 组头操作里的小图标钮:.bbi-icon-mini 只在其它页的 scoped 块里声明,此处补一份 */
+
+/* 以下为借用的「看起来全局」的类名:它们只在别的组件 scoped 块里声明,
+   scoped 不跨组件,故连 base 规则一起补一份(漏了会渲染成浏览器原生样式)。 */
 .bbi-icon-mini {
   flex: 0 0 auto;
   display: inline-flex;
@@ -2216,26 +2589,34 @@ async function removeVibe(vibe: NaiVibe) {
   color: var(--bbi-accent);
   border-color: var(--bbi-accent);
 }
+.bbi-modal-foot-spacer {
+  flex: 1 1 auto;
+}
+/* 危险操作按钮(同副 API 渠道弹窗):描边低调,hover 才显红,避免误触 */
+.bbi-btn-danger {
+  color: var(--bbi-danger);
+  border-color: var(--bbi-line-strong);
+}
+.bbi-btn-danger:hover:not(:disabled) {
+  color: var(--bbi-danger);
+  border-color: var(--bbi-danger);
+}
+.bbi-btn-danger:disabled {
+  color: var(--bbi-ink-muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 @media (max-width: 640px) {
-  /* 窄屏:组头两行——组名一行,操作另起一行靠右,避免按钮把组名挤成一条缝 */
+  .grp {
+    --ctl-w: 210px;
+  }
   .vibe-group-ops {
     width: 100%;
     justify-content: flex-end;
   }
   .vibe-group-body {
     padding-left: 0;
-  }
-  /* 同理:四个图标钮 + 标签会把画师串下拉挤成一条缝,标签独占首行,
-     下拉与操作组同行分据两端 */
-  .art-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    row-gap: 8px;
-  }
-  .art-row > .bbi-field-label:first-child {
-    grid-column: 1 / -1;
-  }
-  .art-row > .art-select {
-    max-width: none;
   }
 }
 </style>

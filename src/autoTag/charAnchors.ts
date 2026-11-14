@@ -259,8 +259,18 @@ export function applyPositionedCharRefs(
   mode: 'tag' | 'nl' = 'tag',
   locked?: ReadonlySet<string>,
 ): { text: string; unknown: string[] } {
+  return applyCharRefs(text, entriesAtPosition(entries, ops, sourceLine, locked), mode);
+}
+
+/** 某个正文位置上生效的角色库(门控口径见 applyPositionedCharRefs);漫画按 name 补外貌也用它。 */
+export function entriesAtPosition(
+  entries: CharTagEntry[],
+  ops: PositionedCharOp[],
+  sourceLine: number,
+  locked?: ReadonlySet<string>,
+): CharTagEntry[] {
   const activeOps = ops
     .filter(item => item.op.kind === 'new' || item.sourceLine <= sourceLine)
     .map(item => item.op);
-  return applyCharRefs(text, applyCharTagOps(entries, activeOps, -1, locked), mode);
+  return applyCharTagOps(entries, activeOps, -1, locked);
 }

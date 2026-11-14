@@ -8,8 +8,6 @@ import ModalMask from '@/components/ModalMask.vue';
 import { fetchModels, testChannel } from '@/api/client';
 import {
   BACKENDS,
-  DEFAULT_COMFY_SPEC,
-  DEFAULT_COMFY_THINKING,
   DEFAULT_JAILBREAK_PROMPT,
   DEFAULT_NAI_V5_SPEC,
   DEFAULT_NAI_V5_THINKING,
@@ -140,8 +138,8 @@ interface TagPromptMeta {
 // 4.5 以下那套单串 tag 的 naiSpec / naiThinking 已随模型列表收窄一起下线,不再列出:
 // 可选模型只剩 4.5/V5,那两份永远走不到,列出来只会让人以为还有第二种口径要维护。
 //
-// 自然语言条件段(autoTag/prompt.ts 的 expandNlSections)对两个后端的规范与思维链都展开,
-// 故这四份都挂上这组宏;内置的 NAI 两份正是靠它一份文本兼顾「生成自然语言」开关两侧。
+// 自然语言条件段(autoTag/prompt.ts 的 expandNlSections)对规范与思维链都展开,
+// 故 NAI 这两份都挂上这组宏;内置的 NAI 两份正是靠它一份文本兼顾「生成自然语言」开关两侧。
 const NL_SECTION_MACROS = [
   { token: '{{#nl}}', desc: '条件段开头：到 {{/nl}} 为止的内容只在开启「生成自然语言」时保留。' },
   { token: '{{^nl}}', desc: '条件段开头：到 {{/nl}} 为止的内容只在关闭「生成自然语言」时保留。' },
@@ -170,26 +168,7 @@ const TAG_PROMPT_METAS: TagPromptMeta[] = [
     builtin: DEFAULT_NAI_V5_THINKING,
     macros: NL_SECTION_MACROS,
   },
-  {
-    key: 'comfySpec',
-    label: 'ComfyUI 规范',
-    hint: '默认后端为 ComfyUI 时拼进自动 tag 请求，约束 tag / nl 的书写规范。也可用 {{#nl}}…{{/nl}} / {{^nl}}…{{/nl}} 条件段，按当前工作流的「生成自然语言」开关取舍。留空用内置默认。',
-    builtin: DEFAULT_COMFY_SPEC,
-    macros: [
-      {
-        token: '{{nl}}',
-        desc: '自然语言规范；ComfyUI 面板开启「生成自然语言」时展开，关闭时置空。不写此宏时，开启开关会自动追加到末尾。',
-      },
-      ...NL_SECTION_MACROS,
-    ],
-  },
-  {
-    key: 'comfyThinking',
-    label: 'ComfyUI 思维链',
-    hint: '默认后端为 ComfyUI 时使用的输出前思考清单，作为 system 压在任务消息之后（解析时会自动剥掉思考块）。与「ComfyUI 规范」配套，同样支持 {{#nl}}…{{/nl}} / {{^nl}}…{{/nl}} 条件段。留空用内置默认。',
-    builtin: DEFAULT_COMFY_THINKING,
-    macros: NL_SECTION_MACROS,
-  },
+  // ComfyUI 的规范与思维链已移到渠道页「ComfyUI → 提示词库」(按方案引用、可多套),不在此列
 ];
 
 // 正在编辑的提示词;draft 是草稿,点「完成」才写回 settings(取消则丢弃)。
@@ -597,6 +576,14 @@ async function confirmUpdate() {
         </p>
 
         <label class="bbi-switch-row">
+          <span class="bbi-field-label">楼层图片沉浸显示</span>
+          <input v-model="settings.ui.immersiveImages" type="checkbox" class="bbi-checkbox" />
+        </label>
+        <p class="bbi-field-hint">
+          开启后图片上不显示菜单和翻页,点一下图片才出现,点别处收起;出现时再点图片看大图。
+        </p>
+
+        <label class="bbi-switch-row">
           <span class="bbi-field-label">移动端点当前页导航关窗</span>
           <input v-model="ui.navTapClose" type="checkbox" class="bbi-checkbox" />
         </label>
@@ -864,6 +851,9 @@ async function confirmUpdate() {
             </button>
           </li>
         </ul>
+        <p class="bbi-field-hint prompt-moved-hint">
+          ComfyUI 的书写规范与思维链已移到「渠道 → ComfyUI → 提示词库」,可存多套、按出图方案选用。
+        </p>
       </Collapsible>
     </div>
 
@@ -1541,6 +1531,9 @@ async function confirmUpdate() {
 }
 
 /* —— 提示词弹窗:更宽 + 大文本框 —— */
+.prompt-moved-hint {
+  margin-top: 10px;
+}
 .bbi-modal-wide {
   max-width: 680px;
 }

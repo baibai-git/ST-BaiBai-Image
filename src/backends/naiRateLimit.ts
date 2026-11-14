@@ -9,13 +9,14 @@
  * 1. **错误分类**:429 / 5xx / 网络级失败才重试;400/401/402 这类配置错误立刻抛。
  *    不分类的话,一个填错的 key 会被退避重试放大成四倍请求量。
  * 2. **退避重试**:指数退避 + 抖动,并把对方给的 Retry-After 当下界。
- * 3. **全局冷却**:429 不只让当前请求退避,还给**整个闸门**上冷却
+ * 3. **闸门级冷却**:429 不只让当前请求退避,还给**整个闸门**上冷却
  *    (floor/genQueue.ts 取槽后等待),否则其余槽位会在同一秒里接着撞上去。
  *
  * 另加相邻请求最小间隔,给「正常出图耗时撑不出间隔」的场合兜底(小图/低步数/快速失败重发)。
  *
- * 状态刻意做成模块级:节奏按**账号**生效,不按卡片,闸门(floor)与后端(backends/nai)
- * 读写的必须是同一份。所有时间戳都可注入,故整个策略层不用假时钟就能单测。
+ * 状态刻意做成模块级、**按闸门(= 接入点 id)分账**:节奏按账号生效,不按卡片,闸门(floor)
+ * 与后端(backends/nai)读写的必须是同一份;而不同接入点是不同的站/账号,公益站 A 吃了 429
+ * 不该把官方站也一起冻住。所有时间戳都可注入,故整个策略层不用假时钟就能单测。
  */
 
 /** 总尝试次数上限(含首发):1 次首发 + 3 次重试。 */
@@ -107,22 +108,41 @@ export function retryDelayMs(
   return Math.min(Math.max(jittered, retryAfterMs ?? 0), MAX_WAIT_MS);
 }
 
-/* ============ 全局节奏状态 ============ */
+/* ============ 按闸门分账的节奏状态 ============ */
 
-let cooldownUntil = 0;
 /**
- * 上一次请求发出的时刻。初值 -Infinity 而非 0:0 的语义是「1970 年发过一次」,
- * 只在 now 远大于最小间隔时才碰巧等价于「没发过」。-Infinity 让「从未发过 → 无需等待」
- * 与时钟取值无关地成立。
+ * 不指名闸门时用的那一本账(单测与历史调用)。生产路径一律传接入点 id。
+ * 空串不会与真实接入点撞:接入点 id 恒非空(normalize 兜底)。
  */
-let lastStartAt = Number.NEGATIVE_INFINITY;
+export const DEFAULT_NAI_GATE = '';
+
+interface PacingState {
+  cooldownUntil: number;
+  /**
+   * 上一次请求发出的时刻。初值 -Infinity 而非 0:0 的语义是「1970 年发过一次」,
+   * 只在 now 远大于最小间隔时才碰巧等价于「没发过」。-Infinity 让「从未发过 → 无需等待」
+   * 与时钟取值无关地成立。
+   */
+  lastStartAt: number;
+}
+
+const pacing = new Map<string, PacingState>();
 let minIntervalMs = NAI_MIN_INTERVAL_MS;
+
+function pacingOf(gate: string): PacingState {
+  let state = pacing.get(gate);
+  if (!state) {
+    state = { cooldownUntil: 0, lastStartAt: Number.NEGATIVE_INFINITY };
+    pacing.set(gate, state);
+  }
+  return state;
+}
 
 /** 429 冷却的下界:见 noteNaiRateLimited。 */
 const MIN_COOLDOWN_MS = 1000;
 
 /**
- * 记一次 429:给整个闸门上冷却。
+ * 记一次 429:给该闸门上冷却(别的接入点不受影响)。
  *
  * **只延后不提前** —— 并发 ≥2 时几个槽位可能接连撞上,后来的短冷却不该把前面的长冷却冲掉。
  * **下界 1s** —— 哪怕对方给的是 `Retry-After: 0`(或一个已过期的日期),429 也总该让闸门
@@ -131,25 +151,28 @@ const MIN_COOLDOWN_MS = 1000;
 export function noteNaiRateLimited(
   retryAfterMs: number | null,
   now: number = Date.now(),
+  gate: string = DEFAULT_NAI_GATE,
 ): void {
+  const state = pacingOf(gate);
   const requested = retryAfterMs ?? NAI_RATE_LIMIT_COOLDOWN_MS;
   const until = now + Math.min(Math.max(requested, MIN_COOLDOWN_MS), MAX_WAIT_MS);
-  if (until > cooldownUntil) cooldownUntil = until;
+  if (until > state.cooldownUntil) state.cooldownUntil = until;
 }
 
 /** 记一次请求发出的时刻(最小间隔的基准)。取槽后与每次重试前都要记。 */
-export function noteNaiRequestStart(now: number = Date.now()): void {
-  lastStartAt = now;
+export function noteNaiRequestStart(now: number = Date.now(), gate: string = DEFAULT_NAI_GATE): void {
+  pacingOf(gate).lastStartAt = now;
 }
 
 /** 现在还得等多久才允许发下一个请求:冷却剩余与最小间隔剩余取大。 */
-export function naiPacingDelayMs(now: number = Date.now()): number {
-  return Math.max(0, cooldownUntil - now, lastStartAt + minIntervalMs - now);
+export function naiPacingDelayMs(now: number = Date.now(), gate: string = DEFAULT_NAI_GATE): number {
+  const state = pacingOf(gate);
+  return Math.max(0, state.cooldownUntil - now, state.lastStartAt + minIntervalMs - now);
 }
 
 /** 冷却剩余(仅供展示/诊断;闸门判断用 naiPacingDelayMs)。 */
-export function naiCooldownRemainingMs(now: number = Date.now()): number {
-  return Math.max(0, cooldownUntil - now);
+export function naiCooldownRemainingMs(now: number = Date.now(), gate: string = DEFAULT_NAI_GATE): number {
+  return Math.max(0, pacingOf(gate).cooldownUntil - now);
 }
 
 /**
@@ -160,10 +183,9 @@ export function setNaiMinInterval(ms: number): void {
   minIntervalMs = Math.max(0, ms);
 }
 
-/** 复位节奏状态(不动最小间隔,那是 setNaiMinInterval 的事)。 */
+/** 复位所有闸门的节奏状态(不动最小间隔,那是 setNaiMinInterval 的事)。 */
 export function resetNaiPacing(): void {
-  cooldownUntil = 0;
-  lastStartAt = Number.NEGATIVE_INFINITY;
+  pacing.clear();
 }
 
 /* ============ 可取消的等待 ============ */
@@ -209,6 +231,8 @@ export interface NaiRetryInfo {
 
 export interface NaiRetryOptions {
   signal?: AbortSignal;
+  /** 记账到哪个闸门(接入点 id);须与调用方取槽时的闸门一致。 */
+  gate?: string;
   onRetry?: (info: NaiRetryInfo) => void;
   /** 等待实现。留给单测注入,免得跑一遍测试真睡几十秒。 */
   delay?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -231,14 +255,14 @@ function errorRetryAfterMs(error: unknown): number | null {
  * run 必须是**可重跑**的:调用方要把「只该做一次」的准备工作(拼参数、读 vibe 数据)
  * 留在外面,只把真正发请求的那一段包进来。
  *
- * 等待时长取「本次退避」与「全局节奏」的大值:并发 ≥2 时别的槽位可能刚吃到 429 并
+ * 等待时长取「本次退避」与「闸门节奏」的大值:并发 ≥2 时别的槽位可能刚吃到 429 并
  * 上了更长的冷却,本次重试也得一并遵守,否则冷却只拦得住新任务、拦不住重试。
  */
 export async function runNaiWithRetry<T>(
   run: () => Promise<T>,
   opts: NaiRetryOptions = {},
 ): Promise<T> {
-  const { signal, onRetry, delay = abortableDelay } = opts;
+  const { signal, onRetry, delay = abortableDelay, gate = DEFAULT_NAI_GATE } = opts;
   const maxRetries = NAI_MAX_ATTEMPTS - 1;
 
   for (let attempt = 1; ; attempt++) {
@@ -253,16 +277,16 @@ export async function runNaiWithRetry<T>(
       const retryAfterMs = errorRetryAfterMs(error);
       // 429 = 对方明确说「太快了」。除了自己退避,还要给整个闸门上冷却,
       // 否则队列里其余任务会在同一秒接着撞上去 —— 那串密集失败才是封号风险所在。
-      if (status === 429) noteNaiRateLimited(retryAfterMs);
+      if (status === 429) noteNaiRateLimited(retryAfterMs, Date.now(), gate);
 
-      const waitMs = Math.max(retryDelayMs(attempt, retryAfterMs), naiPacingDelayMs());
+      const waitMs = Math.max(retryDelayMs(attempt, retryAfterMs), naiPacingDelayMs(Date.now(), gate));
       onRetry?.({ attempt, max: maxRetries, waitMs, error });
       console.warn(
         `[柏宝绘] NAI 请求失败,${Math.round(waitMs / 1000)}s 后重试(第 ${attempt}/${maxRetries} 次):`,
         error,
       );
       await delay(waitMs, signal);
-      noteNaiRequestStart();
+      noteNaiRequestStart(Date.now(), gate);
     }
   }
 }

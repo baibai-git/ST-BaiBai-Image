@@ -231,7 +231,7 @@ onBeforeUnmount(() => closeMenu());
 /* 菜单 Teleport 到 modalHost(scoped 样式在同 shadow root 内照常生效) */
 .bbi-combo-menu {
   position: fixed;
-  z-index: 10001; /* 窗口(10000)之上,与 BbiSelect 菜单同级 */
+  z-index: 10003; /* 同 BbiSelect 菜单:高于弹窗遮罩(10001)与叠加层(10002),方案弹窗里的组合框才不被盖住 */
   margin: 0;
   padding: 4px;
   list-style: none;

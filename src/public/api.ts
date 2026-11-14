@@ -2,7 +2,7 @@ import type { ImageCharacterPrompt } from '@/autoTag/protocol';
 import { normalizeOrientation } from '@/backends/size';
 import { NaiError } from '@/backends/nai';
 import { ComfyUIError } from '@/backends/comfyui';
-import { backendStatus, decideSeed, generateImage } from '@/generate';
+import { activeTagKind, backendStatus, decideSeed, generateImage, type BackendStatus } from '@/generate';
 import type { GenerationMeta } from '@/generationMeta';
 import { saveExternalImage } from '@/floor/storage';
 import { getContext } from '@/st/context';
@@ -163,12 +163,25 @@ export function getCharacters(options: GetCharactersOptions = {}): PublicCharact
 /* —— 后端状态 —— */
 
 /**
+ * 公共接口眼里的后端状态:当前方案是漫画时一律算「未配置」。
+ * 第三方递进来的是插画提示词,漫画模型吃的是分镜 JSON,硬画只会出废图;
+ * 报在 configured 上,第三方按既有的 not_configured 分支就能处理,不必认识新错误码。
+ */
+function publicBackendStatus(): BackendStatus {
+  const status = backendStatus();
+  if (status.configured && activeTagKind() === 'comic') {
+    return { ...status, configured: false, reason: '当前出图方案是漫画方案，公共接口只支持插画' };
+  }
+  return status;
+}
+
+/**
  * 后端状态。**字段是白名单而非黑名单**:只挑这四项出去,
  * 而不是「把 status 整个递出去再删掉敏感字段」—— 后者日后往内部结构加字段时会静默泄漏。
  * 尤其 settings.nai.key 与各后端 url 绝不出现在这里。
  */
 export function getBackendStatus(): PublicBackendStatus {
-  const status = backendStatus();
+  const status = publicBackendStatus();
   return {
     apiVersion: PUBLIC_API_VERSION,
     pluginVersion: PLUGIN_VERSION,
@@ -243,7 +256,7 @@ export async function generate(
   }
 
   // 先报 not_configured,别让第三方等一个注定 401 的请求
-  const status = backendStatus();
+  const status = publicBackendStatus();
   if (!status.configured) {
     throw publicError('not_configured', status.reason || '柏宝绘出图后端未配置');
   }

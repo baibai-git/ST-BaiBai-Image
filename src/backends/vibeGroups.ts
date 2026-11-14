@@ -3,9 +3,9 @@ import type { NaiVibe } from '@/state/settings';
 /**
  * Vibe 分组的纯逻辑(归拢、搜索、启用集合判定),与 NaiPanel 的渲染分开放。
  *
- * 分组是「一起启用/一起折叠」的标签而非独立状态:出图仍只看每条的 enabled
- * (backends/nai.ts 的 filter(v => v.enabled)),组的批量动作本质是对成员
- * enabled 的批量赋值,不引入第二套真相。
+ * 分组是「一起启用/一起折叠」的标签而非独立状态:出图只看方案的 vibeIds
+ * (state/settings.ts 的 effectiveNai),组的批量动作本质是对 vibeIds
+ * 的批量改写,不引入第二套真相。
  *
  * 组名是用户任意输入,不能直接当 key/哨兵用(会和「未分组」「新建分组」撞名),
  * 故一律加 `g:` 前缀装箱:带前缀的必是真实组,裸值 UNGROUPED/NEW_GROUP 必是哨兵。
@@ -72,12 +72,17 @@ export function groupVibes(vibes: readonly NaiVibe[], query = ''): VibeGroup[] {
 }
 
 /**
- * 「生效中」不落盘、是算出来的:当前启用集合恰好等于本组全部成员时才成立。
+ * 「生效中」不落盘、是算出来的:当前方案的启用集合(vibeIds)恰好等于本组全部成员时才成立。
+ * 库外的悬空 id 不参与比较(normalize 与删除动作会清掉它们,这里不替它们背锅)。
  * 故用户手动多勾一条之后它会自己消失,不会出现「显示生效中但实际不是」的骗人状态。
  * 空组不算生效(否则库里全空时每个空组都显示生效中)。
  */
-export function isGroupActive(group: VibeGroup, vibes: readonly NaiVibe[]): boolean {
+export function isGroupActive(
+  group: VibeGroup,
+  vibes: readonly NaiVibe[],
+  enabledIds: ReadonlySet<string>,
+): boolean {
   if (!group.all.length) return false;
   const ids = new Set(group.all.map(v => v.id));
-  return vibes.every(v => v.enabled === ids.has(v.id));
+  return vibes.every(v => enabledIds.has(v.id) === ids.has(v.id));
 }

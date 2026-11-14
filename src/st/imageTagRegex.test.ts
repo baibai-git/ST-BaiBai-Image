@@ -8,6 +8,7 @@ import {
   IMAGE_TAG_HIDE_REGEX_ID,
   IMAGE_TAG_SLOT_REGEX_ID,
   imageTagHideScript,
+  imageTagKind,
   imageTagSlotScript,
   parseImageTagContent,
   parseImageTags,
@@ -356,6 +357,54 @@ describe('formatPromptText', () => {
     expect(formatPromptText(parseImageTagContent(raw))).toBe(
       '1girl\n\nnight\n\n角色: 顾晚\nblack hair\n\nNegative: blurry',
     );
+  });
+});
+
+describe('comic tags', () => {
+  const layout = {
+    summary: 'full color manga page',
+    items: [
+      { label: 'character' as const, name: '小雪', caption: 'smiles', bbox: [0, 0, 500, 1000] as [number, number, number, number] },
+      { label: 'text' as const, caption: 'speech bubble', text: '你回来啦?', bbox: [40, 600, 200, 960] as [number, number, number, number] },
+    ],
+  };
+  const content = { tag: '', nl: '', negative: '', characters: [], size: 'portrait' as const, kind: 'comic' as const, layout };
+
+  it('serializes as <type>comic</type><layout>…</layout><size>…</size> and parses back', () => {
+    const raw = serializeImageTag(content);
+    expect(raw).toBe(
+      '<bbi_image><type>comic</type><layout>{"summary":"full color manga page","items":[' +
+        '{"label":"character","name":"小雪","caption":"smiles","bbox":[0,0,500,1000]},' +
+        '{"label":"text","caption":"speech bubble","text":"你回来啦?","bbox":[40,600,200,960]}' +
+        ']}</layout><size>portrait</size></bbi_image>',
+    );
+    expect(parseImageTagContent(raw)).toEqual(content);
+    expect(serializeImageTag(parseImageTagContent(raw))).toBe(raw);
+  });
+
+  it('marks an unparseable layout as broken (null) instead of guessing', () => {
+    const parsed = parseImageTagContent('<bbi_image><type>comic</type><layout>{bad</layout><size>portrait</size></bbi_image>');
+    expect(parsed.kind).toBe('comic');
+    expect(parsed.layout).toBeNull();
+    expect(formatPromptText(parsed)).toBe('(漫画分镜格式损坏)');
+  });
+
+  it('leaves illustration tags without kind/layout fields (legacy shape unchanged)', () => {
+    const parsed = parseImageTagContent('<bbi_image>1girl<size>portrait</size></bbi_image>');
+    expect(parsed).not.toHaveProperty('kind');
+    expect(parsed).not.toHaveProperty('layout');
+    expect(imageTagKind(parsed)).toBe('illustration');
+    // 非 comic 的 <type> 不当漫画,也不漏进 tag
+    expect(parseImageTagContent('<bbi_image>1girl<type>illustration</type></bbi_image>').tag).toBe('1girl');
+  });
+
+  it('formats a readable comic summary for cards and gallery', () => {
+    expect(formatPromptText(content)).toBe('full color manga page\n\n[角色] 小雪: smiles\n[对白] 你回来啦?');
+  });
+
+  it('forbids <type>/<layout> literals inside prompt text', () => {
+    expect(containsTagMarkup('a </layout> b')).toBe(true);
+    expect(containsTagMarkup('a <type> b')).toBe(true);
   });
 });
 
