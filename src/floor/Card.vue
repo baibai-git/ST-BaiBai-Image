@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 import type { ImageCharacterPrompt } from '@/autoTag/protocol';
-import { cancelFloorTags } from '@/autoTag/runner';
+import { cancelFloorTags, requestFloorTags } from '@/autoTag/runner';
+import type { ComicLayout } from '@/backends/mossLayout';
 import { effectiveOrientation, type Orientation } from '@/backends/size';
 import Icon from '@/components/Icon.vue';
 import { confirmDialog } from '@/components/confirm';
-import { backendStatus, decideSeed, generateImage } from '@/generate';
+import { backendStatus, decideSeed, generateImage, tagBlockReason } from '@/generate';
 import { consumeAutoGenerate, shouldAutoGenerate } from '@/floor/autoGenerate';
 import { isCollapsed, setCollapsed } from '@/floor/collapseState';
 import { imageDownloadFileName, saveImageFile } from '@/floor/download';
@@ -35,7 +36,7 @@ import {
 } from '@/floor/storage';
 import { isTagPlanning } from '@/floor/tagPlanState';
 import { formatGenerationMeta } from '@/generationMeta';
-import { activeComfyPreset, activeOrientationLock, imageDisplayMaxHeight, settings } from '@/state/settings';
+import { activeComfyPreset, activeNaiPlan, activeOrientationLock, imageDisplayMaxHeight, settings, type ComfyKind } from '@/state/settings';
 import { beginImage, failImage, finishImage, safeHistory } from '@/state/history';
 import { copyText } from '@/st/clipboard';
 import { getContext } from '@/st/context';
@@ -66,6 +67,10 @@ const props = defineProps<{
   characters: ImageCharacterPrompt[];
   /** 画幅方向(模型判定,随 tag 持久化):决定用渠道配置里的竖屏还是横屏尺寸;渠道锁了横竖时以锁为准(见 effectiveSize)。 */
   size: Orientation;
+  /** tag 类型(<type> 子标签;缺省即插画)。 */
+  kind: ComfyKind;
+  /** 漫画分镜(kind 为 comic 时;解析不了 = null,卡片报「格式损坏」不出图)。插画恒为 null。 */
+  layout: ComicLayout | null;
   /** tag 原文(含 <bbi_image> 壳):生成提交与 promptHash 的输入。 */
   tag: string;
   messageId: number;
@@ -124,6 +129,45 @@ const collapsed = computed<boolean>({
 /** 触屏收纳菜单(⋯ 钮)的展开态;桌面 hover 一排直达,不用它。 */
 const menuOpen = ref(false);
 
+/**
+ * 沉浸显示(设置项 ui.immersiveImages):有图时 ⋯ 与翻页器都藏起来,点一下图才浮现。
+ * 只在有图时生效——无图时占位区本就是操作区(生成按钮等),藏了反而没处点。
+ * 浮现态是本组件的临时 ref,不进 store:被重水合重建就回到藏起,正合「沉浸」的默认。
+ */
+const immersive = computed(() => settings.ui.immersiveImages && !!imageSrc.value);
+const uiRevealed = ref(false);
+/** 控件此刻是否藏着(给 CSS 的 data-hide-ui)。⋯ 菜单展开时必然算浮现。 */
+const uiHidden = computed(() => immersive.value && !uiRevealed.value && !menuOpen.value);
+
+/** 点图:沉浸且控件藏着 → 先把控件叫出来;否则照旧进灯箱。 */
+function onImageClick(): void {
+  if (uiHidden.value) {
+    uiRevealed.value = true;
+    return;
+  }
+  openImage();
+}
+
+const rootEl = ref<HTMLElement | null>(null);
+
+/**
+ * 点卡片外任意处收起控件。卡片挂在锚点的 open shadow root 里,composedPath 能穿进去,
+ * 直接比 path 而不用 contains(contains 不跨 shadow 边界)。
+ * 捕获阶段监听:ST 有些按钮会 stopPropagation,冒泡阶段收不到。
+ */
+function onOutsidePointerDown(event: PointerEvent): void {
+  if (rootEl.value && event.composedPath().includes(rootEl.value)) return;
+  uiRevealed.value = false;
+  menuOpen.value = false;
+}
+
+// 只在浮现期间挂监听:一屏几十张卡片,不该每张都常驻一个全局 pointerdown
+watch(uiRevealed, revealed => {
+  if (revealed) document.addEventListener('pointerdown', onOutsidePointerDown, true);
+  else document.removeEventListener('pointerdown', onOutsidePointerDown, true);
+});
+onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePointerDown, true));
+
 /** 运行态记录(可能为 undefined = 无在途任务)。 */
 const record = computed(() => getGenRecord(key.value));
 
@@ -156,6 +200,13 @@ const naiActive = computed(() => settings.defaultBackend === 'nai');
  * 曾经这里自己判一套,改了 ComfyUI 简易模式的校验就得两处同步改。
  */
 const configured = computed(() => backendStatus().configured);
+/**
+ * 这条 tag 与当前方案对不上(插画 tag 遇上漫画方案、或反过来),或漫画分镜已损坏:
+ * 非空即禁用生成,并给「按当前方案重新生成本楼」入口。判据在 generate.ts(有单测)。
+ */
+const blockReason = computed(() => tagBlockReason({ kind: props.kind, layout: props.layout }));
+/** 现在能不能出图:后端配齐且 tag 类型对得上。 */
+const canGenerate = computed(() => configured.value && !blockReason.value);
 
 /**
  * 实际出图方向:当前渠道锁了横竖就按锁(settings.ts 的 activeOrientationLock),否则按 tag 里记的。
@@ -178,6 +229,8 @@ const promptText = computed(() =>
     nl: props.nl,
     negative: props.negative,
     characters: props.characters,
+    kind: props.kind,
+    layout: props.layout,
   }),
 );
 /**
@@ -242,7 +295,7 @@ const barText = computed(() => {
   if (planning.value) return 'AI 重写提示词…';
   if (busy.value) return statusLabel.value;
   if (phase.value === 'error') return error.value || '生成失败';
-  if (shownEntry.value) return props.prompt || props.nl || '图片';
+  if (shownEntry.value) return props.kind === 'comic' ? props.layout?.summary || '漫画' : props.prompt || props.nl || '图片';
   if (filesGone.value) return '图片文件已删除';
   return '待生成';
 });
@@ -257,7 +310,7 @@ const pendingHint = computed(() => {
 });
 
 async function generate(): Promise<void> {
-  if (busy.value || planning.value || !configured.value) return;
+  if (busy.value || planning.value || !canGenerate.value) return;
   const slot = key.value;
   const currentHash = hash.value;
   // 本次任务的输入全部就地取值:请求在途时本组件很可能已被重水合销毁
@@ -272,14 +325,18 @@ async function generate(): Promise<void> {
     negative: props.negative,
     characters: props.characters.map(character => ({ ...character })),
     size: effectiveSize.value,
+    // 深拷贝:分镜在途期间本组件可能已被重水合销毁
+    comic: props.kind === 'comic' && props.layout ? (JSON.parse(JSON.stringify(props.layout)) as ComicLayout) : undefined,
   };
+  // 漫画没有 tag,历史里记人读形态的分镜,回溯时才看得出画的是哪一页
+  const historyPrompt = job.comic ? promptText.value : job.prompt;
   // NAI 需要闸门排队 → 先显示「排队中」;ComfyUI 有服务端队列,直接进 generating
   const { signal, token } = beginGen(slot, currentHash, naiActive.value ? 'queued' : 'generating');
   // 历史记录 id:在 seed 确定后才登记(见下),故这里先置空,catch 里据此判断要不要收尾。
   let historyId: number | null = null;
 
   try {
-    // 发起时就确定种子(NAI 面板种子 > 0 时用固定值;否则随机),随结果落盘进 extra
+    // 发起时就确定种子(NAI 方案种子 > 0 时用固定值;否则随机),随结果落盘进 extra
     // (entry.seed),历史翻页可查/可复用。口径在 generate.ts,与公开接口同源。
     const seed = decideSeed(settings.defaultBackend);
     // 历史埋点:seed 已定、请求将发,此刻登记。图片本身不进 store(dataURL 会爆内存,
@@ -287,8 +344,8 @@ async function generate(): Promise<void> {
     historyId = safeHistory(() =>
       beginImage({
         backend: naiActive.value ? 'nai' : 'comfyui',
-        model: naiActive.value ? settings.nai.model : activeComfyPreset().name,
-        prompt: job.prompt,
+        model: naiActive.value ? activeNaiPlan().model : activeComfyPreset().name,
+        prompt: historyPrompt,
         nl: job.nl,
         negative: job.negative,
         characters: job.characters,
@@ -335,6 +392,25 @@ async function generate(): Promise<void> {
   }
 }
 
+/**
+ * 「按当前方案重新生成本楼」:tag 类型与方案对不上时唯一的出路(见 blockReason)。
+ * 与楼层按钮同一条路:剔除旧 tag → 按当前方案分析写入。请求归 runner,卡片随后会被重水合销毁。
+ */
+async function regenerateFloor(): Promise<void> {
+  const floor = props.messageId;
+  if (!settings.enabled) {
+    toastr.warning('柏宝绘已停用，请先在插件设置里开启', '柏宝绘');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: '按当前方案重新生成本楼',
+    text: '会删除本楼全部生图 tag，再按当前出图方案重新分析写入；已生成的图片保留在卡片历史里，不会丢失。',
+    confirmText: '重新生成',
+  });
+  if (!ok) return;
+  await requestFloorTags(floor, { replace: true });
+}
+
 function cancel(): void {
   cancelGen(key.value);
 }
@@ -377,6 +453,7 @@ function openEditor(): void {
     // 存活口径:文案要许诺「改回提示词即可找回」,被图库删掉的图找不回来,不能算进去
     historyCount: liveHistory.value.length,
     configured: configured.value,
+    blockedReason: blockReason.value,
   });
 }
 
@@ -454,7 +531,8 @@ onMounted(() => {
   const mode = consumeAutoGenerate(props.chatId, props.messageId, props.swipeId, props.seq);
   if (!mode) return;
   if (!shouldAutoGenerate(mode, phase.value)) return;
-  if (!configured.value) return;
+  // 类型对不上的 tag 静默跳过(卡片上自有提示与整楼重来的入口)
+  if (!canGenerate.value) return;
   void generate();
 });
 </script>
@@ -463,6 +541,7 @@ onMounted(() => {
   <!-- 沉浸式设计:图即卡片。无边框/无背景面板/无品牌栏,控件悬浮在图上,
        桌面 hover 浮现、触屏常驻淡显;提示词收进悬浮按钮唤起的面板,平时零占位。 -->
   <div
+    ref="rootEl"
     class="bbi-figure"
     :data-phase="phase"
     :data-capped="displayMaxHeight ? '1' : ''"
@@ -492,13 +571,18 @@ onMounted(() => {
          高度归零 + 淡出,<img> 不卸载——展开瞬间图就在,不会重新发起请求。 -->
     <div class="bbi-figure__collapse" :data-collapsed="collapsed ? '1' : ''">
       <div class="bbi-figure__collapse-inner">
-    <div class="bbi-figure__stage" :data-size="effectiveSize" :data-placeholder="imageSrc ? '' : '1'">
+    <div
+      class="bbi-figure__stage"
+      :data-size="effectiveSize"
+      :data-placeholder="imageSrc ? '' : '1'"
+      :data-hide-ui="uiHidden ? '1' : ''"
+    >
       <img
         v-if="imageSrc"
         class="bbi-figure__img"
         :src="imageSrc"
         alt="生图结果"
-        @click="openImage"
+        @click="onImageClick"
         @error="onImageError"
       />
 
@@ -523,7 +607,14 @@ onMounted(() => {
 
       <!-- 无图且空闲:生成入口 / 配置引导 -->
       <div v-if="!imageSrc && !busy" class="bbi-figure__pending">
-        <button v-if="configured" class="bbi-figure__generate" type="button" @click="generate">
+        <template v-if="configured && blockReason">
+          <p class="bbi-figure__hint">{{ blockReason }}</p>
+          <button class="bbi-figure__generate" type="button" @click="regenerateFloor">
+            <Icon name="refresh" :size="15" />
+            按当前方案重新生成本楼
+          </button>
+        </template>
+        <button v-else-if="configured" class="bbi-figure__generate" type="button" @click="generate">
           <Icon name="palette" :size="15" />
           {{ phase === 'error' ? '重试' : '生成图片' }}
         </button>
@@ -558,8 +649,8 @@ onMounted(() => {
             v-if="shownEntry"
             class="bbi-fab"
             type="button"
-            :disabled="!configured"
-            :title="configured ? '重绘' : '请先在柏宝绘「渠道」页完成配置'"
+            :disabled="!canGenerate"
+            :title="canGenerate ? '重绘' : blockReason || '请先在柏宝绘「渠道」页完成配置'"
             @click="menuOpen = false; generate()"
           >
             <Icon name="refresh" :size="15" />
@@ -582,7 +673,9 @@ onMounted(() => {
           >
             <Icon name="trash" :size="15" />
           </button>
+          <!-- 漫画分镜不给手改:分格坐标手改不现实,改画面只走整楼重新生成 -->
           <button
+            v-if="kind !== 'comic'"
             class="bbi-fab"
             type="button"
             title="编辑提示词"
@@ -622,8 +715,15 @@ onMounted(() => {
     <!-- 状态行:仅出错 / 提示词已改时出现,平时零占位 -->
     <p v-if="phase === 'error'" class="bbi-figure__status bbi-figure__status--error">
       {{ error
-      }}<button v-if="configured" class="bbi-figure__retry" type="button" @click="generate">
+      }}<button v-if="canGenerate" class="bbi-figure__retry" type="button" @click="generate">
         重试
+      </button>
+    </p>
+    <!-- 有图但类型对不上(无图时提示在占位区里):旧图照看,新图只能整楼重来 -->
+    <p v-else-if="configured && blockReason && imageSrc && !busy && !planning" class="bbi-figure__status bbi-figure__status--warn">
+      {{ blockReason
+      }}<button class="bbi-figure__retry" type="button" @click="regenerateFloor">
+        按当前方案重新生成本楼
       </button>
     </p>
     <p v-else-if="isStale && !busy && !planning" class="bbi-figure__status bbi-figure__status--warn">

@@ -133,6 +133,8 @@ if (!status.configured) {
 
 `supportsCharacters` 只看模型，与配没配齐无关——你可以在用户还没填 Key 时就知道该不该准备 `characters`。**ComfyUI 恒为 `false`**。
 
+用户当前选的若是 ComfyUI **漫画方案**，`configured` 也是 `false`（`reason` 会说明）：漫画模型吃的是分镜，不是你递进来的插画提示词。此时调 `generate` 同样报 `not_configured`。
+
 ## 调生图
 
 ```js
@@ -153,7 +155,7 @@ myPanel.querySelector('img').src = result.dataUrl;   // 想显示在哪就显示
 | --- | --- | --- |
 | `prompt` | `string` | **必填**，正向 danbooru 短 tag。空串抛 `invalid_args` |
 | `nl` | `string?` | 自然语言描述 |
-| `negative` | `string?` | 本画面动态负面。**只对 ComfyUI 生效**；NAI 的负面取用户渠道配置 |
+| `negative` | `string?` | 本画面动态负面。**只对 ComfyUI 生效**；NAI 的负面取用户当前出图方案的配置 |
 | `characters` | `PublicCharacterPrompt[]?` | 多角色提示，见下 |
 | `size` | `'portrait' \| 'landscape'?` | 画幅方向，缺省 `'portrait'`。具体像素取用户在渠道页配的尺寸。**用户在渠道里锁定了画幅方向时一律按锁定方向出图**，这里传什么都不算数（0.3.1 起） |
 | `seed` | `number?` | 指定种子（正整数）。省略 = 按用户设置决定 |
@@ -250,7 +252,7 @@ try {
 
 ### 不要绕过这个接口
 
-柏宝绘内部的 NAI 请求全部走一道**并发闸门 + 全局节奏**（429 冷却、相邻请求最小间隔、指数退避重试）。这个接口把闸门包在里面了。如果你绕过它直接打 NAI 的 `generate-image`，用户的账号会吃一串密集 429——而用户只会认为是柏宝绘坏了。
+柏宝绘内部的 NAI 请求全部走**并发闸门 + 节奏控制**（每个接入点一道；429 冷却、相邻请求最小间隔、指数退避重试）。这个接口把闸门包在里面了。如果你绕过它直接打 NAI 的 `generate-image`，用户的账号会吃一串密集 429——而用户只会认为是柏宝绘坏了。
 
 ## 订阅角色库变更
 

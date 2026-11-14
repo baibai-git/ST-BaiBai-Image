@@ -25,11 +25,13 @@
 import type { ImageCharacterPrompt } from '@/autoTag/protocol';
 import { comfySimpleParams, composeNegative, composePositive, validateSimpleConfig, type SimpleGenValues } from '@/backends/comfyTemplates';
 import { generateComfyImage, randomSeed, type ComfyImageResult } from '@/backends/comfyui';
+import { buildMossPrompt, type ComicLayout } from '@/backends/mossLayout';
 import { generateNaiImage, naiRandomSeed, naiSupportsCharacterPrompts } from '@/backends/nai';
 import { effectiveOrientation, parseSize, pickSize, type Orientation } from '@/backends/size';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import type { GenerationMeta } from '@/generationMeta';
-import { activeComfyPreset, activeNaiEndpoint, activeOrientationLock, effectiveComfyConn, effectiveNai, settings, type BackendId } from '@/state/settings';
+import { imageTagKind, type ImageTagContent } from '@/st/imageTagRegex';
+import { activeComfyPreset, activeComfyServer, activeNaiEndpoint, activeNaiPlan, activeOrientationLock, effectiveComfyConn, effectiveNai, settings, type BackendId, type ComfyKind } from '@/state/settings';
 
 /** 一次生成的输入。与协议层 ImageInsertion 同形,但不含正文位置信息。 */
 export interface GenerateInput {
@@ -48,6 +50,11 @@ export interface GenerateInput {
   size?: Orientation;
   /** 本次种子。由调用方经 decideSeed() 先行确定(埋点要在发请求前拿到它)。 */
   seed: number;
+  /**
+   * 漫画一页的分镜(tag 类型为 comic)。有它时 prompt/nl 不用:正向提示词按实际像素现算成
+   * MOSS layout JSON——bbox 是像素坐标,画幅定了才算得出来,所以不能提前存进 tag。
+   */
+  comic?: ComicLayout;
 }
 
 /** 生成过程中的进度上报(卡片用它显示排队位置与退避进度)。 */
@@ -103,11 +110,11 @@ export function backendStatus(): BackendStatus {
   const backend = settings.defaultBackend;
 
   if (backend === 'nai') {
-    const model = settings.nai.model;
+    const model = activeNaiPlan().model;
     // 支持与否只看模型,与配没配齐无关:第三方要在出图前就知道该不该传 characters
     const supportsCharacters = naiSupportsCharacterPrompts(model);
     const base = { backend, model, supportsCharacters };
-    // 地址与 key 取**当前接入点**那一份(见 effectiveNai);渠道级 nai.url/nai.key 是存量字段。
+    // 地址与 key 取**当前方案引用的接入点**那一份(见 effectiveNai)。
     // reason 里刻意**不带接入点名字**:它会经 getBackendStatus 原样递给第三方,而名字是用户
     // 自己敲的——有人就拿站点域名当名字,带上等于把地址漏进公开返回值(见 public/api.ts 白名单)。
     // 少了名字也不难定位:面板下拉里选中的就是这条。
@@ -124,8 +131,9 @@ export function backendStatus(): BackendStatus {
   if (backend === 'comfyui') {
     const preset = activeComfyPreset();
     const base = { backend, model: preset.name, supportsCharacters: false };
-    if (!settings.comfyui.url.trim()) {
-      return { ...base, configured: false, reason: '未填写 ComfyUI 服务地址' };
+    // 同 NAI 接入点:reason 不带服务器名(用户常拿地址当名字,reason 会递给第三方)
+    if (!activeComfyServer().url.trim()) {
+      return { ...base, configured: false, reason: '当前出图方案的渠道未填写地址' };
     }
     if (preset.mode === 'simple') {
       const invalid = validateSimpleConfig(preset.simple);
@@ -149,15 +157,42 @@ export function backendStatus(): BackendStatus {
 }
 
 /**
+ * 当前方案出的是哪类图:NAI 恒为插画;ComfyUI 看当前方案的类型。
+ * tag 的类型写在正文里,与它对不上的 tag 不能用当前方案出(插画 tag 喂给漫画模型、
+ * 或分镜 JSON 喂给插画模型都只会出废图)——卡片据此禁用生成并提示整楼重新生成。
+ */
+export function activeTagKind(): ComfyKind {
+  return settings.defaultBackend === 'comfyui' ? activeComfyPreset().kind : 'illustration';
+}
+
+/**
+ * 这条 tag 能不能用当前方案出图:能 = 空串,不能 = 给用户看的原因。
+ * 卡片据此禁用生成、静默跳过自动出图,并给「按当前方案重新生成本楼」的入口——
+ * 换类型只能整楼重来(漫画是整楼分页,与插画的逐张 tag 对不上号)。
+ */
+export function tagBlockReason(
+  content: Pick<ImageTagContent, 'kind' | 'layout'>,
+  planKind: ComfyKind = activeTagKind(),
+): string {
+  const kind = imageTagKind(content);
+  if (kind === 'comic' && !content.layout) return '漫画分镜格式损坏，无法出图';
+  if (kind === planKind) return '';
+  return kind === 'comic' ? '这是漫画分镜，当前出图方案不是漫画方案' : '这是插画 tag，当前出图方案是漫画方案';
+}
+
+/**
  * 定本次种子。**必须在发请求前定好**:一是部分采样器节点不接受 -1 自动随机,
  * 二是埋点与落盘(entry.seed)都要记下它,事后「同种子再来一张」才有依据。
  *
- * 口径:显式指定 > NAI 面板固定种子(>0)> 随机。
+ * 口径:显式指定 > NAI 当前方案的固定种子(>0)> 随机。
  * NAI 与 ComfyUI 的随机上界不同(各自协议的合法范围),故分开取。
  */
 export function decideSeed(backend: BackendId, override?: number): number {
   if (override !== undefined && Number.isFinite(override) && override > 0) return Math.floor(override);
-  if (backend === 'nai') return settings.nai.seed > 0 ? settings.nai.seed : naiRandomSeed();
+  if (backend === 'nai') {
+    const fixed = activeNaiPlan().seed;
+    return fixed > 0 ? fixed : naiRandomSeed();
+  }
   return randomSeed();
 }
 
@@ -179,6 +214,10 @@ export async function generateImage(
   // 兜底:卡片侧已用 configured 拦在按钮上,公开接口侧也会先报 not_configured。
   // 真漏到这里说明上游判据漂了,宁可明说也别发一个注定 401/404 的请求。
   if (!status.configured) throw new Error(status.reason || '出图后端未配置');
+  // 同上兜底:卡片对类型不符的 tag 不给生成按钮
+  const kind = activeTagKind();
+  if (input.comic && kind !== 'comic') throw new Error('这是漫画分镜，当前出图方案不是漫画方案');
+  if (!input.comic && kind === 'comic') throw new Error('当前出图方案是漫画方案，不能画插画 tag');
 
   const isNai = status.backend === 'nai';
   const characters = input.characters ?? [];
@@ -187,8 +226,10 @@ export async function generateImage(
 
   let release: (() => void) | null = null;
   try {
-    // 持槽:取到槽位后本函数内一直持有,直到 finally 释放
-    if (isNai) release = await acquireNaiSlot(signal);
+    // 持槽:取到槽位后本函数内一直持有,直到 finally 释放。闸门按接入点分(各站各自限流)。
+    // 参数仍在取到槽后才解开(排队期间改的步数等照样生效);排队中途切了方案换了站,
+    // 本次也只是在旧站的闸门里排的队,下一张起就归新站,不值得为此重排。
+    if (isNai) release = await acquireNaiSlot(signal, activeNaiEndpoint().id);
     progress.onStart?.();
 
     // 画幅锁在这里统一生效(卡片与公开接口同走本函数):只决定这一次用哪格尺寸,
@@ -208,12 +249,25 @@ export async function generateImage(
       result = output.result;
       meta = { backend: 'nai', model: status.model, ...output.usage };
     } else {
-      const conn = effectiveComfyConn();
+      let conn = effectiveComfyConn();
+      // 尺寸解析口径与 generateComfyImage 一致（未解析出时 0 = 用工作流自带尺寸）。
+      const px = parseSize(pickSize(conn, size));
+      const width = px?.width ?? 0;
+      const height = px?.height ?? 0;
+      let prompt = input.prompt;
+      let nl = input.nl ?? '';
+      if (input.comic) {
+        if (!px) throw new Error('漫画需要在出图方案里填好横竖尺寸（分镜坐标要按实际像素换算）');
+        // 固定正面并进 summary;不清掉的话 composePositive 会把它拼在 JSON 前面,整串就不是 JSON 了
+        prompt = buildMossPrompt(input.comic, width, height, conn.mode === 'simple' ? conn.simple.positive : '');
+        nl = '';
+        if (conn.mode === 'simple') conn = { ...conn, simple: { ...conn.simple, positive: '' } };
+      }
       result = await generateComfyImage(
         conn,
         {
-          prompt: input.prompt,
-          nl: input.nl ?? '',
+          prompt,
+          nl,
           negative_prompt: input.negative ?? '',
           seed: input.seed,
           size,
@@ -222,13 +276,9 @@ export async function generateImage(
         { onQueue: ahead => progress.onQueue?.(ahead) },
       );
       // ComfyUI 没有运行期跳过的概念，配方全在预设里，可在此直接快照。
-      // 尺寸解析口径与 generateComfyImage 一致（未解析出时 0 = 用工作流自带尺寸）。
-      const px = parseSize(pickSize(conn, size));
-      const width = px?.width ?? 0;
-      const height = px?.height ?? 0;
       const simpleValues: SimpleGenValues = {
-        prompt: input.prompt,
-        nl: input.nl,
+        prompt,
+        nl,
         negative: input.negative,
         seed: input.seed,
         width,

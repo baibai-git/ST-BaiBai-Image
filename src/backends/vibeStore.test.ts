@@ -40,7 +40,6 @@ describe('vibeStore', () => {
       '/user/files/bbi-vibe-thumb-v1.jpg',
       data,
       0.6,
-      true,
     );
     expect(meta).toMatchObject({
       id: 'v1',
@@ -76,7 +75,6 @@ describe('vibeStore', () => {
       '/user/files/bbi-vibe-thumb-v1.jpg',
       data,
       0.6,
-      true,
     );
     await expect(loadVibeData(vibe)).resolves.toEqual(data);
 

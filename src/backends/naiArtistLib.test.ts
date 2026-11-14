@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchArtist, planArtistRemoval } from '@/backends/naiArtistLib';
+import { artistPromptGist, matchArtist, planArtistRemoval } from '@/backends/naiArtistLib';
 import type { NaiArtistPreset } from '@/state/settings';
 
 function preset(id: string, name = id, prompt = ''): NaiArtistPreset {
@@ -24,39 +24,25 @@ describe('matchArtist', () => {
 describe('planArtistRemoval', () => {
   const list = [preset('a'), preset('b'), preset('c'), preset('d')];
 
-  it('当前项未被删 → activeArtistId 不动', () => {
-    const plan = planArtistRemoval(list, new Set(['b', 'c']), 'a');
+  it('按 id 拆成剩余与被删两份,保持原顺序', () => {
+    const plan = planArtistRemoval(list, new Set(['c', 'b']));
     expect(plan.remaining.map(p => p.id)).toEqual(['a', 'd']);
     expect(plan.removed.map(p => p.id)).toEqual(['b', 'c']);
-    expect(plan.nextActiveId).toBe('a');
   });
 
-  it('当前项被删 → 接位到原位置那一条', () => {
-    const plan = planArtistRemoval(list, new Set(['b']), 'b');
-    expect(plan.remaining.map(p => p.id)).toEqual(['a', 'c', 'd']);
-    expect(plan.nextActiveId).toBe('c');
+  it('删除集里有不存在的 id(含内置 bi_*)→ 忽略', () => {
+    const plan = planArtistRemoval(list, new Set(['bi_default', 'gone']));
+    expect(plan.remaining).toHaveLength(4);
+    expect(plan.removed).toEqual([]);
+  });
+});
+
+describe('artistPromptGist', () => {
+  it('去掉 artist: 前缀、压平空白,权重语法原样保留', () => {
+    expect(artistPromptGist('artist:wlop,  Artist: as109,\n1.2::artist:ask::')).toBe('wlop, as109, 1.2::ask::');
   });
 
-  it('删的是末尾 → 退一格', () => {
-    const plan = planArtistRemoval(list, new Set(['d']), 'd');
-    expect(plan.nextActiveId).toBe('c');
-  });
-
-  it('删空 → 回「不使用」', () => {
-    const plan = planArtistRemoval(list, new Set(['a', 'b', 'c', 'd']), 'c');
-    expect(plan.remaining).toEqual([]);
-    expect(plan.nextActiveId).toBe('');
-  });
-
-  it('批量删除含当前项 → 接位到最前一个被删位置', () => {
-    // b、c 都删,接位取 min(原第一个被删下标 1, 剩余长度-1) → remaining[1] = d
-    const plan = planArtistRemoval(list, new Set(['b', 'c']), 'c');
-    expect(plan.remaining.map(p => p.id)).toEqual(['a', 'd']);
-    expect(plan.nextActiveId).toBe('d');
-  });
-
-  it('内置 id(bi_*)不会出现在删除集 → 当前内置条不受影响', () => {
-    const plan = planArtistRemoval(list, new Set(['a']), 'bi_default');
-    expect(plan.nextActiveId).toBe('bi_default');
+  it('空串与纯空白 → 空串(调用方显示占位)', () => {
+    expect(artistPromptGist('   ')).toBe('');
   });
 });

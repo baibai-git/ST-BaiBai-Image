@@ -67,8 +67,10 @@ describe('旧版 Vibe 设置迁移', () => {
       modelKeys: ['v4-5full'],
       hasImage: true,
       strength: 0.7,
-      enabled: true,
     });
+    // 老的逐张 enabled 折成默认方案的 vibeIds,条目本身不再带开关
+    expect(settings.nai.vibes[0]).not.toHaveProperty('enabled');
+    expect(settings.nai.plans[0].vibeIds).toEqual(['legacy-v1']);
     const persisted = mocks.context.extensionSettings.baibai_image.nai.vibes[0];
     expect(persisted).not.toHaveProperty('image');
     expect(persisted).not.toHaveProperty('thumbnail');

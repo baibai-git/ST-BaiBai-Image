@@ -401,6 +401,33 @@
   color: oklch(1 0 0 / 0.9);
 }
 
+/* ——— 沉浸显示:设置项「楼层图片沉浸显示」(Card.vue 在舞台上挂 data-hide-ui) ———
+   有图时 ⋯ 与翻页器整组藏起,点一下图才浮现。用 visibility 而不是只降 opacity:
+   opacity:0 的按钮仍能被点中,图上会留下隐形热区(同 .bbi-figure__menu 的教训)。
+   visibility 延迟到淡出结束再 hidden,浮现时立即可见,淡入淡出都看得到。 */
+
+.bbi-figure__actions,
+.bbi-figure__pager {
+  transition:
+    opacity var(--bbi-dur) var(--bbi-ease),
+    visibility 0s;
+}
+
+.bbi-figure__stage[data-hide-ui='1'] .bbi-figure__actions,
+.bbi-figure__stage[data-hide-ui='1'] .bbi-figure__pager {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--bbi-dur) var(--bbi-ease),
+    visibility 0s var(--bbi-dur);
+}
+
+/* 控件藏着时点图是「叫出控件」而不是放大,光标别再许诺 zoom-in */
+.bbi-figure__stage[data-hide-ui='1'] .bbi-figure__img {
+  cursor: pointer;
+}
+
 /* ——— 折叠动画:grid-template-rows 1fr→0fr 过渡(高度 auto 也能平滑) ———
    折叠时舞台不卸载,只是高度归零 + 淡出,展开时 <img> 不需要重新请求。
    不支持 grid 行过渡的老浏览器退化为即时切换,功能不受影响。
@@ -672,6 +699,10 @@
 
   .bbi-figure__menu,
   .bbi-figure__more,
+  .bbi-figure__actions,
+  .bbi-figure__pager,
+  .bbi-figure__stage[data-hide-ui='1'] .bbi-figure__actions,
+  .bbi-figure__stage[data-hide-ui='1'] .bbi-figure__pager,
   .bbi-fab,
   .bbi-figure__bar,
   .bbi-figure__cancel,

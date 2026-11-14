@@ -11,7 +11,7 @@ import { SlotRegistry } from '@/floor/registry';
 import { checkSlotHealth, floorIdOf } from '@/floor/slotHealth';
 import { historyEntries, latestStaleEntry, promptHash, readStore } from '@/floor/storage';
 import { getContext, type STContext } from '@/st/context';
-import { BBI_SLOT_SELECTOR, parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
+import { BBI_SLOT_SELECTOR, imageTagKind, parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
 import { settings } from '@/state/settings';
 
 /**
@@ -170,6 +170,8 @@ export function hydrateMessage(messageId: number, ctx: STContext): void {
               negative: content.negative,
               characters: content.characters,
               size: content.size,
+              kind: imageTagKind(content),
+              layout: content.layout ?? null,
               tag: tags[seq],
               messageId,
               seq,
@@ -388,10 +390,13 @@ export function bindFloorHydration(): boolean {
       }
     },
   );
-  // NAI 并发上限 → 闸门(ComfyUI 不限并发,靠服务端队列)
+  // NAI 并发上限 → 各接入点的闸门(ComfyUI 不限并发,靠服务端队列)。
+  // 删掉的接入点不必回收闸门:没人再往那个 id 上取槽,留着的只是一个空对象。
   watch(
-    () => settings.nai.concurrency,
-    value => setNaiConcurrency(value),
+    () => settings.nai.endpoints.map(ep => [ep.id, ep.concurrency] as const),
+    pairs => {
+      for (const [id, concurrency] of pairs) setNaiConcurrency(concurrency, id);
+    },
     { immediate: true },
   );
   return true;

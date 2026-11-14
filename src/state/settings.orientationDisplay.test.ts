@@ -41,8 +41,8 @@ describe('画幅锁 / NAI 自然语言 / 显示大小 · 读取兜底', () => {
       comfyui: { workflows: [{ id: 'wf_a', name: 'A', workflow: '' }], activeWorkflowId: 'wf_a' },
       ui: { theme: 'st' },
     });
-    expect(settings.nai.orientationLock).toBe('auto');
-    expect(settings.nai.naturalLanguage).toBe(true);
+    expect(settings.nai.plans[0].orientationLock).toBe('auto');
+    expect(settings.nai.plans[0].naturalLanguage).toBe(true);
     expect(settings.comfyui.workflows[0].orientationLock).toBe('auto');
     expect(settings.ui.imageDisplaySize).toBe('medium');
   });
@@ -60,8 +60,8 @@ describe('画幅锁 / NAI 自然语言 / 显示大小 · 读取兜底', () => {
       },
       ui: { imageDisplaySize: 'full' },
     });
-    expect(settings.nai.naturalLanguage).toBe(false);
-    expect(settings.nai.orientationLock).toBe('landscape');
+    expect(settings.nai.plans[0].naturalLanguage).toBe(false);
+    expect(settings.nai.plans[0].orientationLock).toBe('landscape');
     expect(settings.comfyui.workflows.map(w => w.orientationLock)).toEqual([
       'portrait',
       'landscape',
@@ -79,8 +79,8 @@ describe('画幅锁 / NAI 自然语言 / 显示大小 · 读取兜底', () => {
       },
       ui: { imageDisplaySize: 'huge' },
     });
-    expect(settings.nai.naturalLanguage).toBe(true);
-    expect(settings.nai.orientationLock).toBe('auto');
+    expect(settings.nai.plans[0].naturalLanguage).toBe(true);
+    expect(settings.nai.plans[0].orientationLock).toBe('auto');
     expect(settings.comfyui.workflows[0].orientationLock).toBe('auto');
     expect(settings.ui.imageDisplaySize).toBe('medium');
   });
@@ -98,7 +98,7 @@ describe('画幅锁 / NAI 自然语言 / 显示大小 · 读取兜底', () => {
 });
 
 describe('activeOrientationLock:按当前后端取对应那份', () => {
-  it('NAI 取渠道级,ComfyUI 取当前工作流;切工作流即切走锁', async () => {
+  it('NAI 取当前方案,ComfyUI 取当前工作流;切工作流即切走锁', async () => {
     const { settings, activeOrientationLock } = await hydrateWith({
       defaultBackend: 'nai',
       nai: { orientationLock: 'portrait' },

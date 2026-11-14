@@ -91,7 +91,7 @@ describe('退避时长', () => {
   });
 });
 
-describe('全局节奏状态', () => {
+describe('节奏状态(按闸门分账)', () => {
   beforeEach(() => {
     resetNaiPacing();
     setNaiMinInterval(NAI_MIN_INTERVAL_MS);
@@ -152,6 +152,17 @@ describe('全局节奏状态', () => {
     resetNaiPacing();
     expect(naiPacingDelayMs(1000)).toBe(0);
   });
+
+  it('各接入点各记各的:A 站吃 429 / 刚发过,B 站不受牵连', () => {
+    noteNaiRateLimited(30_000, 1000, 'nep_a');
+    noteNaiRequestStart(1000, 'nep_a');
+    expect(naiPacingDelayMs(1000, 'nep_a')).toBe(30_000);
+    expect(naiPacingDelayMs(1000, 'nep_b')).toBe(0);
+    expect(naiCooldownRemainingMs(1000, 'nep_b')).toBe(0);
+    // 复位一次清所有闸门
+    resetNaiPacing();
+    expect(naiPacingDelayMs(1000, 'nep_a')).toBe(0);
+  });
 });
 
 describe('重试执行器', () => {
@@ -207,7 +218,7 @@ describe('重试执行器', () => {
     expect(waits).toHaveLength(NAI_MAX_ATTEMPTS - 1);
   });
 
-  it('429 顺手给全局闸门上冷却', async () => {
+  it('429 顺手给本闸门上冷却', async () => {
     const { delay } = fakeDelay();
     const run = vi
       .fn<() => Promise<string>>()
@@ -215,6 +226,20 @@ describe('重试执行器', () => {
       .mockResolvedValueOnce('ok');
     await runNaiWithRetry(run, { delay });
     expect(naiCooldownRemainingMs()).toBeGreaterThan(0);
+  });
+
+  it('指定 gate 时冷却只记在那个接入点上,重试也遵守那个接入点的冷却', async () => {
+    const { waits, delay } = fakeDelay();
+    noteNaiRateLimited(40_000, Date.now(), 'nep_b');
+    const run = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(httpError(429, 2000))
+      .mockResolvedValueOnce('ok');
+    await runNaiWithRetry(run, { delay, gate: 'nep_a' });
+    expect(naiCooldownRemainingMs(Date.now(), 'nep_a')).toBeGreaterThan(0);
+    expect(naiCooldownRemainingMs(Date.now())).toBe(0);
+    // B 站的 40s 冷却不该拖住 A 站的重试
+    expect(waits[0]).toBeLessThan(10_000);
   });
 
   it('401 立刻抛出,一次都不重试', async () => {

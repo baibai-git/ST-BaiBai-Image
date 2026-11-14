@@ -38,9 +38,9 @@ describe('负面提示词并框迁移', () => {
       model: 'nai-diffusion-4-5-full',
       negativePrompt: 'bad hands',
     });
-    expect(settings.nai.undesiredContent).toBe(`bad hands, ${naiDefaultUndesired('nai-diffusion-4-5-full')}`);
-    // 搬完就清空,不留一份会让人以为还生效的影子值
-    expect(settings.nai.negativePrompt).toBe('');
+    expect(settings.nai.plans[0].undesiredContent).toBe(`bad hands, ${naiDefaultUndesired('nai-diffusion-4-5-full')}`);
+    // 搬完不留影子字段:方案里只有一个负面框
+    expect(settings.nai.plans[0]).not.toHaveProperty('negativePrompt');
   });
 
   it('折进去时用的是该配置自己的模型,不是默认模型', async () => {
@@ -50,23 +50,23 @@ describe('负面提示词并框迁移', () => {
       model: 'nai-diffusion-4-5-curated',
       negativePrompt: 'bad hands',
     });
-    expect(settings.nai.undesiredContent).toBe(
+    expect(settings.nai.plans[0].undesiredContent).toBe(
       `bad hands, ${naiDefaultUndesired('nai-diffusion-4-5-curated')}`,
     );
   });
 
   it('已有 undesiredContent 时不动它(迁移只跑一次,不会重复追加)', async () => {
     const settings = await hydrateWithNai({ undesiredContent: 'mine only', negativePrompt: 'bad hands' });
-    expect(settings.nai.undesiredContent).toBe('mine only');
+    expect(settings.nai.plans[0].undesiredContent).toBe('mine only');
   });
 
   it('已迁移过、且用户有意清空成跟随官方 → 保持空串,不被再折一次', async () => {
     const settings = await hydrateWithNai({ undesiredContent: '', negativePrompt: 'bad hands' });
-    expect(settings.nai.undesiredContent).toBe('');
+    expect(settings.nai.plans[0].undesiredContent).toBe('');
   });
 
   it('没有存量附加负面 → 留空(跟随模型官方词)', async () => {
     const settings = await hydrateWithNai({ model: 'nai-diffusion-4-5-full' });
-    expect(settings.nai.undesiredContent).toBe('');
+    expect(settings.nai.plans[0].undesiredContent).toBe('');
   });
 });

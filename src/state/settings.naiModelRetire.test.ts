@@ -41,25 +41,26 @@ describe('NAI 旧模型下线后的存量模型处理', () => {
     '已下线的 %s 回落到默认模型,并留一条告警',
     async retired => {
       const settings = await hydrateWithModel(retired);
-      expect(settings.nai.model).toBe('nai-diffusion-5-full');
+      expect(settings.nai.plans[0].model).toBe('nai-diffusion-5-full');
       expect(warn).toHaveBeenCalledWith(expect.stringContaining(retired));
     },
   );
 
   it.each([
     'nai-diffusion-5-full',
+    'nai-diffusion-5-full-medium',
     'nai-diffusion-5-curated',
     'nai-diffusion-4-5-full',
     'nai-diffusion-4-5-curated',
   ])('在列的 %s 原样保留,不打扰', async kept => {
     const settings = await hydrateWithModel(kept);
-    expect(settings.nai.model).toBe(kept);
+    expect(settings.nai.plans[0].model).toBe(kept);
     expect(warn).not.toHaveBeenCalled();
   });
 
   it('压根没存过模型的配置走默认值,不算「被下线」', async () => {
     const settings = await hydrateWithModel(undefined);
-    expect(settings.nai.model).toBe('nai-diffusion-5-full');
+    expect(settings.nai.plans[0].model).toBe('nai-diffusion-5-full');
     expect(warn).not.toHaveBeenCalled();
   });
 });
