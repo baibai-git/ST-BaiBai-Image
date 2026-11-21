@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mangaDefaults, normalizeManga, type MangaSettings } from '@/manga/layouts';
 import { parseImagePlan, type ImagePlan } from './protocol';
-import { createLayoutSelection, layoutCandidates, LAYOUT_HISTORY_KEY, prepareLayoutSelectionMessage, recordLayoutRound, relaxLayoutSelection, setLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from './layoutCooldown';
+import { createLayoutSelection, ensureLayoutCapacity, layoutCandidates, LAYOUT_HISTORY_KEY, prepareLayoutSelectionMessage, recordLayoutRound, relaxLayoutSelection, setLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from './layoutCooldown';
 import type { ChatMsg } from '@/api/client';
 
 vi.mock('@/manga/atlas', async importOriginal => ({
@@ -60,6 +60,18 @@ describe('layout cooldown', () => {
     expect(ids(selection)).toEqual(['c', 'd', 'e']);
     expect(layoutCandidates(selection).landscape).toEqual([]);
     expect(Object.values(createLayoutSelection(context(), m, { portrait: null, landscape: null }, null).layouts).flat()).toEqual([]);
+  });
+
+  it('distinguishes no matching canvas from too few distinct layouts', () => {
+    const m = manga();
+    const mismatch = { portrait: { width: 832, height: 1216 }, landscape: null };
+    expect(() => ensureLayoutCapacity(createLayoutSelection(context(), m, mismatch, 'portrait'), 0)).toThrow(/竖版 832×1216.*没有匹配.*版式清单/);
+    expect(() => ensureLayoutCapacity(createLayoutSelection(context(), m, mismatch, null), 1)).toThrow(/横版 尺寸无效或未设置/);
+    m.custom = m.custom.slice(0, 1);
+    const oneMatch = createLayoutSelection(context([['a']]), m, sizes, 'portrait');
+    expect(() => ensureLayoutCapacity(oneMatch, 2)).toThrow(/至少需要 2 套.*1 套匹配.*降低单楼最少图片数/);
+    m.singleImageMode = true;
+    expect(() => createLayoutSelection(context(), m, sizes, 'portrait')).toThrow(/1152×1728.*全页单格版式/);
   });
 
   it('releases oldest rounds first, preserves newer overlapping use, and stops when exhausted', () => {

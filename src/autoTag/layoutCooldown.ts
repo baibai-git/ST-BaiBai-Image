@@ -18,6 +18,7 @@ function recentRounds(context: Pick<STContext, 'chatMetadata'>): string[][] {
 
 export interface LayoutSelection {
   layouts: Record<Orientation, ResolvedLayout[]>;
+  sizes: Record<Orientation, ImageSize | null>;
   recent: string[][];
   released: number;
   lockedSize: Orientation | null;
@@ -56,14 +57,30 @@ export function createLayoutSelection(
   const rounds = manga.singleImageMode ? 0 : normalizeCooldownRounds(manga.cooldownRounds);
   const selection: LayoutSelection = {
     layouts: { portrait: compatible('portrait'), landscape: compatible('landscape') },
+    sizes,
     recent: rounds ? recentRounds(context).slice(-rounds) : [], released: 0, lockedSize, rounds, selectionNotes:manga.selectionNotes, visual:manga.catalogMode==='image', singleImageMode:manga.singleImageMode===true,
   };
-  if (selection.singleImageMode && !Object.values(selection.layouts).some(layouts => layouts.length)) {
-    throw new Error('单图模式没有与本轮方向、尺寸相符的启用全页单格版式；请先启用或调整对应版式。');
-  }
+  if (selection.singleImageMode) ensureLayoutCapacity(selection, 1);
   // No compatible uncooled layout: release only as much history as necessary to make a choice.
   if (!Object.values(layoutCandidates(selection)).some(layouts => layouts.length)) relaxLayoutSelection(selection);
   return selection;
+}
+
+export function ensureLayoutCapacity(selection: LayoutSelection, minImages: number): void {
+  if (!selection.layouts.portrait.length && !selection.layouts.landscape.length) {
+    const { lockedSize, sizes, singleImageMode } = selection;
+    const directions: Orientation[] = lockedSize ? [lockedSize] : ['portrait', 'landscape'];
+    const canvas = directions.map(direction => {
+      const size = sizes[direction];
+      return `${direction === 'portrait' ? '竖版' : '横版'} ${size ? `${size.width}×${size.height}` : '尺寸无效或未设置'}`;
+    }).join('、');
+    throw new Error(`当前工作流画布（${canvas}）没有匹配的已启用${singleImageMode ? '全页单格' : ''}版式。请切换工作流，或在「版式清单」启用或调整对应版式。`);
+  }
+  if (selection.singleImageMode) return;
+  const needed = Math.max(1, minImages);
+  const count = () => new Set(Object.values(layoutCandidates(selection)).flat().map(layout => layout.id)).size;
+  while (count() < needed && relaxLayoutSelection(selection)) { /* release oldest rounds only */ }
+  if (count() < needed) throw new Error(`本轮至少需要 ${needed} 套不同版式，当前仅有 ${count()} 套匹配。请启用更多匹配版式或降低单楼最少图片数。`);
 }
 
 export function setLayoutSelectionMessage(messages: ChatMsg[], selection: LayoutSelection): void {

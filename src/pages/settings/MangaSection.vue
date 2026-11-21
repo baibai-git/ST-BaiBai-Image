@@ -391,6 +391,64 @@ function resetBuiltin(id: string): void {
       </select>
     </label>
     <p class="bbi-manga-hint">示意图需要副 API 和 DSH 桥接均支持图片输入。</p>
+    <section class="bbi-manga-library" aria-label="版式清单">
+    <h3>版式清单</h3>
+    <div class="bbi-manga-item-actions">
+      <button type="button" class="bbi-btn bbi-btn-sm" @click="openQuick()">新建版式</button>
+      <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts()">导出全部版式（{{ rows.length }}）</button>
+      <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="importInput?.click()">{{ transferBusy ? '正在导入…' : '导入版式' }}</button>
+      <input ref="importInput" type="file" accept=".json,application/json" aria-label="导入版式 JSON 文件" hidden @change="importLayoutFile" />
+    </div>
+    <p v-if="transferNote" class="bbi-manga-hint" role="status">{{ transferNote }}</p>
+    <p v-if="transferError" class="bbi-manga-error" role="alert">{{ transferError }}</p>
+    <label class="bbi-manga-mini"><input type="checkbox" class="bbi-checkbox" :checked="allEnabled" :indeterminate="activeCount>0 && !allEnabled" :disabled="!rows.length" @change="setAllEnabled(($event.target as HTMLInputElement).checked)" />全部启用（{{ activeCount }}/{{ rows.length }}）</label>
+    <p class="bbi-manga-hint">拖动手柄或用上下方向键排序；格内读序、层级保持。</p>
+    <div class="bbi-manga-layout-list">
+    <div v-for="(row,index) in rows" :key="row.id" class="bbi-manga-item bbi-manga-layout-card" :class="{'is-dragging':draggingLayout===row.id}">
+      <div class="bbi-manga-item-head">
+        <button type="button" class="bbi-btn bbi-btn-sm bbi-manga-grip" aria-label="拖动版式排序，方向键上下移动" title="拖动排序；方向键上下移动" @pointerdown="startLayoutDrag($event,row.id)" @keydown.up.prevent="moveLayout(index,index-1)" @keydown.down.prevent="moveLayout(index,index+1)">⠿</button>
+        <code>{{ row.id }}</code>
+        <span class="bbi-manga-label">{{ row.label }}</span>
+        <span class="bbi-manga-meta">竖 {{ row.portrait }} 格 · 横 {{ row.landscape }} 格{{ row.custom ? ' · 自定义' : '' }}</span>
+        <span v-if="settings.manga.custom.find(item => item.id === row.id)?.canvas" class="bbi-manga-meta">{{ settings.manga.custom.find(item => item.id === row.id)?.canvas?.width }}×{{ settings.manga.custom.find(item => item.id === row.id)?.canvas?.height }}</span>
+      </div>
+      <input
+        class="bbi-input bbi-manga-usage"
+        :value="row.usage"
+        :placeholder="'版式用途'"
+        @change="onUsageChange(row.id, $event)"
+      />
+      <div class="bbi-manga-item-actions">
+        <label class="bbi-manga-mini">
+          <input type="checkbox" class="bbi-checkbox" :checked="!row.disabled" @change="toggleDisabled(row.id)" />
+          启用
+        </label>
+        <button type="button" class="bbi-btn bbi-btn-sm" @click="openQuick(row.id)">编辑版式</button>
+        <button
+          type="button"
+          class="bbi-btn bbi-btn-sm"
+          @click="editing === row.id ? cancel() : startEdit(row.id)"
+        >
+          {{ editing === row.id ? '收起 JSON' : 'JSON 编辑' }}
+        </button>
+        <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(row.id)">导出</button>
+        <button v-if="row.custom && builtins.has(row.id)" type="button" class="bbi-btn bbi-btn-sm" @click="resetBuiltin(row.id)">恢复内置</button>
+        <button type="button" class="bbi-btn bbi-btn-sm" @click="deleteLayout(row.id)">删除</button>
+      </div>
+
+      <div v-if="editing === row.id" :id="`bbi-manga-editor-${row.id}`" class="bbi-manga-editor">
+        <textarea v-model="draft" class="bbi-input bbi-manga-code" spellcheck="false"></textarea>
+        <div class="bbi-manga-item-actions">
+          <button type="button" class="bbi-btn bbi-btn-sm" @click="save">保存</button>
+          <button type="button" class="bbi-btn bbi-btn-sm" @click="cancel">取消</button>
+        </div>
+        <p v-if="error" class="bbi-manga-error">{{ error }}</p>
+      </div>
+    </div>
+
+    </div>
+    <p v-if="note" class="bbi-manga-hint" role="status">{{ note }}</p>
+    </section>
     <details class="bbi-manga-details">
       <summary>版式设置与维护</summary>
       <label class="bbi-manga-row">
@@ -459,69 +517,13 @@ function resetBuiltin(id: string): void {
 <div class="bbi-manga-item-actions"><button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(undefined,true)">导出旧版兼容文件</button><button v-if="settings.manga.deleted.length" type="button" class="bbi-btn bbi-btn-sm" @click="restoreDeleted">恢复已删除的默认版式（{{ settings.manga.deleted.length }}）</button></div></details>
       <button type="button" class="bbi-btn bbi-btn-sm" @click="startNew">新建 JSON 版式</button>
     </details>
-    <div class="bbi-manga-item-actions">
-      <button type="button" class="bbi-btn bbi-btn-sm" @click="openQuick()">新建版式</button>
-      <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts()">导出全部版式（{{ rows.length }}）</button>
-      <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="importInput?.click()">{{ transferBusy ? '正在导入…' : '导入版式' }}</button>
-      <input ref="importInput" type="file" accept=".json,application/json" aria-label="导入版式 JSON 文件" hidden @change="importLayoutFile" />
-    </div>
-    <p v-if="transferNote" class="bbi-manga-hint" role="status">{{ transferNote }}</p>
-    <p v-if="transferError" class="bbi-manga-error" role="alert">{{ transferError }}</p>
-    <label class="bbi-manga-mini"><input type="checkbox" class="bbi-checkbox" :checked="allEnabled" :indeterminate="activeCount>0 && !allEnabled" :disabled="!rows.length" @change="setAllEnabled(($event.target as HTMLInputElement).checked)" />全部启用（{{ activeCount }}/{{ rows.length }}）</label>
-    <p class="bbi-manga-hint">拖动手柄或用上下方向键排序；格内读序、层级保持。</p>
-    <div class="bbi-manga-layout-list">
-    <div v-for="(row,index) in rows" :key="row.id" class="bbi-manga-item bbi-manga-layout-card" :class="{'is-dragging':draggingLayout===row.id}">
-      <div class="bbi-manga-item-head">
-        <button type="button" class="bbi-btn bbi-btn-sm bbi-manga-grip" aria-label="拖动版式排序，方向键上下移动" title="拖动排序；方向键上下移动" @pointerdown="startLayoutDrag($event,row.id)" @keydown.up.prevent="moveLayout(index,index-1)" @keydown.down.prevent="moveLayout(index,index+1)">⠿</button>
-        <code>{{ row.id }}</code>
-        <span class="bbi-manga-label">{{ row.label }}</span>
-        <span class="bbi-manga-meta">竖 {{ row.portrait }} 格 · 横 {{ row.landscape }} 格{{ row.custom ? ' · 自定义' : '' }}</span>
-        <span v-if="settings.manga.custom.find(item => item.id === row.id)?.canvas" class="bbi-manga-meta">{{ settings.manga.custom.find(item => item.id === row.id)?.canvas?.width }}×{{ settings.manga.custom.find(item => item.id === row.id)?.canvas?.height }}</span>
-      </div>
-      <input
-        class="bbi-input bbi-manga-usage"
-        :value="row.usage"
-        :placeholder="'版式用途'"
-        @change="onUsageChange(row.id, $event)"
-      />
-      <div class="bbi-manga-item-actions">
-        <label class="bbi-manga-mini">
-          <input type="checkbox" class="bbi-checkbox" :checked="!row.disabled" @change="toggleDisabled(row.id)" />
-          启用
-        </label>
-        <button type="button" class="bbi-btn bbi-btn-sm" @click="openQuick(row.id)">编辑版式</button>
-        <button
-          type="button"
-          class="bbi-btn bbi-btn-sm"
-          @click="editing === row.id ? cancel() : startEdit(row.id)"
-        >
-          {{ editing === row.id ? '收起 JSON' : 'JSON 编辑' }}
-        </button>
-        <button type="button" class="bbi-btn bbi-btn-sm" :disabled="transferBusy || quickOpen || !!editing" @click="exportLayouts(row.id)">导出</button>
-        <button v-if="row.custom && builtins.has(row.id)" type="button" class="bbi-btn bbi-btn-sm" @click="resetBuiltin(row.id)">恢复内置</button>
-        <button type="button" class="bbi-btn bbi-btn-sm" @click="deleteLayout(row.id)">删除</button>
-      </div>
-
-      <div v-if="editing === row.id" :id="`bbi-manga-editor-${row.id}`" class="bbi-manga-editor">
-        <textarea v-model="draft" class="bbi-input bbi-manga-code" spellcheck="false"></textarea>
-        <div class="bbi-manga-item-actions">
-          <button type="button" class="bbi-btn bbi-btn-sm" @click="save">保存</button>
-          <button type="button" class="bbi-btn bbi-btn-sm" @click="cancel">取消</button>
-        </div>
-        <p v-if="error" class="bbi-manga-error">{{ error }}</p>
-      </div>
-    </div>
-
-    </div>
-    <p v-if="note" class="bbi-manga-hint" role="status">{{ note }}</p>
     <MangaLayoutEditor v-if="quickOpen" :sources="quickSources" :existing-ids="existingIds" :initial-key="quickSource" :editing-id="quickEditingId" @close="quickOpen=false" @save="saveQuick" />
 
     <div v-if="editing === '__new__'" ref="newJsonEditor" class="bbi-manga-editor">
       <p class="bbi-manga-hint">
-        版式 JSON：<code>id</code> 与内置同名即覆盖，新名字即追加；<code>portrait</code> / <code>landscape</code>
-        各自是「格数组」，每格 <code>position</code> 为位置代号、<code>slots</code> 为槽位到
-        <code>[y_min, x_min, y_max, x_max]</code> 的映射。坐标用 1088×1920 或 1920×1088 的内部画布，
-        已编译成以画布中心为原点的整数。自定义尺寸可添加 canvas: { width, height }，宽高为 64～8192 的偶数；同时保存横竖版时，另一方向自动对调宽高。
+        <code>id</code> 同名覆盖，新名字追加。<code>portrait</code> / <code>landscape</code> 是分格数组，
+        <code>slots</code> 使用中心原点 <code>[y_min, x_min, y_max, x_max]</code> 坐标。
+        自定义尺寸填 <code>canvas: { width, height }</code>；宽高 64～8192 的偶数。
       </p>
       <textarea v-model="draft" class="bbi-input bbi-manga-code" spellcheck="false"></textarea>
       <div class="bbi-manga-item-actions">
@@ -535,6 +537,8 @@ function resetBuiltin(id: string): void {
 </template>
 
 <style scoped>
+.bbi-manga-library { display: flex; flex-direction: column; gap: 10px; }
+.bbi-manga-library h3 { margin: 4px 0; font-size: 16px; }
 .bbi-manga-layout-list { display: grid; gap: 12px; }
 .bbi-manga-grip { cursor: grab; touch-action: none; user-select: none; padding: 4px 8px; }
 .bbi-manga-grip:active { cursor: grabbing; }

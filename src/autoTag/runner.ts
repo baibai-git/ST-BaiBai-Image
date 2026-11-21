@@ -9,7 +9,7 @@ import {
 import { prepareTargetText } from '@/autoTag/clean';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
 import { autoTagLayoutSelection, autoTagProfile, buildAutoTagMessages, buildAutoTagFixedMessages } from '@/autoTag/prompt';
-import { layoutCandidates, recordLayoutRound, relaxLayoutSelection, prepareLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from '@/autoTag/layoutCooldown';
+import { ensureLayoutCapacity, recordLayoutRound, relaxLayoutSelection, prepareLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from '@/autoTag/layoutCooldown';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import {
@@ -331,12 +331,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
     // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一
     const profile = autoTagProfile();
     const layoutSelection = autoTagLayoutSelection(context, profile);
-    if (layoutSelection && !layoutSelection.singleImageMode) {
-      const needed = Math.max(1, promptOptions.minImages);
-      const count = () => new Set(Object.values(layoutCandidates(layoutSelection)).flat().map(layout => layout.id)).size;
-      while (count() < needed && relaxLayoutSelection(layoutSelection)) { /* release oldest rounds only */ }
-      if (count() < needed) throw new Error(`当前画布只有 ${count()} 个可用版式，无法满足 ${needed} 页同轮去重；请启用更多相容版式或降低最少图片数。`);
-    }
+    if (layoutSelection && !layoutSelection.singleImageMode) ensureLayoutCapacity(layoutSelection, promptOptions.minImages);
     const messages = await buildAutoTagMessages(
       context,
       floor,
