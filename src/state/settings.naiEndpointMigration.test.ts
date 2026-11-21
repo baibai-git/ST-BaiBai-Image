@@ -171,11 +171,10 @@ describe('NAI 接入点库 · 恒非空与官方条不变式', () => {
     expect(settings.nai.activeEndpointId).toBe('nep_c');
   });
 
-  it('newNaiEndpoint 连续调用 id 不重复,前缀 nep_ 不与 art_/wf_/ch_ 撞', async () => {
+  it('连续新建接入点不会把不同条目当成同一条', async () => {
     const { newNaiEndpoint } = await import('@/state/settings');
     const ids = [newNaiEndpoint(), newNaiEndpoint(), newNaiEndpoint()].map(e => e.id);
     expect(new Set(ids).size).toBe(3);
-    expect(ids.every(id => id.startsWith('nep_'))).toBe(true);
   });
 });
 

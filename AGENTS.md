@@ -20,8 +20,10 @@ SillyTavern 剧情配图扩展。先按 [architecture.md](architecture.md) 定�
 | 规则 | 检查 |
 |---|---|
 | 协议、迁移、重试和业务行为 | `npm test` |
+| 维护脚本本身的行为 | `npm run test:maintenance` |
 | 类型与原导出路径兼容 | `npm run typecheck` |
 | 暂存文件不得超限或继续膨胀 | `npm run check:size`；钩子安装见 `docs/maintenance.md` |
 | 可见操作改动 | 真浏览器走通相应流程，保留截图与控制台结果 |
+| 测试只守可观察结果（界面、数据、请求协议）；替身只模拟外部依赖 | 审查断言，并对有代表性的关键用例注入回归 |
 
 大文件清单、文档分工及归档边界见 [维护约定](docs/maintenance.md)。

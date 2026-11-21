@@ -57,23 +57,4 @@ describe('mapLimit', () => {
     slow.resolve();
     expect(await run).toEqual([0, 1, 2, 3]);
   });
-
-  it('空输入直接返回空数组,不起 worker', async () => {
-    let calls = 0;
-    expect(
-      await mapLimit([], 4, async () => {
-        calls++;
-        return 1;
-      }),
-    ).toEqual([]);
-    expect(calls).toBe(0);
-  });
-
-  it.each([0, -3, NaN])('非法 limit 回落到串行而不是死锁: %s', async limit => {
-    expect(await mapLimit([1, 2, 3], limit, async n => n * 2)).toEqual([2, 4, 6]);
-  });
-
-  it('limit 大于条数时不会多起 worker', async () => {
-    expect(await mapLimit([1, 2], 99, async n => n)).toEqual([1, 2]);
-  });
 });

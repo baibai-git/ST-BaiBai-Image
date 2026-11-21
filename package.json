@@ -10,7 +10,8 @@
     "prewatch": "node scripts/sync-version.mjs",
     "watch": "vite build --watch --mode development",
     "typecheck": "vue-tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run src/",
+    "test:maintenance": "vitest run scripts/",
     "check:size": "node scripts/check-file-size.mjs",
     "hooks:install": "node scripts/install-hooks.mjs"
   },

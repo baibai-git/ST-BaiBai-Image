@@ -1,31 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiChannel } from '@/state/settings';
+import { clearHistory, records } from '@/state/history';
 import { buildRequestBody, extractContent, readUsage, readSseContent, requestCompletion, requestViaMainApi, wireMessages } from './client';
 
-/** 历史层全部 mock 掉:这里要断的正是「什么时候记成功/失败」 */
-const h = vi.hoisted(() => ({
-  beginLlm: vi.fn(() => 1),
-  generateRaw: vi.fn(),
-  finishLlm: vi.fn(),
-  failLlm: vi.fn(),
-  patchLlmTokens: vi.fn(),
-}));
-
-vi.mock('@/state/history', () => ({
-  FOLLOW_MAIN_API: '跟随主 API',
-  beginLlm: h.beginLlm,
-  finishLlm: h.finishLlm,
-  failLlm: h.failLlm,
-  patchLlmTokens: h.patchLlmTokens,
-  // 与真实实现同语义:吞异常返回 null
-  safeHistory: (fn: () => unknown) => {
-    try {
-      return fn();
-    } catch {
-      return null;
-    }
-  },
-}));
+const h = vi.hoisted(() => ({ generateRaw: vi.fn() }));
 
 vi.mock('@/st/context', () => ({
   getContext: () => ({ getRequestHeaders: () => ({}), generateRaw: h.generateRaw }),
@@ -278,9 +256,7 @@ describe('readSseContent:流式', () => {
 
 describe('validate:历史「成功」= 调用方验收通过', () => {
   beforeEach(() => {
-    h.beginLlm.mockClear();
-    h.finishLlm.mockClear();
-    h.failLlm.mockClear();
+    clearHistory();
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(okPayload)));
   });
 
@@ -291,13 +267,13 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
     });
     expect(text).toBe('答案文本');
     expect(seen).toEqual(['答案文本']); // validate 拿到的是提取后的正文
-    expect(h.finishLlm).toHaveBeenCalledTimes(1);
-    expect(h.failLlm).not.toHaveBeenCalled();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ status: 'ok', response: '答案文本', promptTokens: 5, completionTokens: 7 });
   });
 
   it('不传 validate → 维持旧行为:拿到文本即记成功', async () => {
     await expect(requestCompletion(channel, messages)).resolves.toBe('答案文本');
-    expect(h.finishLlm).toHaveBeenCalledTimes(1);
+    expect(records[0]).toMatchObject({ status: 'ok', response: '答案文本' });
   });
 
   it('验收抛错 → 请求按失败抛出,历史记失败而非成功', async () => {
@@ -310,8 +286,10 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
         },
       }),
     ).rejects.toThrow('协议不合法');
-    expect(h.finishLlm).not.toHaveBeenCalled();
-    expect(h.failLlm).toHaveBeenCalledWith(1, '协议不合法', false, {response:'答案文本', promptTokens:5, completionTokens:7, cacheReadTokens:null, tokensEstimated:false});
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      status: 'error', error: '协议不合法', response: '答案文本', promptTokens: 5, completionTokens: 7,
+    });
   });
 
   it('HTTP 失败时 validate 根本不该被调用', async () => {
@@ -322,7 +300,7 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
     const validate = vi.fn();
     await expect(requestCompletion(channel, messages, { validate })).rejects.toThrow('500');
     expect(validate).not.toHaveBeenCalled();
-    expect(h.failLlm).toHaveBeenCalledTimes(1);
+    expect(records[0]).toMatchObject({ status: 'error', error: expect.stringContaining('500') });
   });
 
   it.each([
@@ -338,8 +316,8 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
     await expect(requestCompletion(channel, messages)).rejects.toMatchObject({
       name: 'ApiError', message: error.message, status, code,
     });
-    expect(h.finishLlm).not.toHaveBeenCalled();
-    expect(h.failLlm).toHaveBeenCalledTimes(1);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ status: 'error', error: error.message });
   });
 
   it('preserves the actual HTTP status with structured errors', async () => {
@@ -350,10 +328,9 @@ describe('validate:历史「成功」= 调用方验收通过', () => {
   });
 });
 
- it('主 API 验收失败仍保留返回文本', async () => {
-  h.finishLlm.mockClear(); h.failLlm.mockClear();
+it('主 API 验收失败仍保留返回文本', async () => {
+  clearHistory();
   h.generateRaw.mockResolvedValue('invalid response');
   await expect(requestViaMainApi(messages,{validate:()=>{throw new Error('invalid JSON');}})).rejects.toThrow('invalid JSON');
-  expect(h.finishLlm).not.toHaveBeenCalled();
-  expect(h.failLlm).toHaveBeenCalledWith(1,'invalid JSON',false,{response:'invalid response',promptTokens:null,completionTokens:null,tokensEstimated:true});
- });
+  expect(records[0]).toMatchObject({ status: 'error', error: 'invalid JSON', response: 'invalid response', tokensEstimated: true });
+});

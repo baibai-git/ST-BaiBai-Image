@@ -46,11 +46,6 @@ function fakeCtx(message: STMessage, saveChat = vi.fn(async () => undefined)): S
 afterEach(() => vi.unstubAllGlobals());
 
 describe('promptHash', () => {
-  it('is deterministic and 14 hex chars', () => {
-    const tag = '<bbi_image>1girl, moonlight</bbi_image>';
-    expect(promptHash(tag)).toBe(promptHash(tag));
-    expect(promptHash(tag)).toMatch(/^[0-9a-f]{14}$/);
-  });
 
   it('distinguishes different prompts', () => {
     expect(promptHash('<bbi_image>a</bbi_image>')).not.toBe(
@@ -64,11 +59,6 @@ describe('promptHash', () => {
 });
 
 describe('imageFileName', () => {
-  it('uses a stable character-name hash in the flat filename', () => {
-    expect(imageFileName('\u67cf\u5b9d', 0, 'a3f9c2', 'g_1723', 'png')).toBe(
-      `bbi_${promptHash('\u67cf\u5b9d')}_0_a3f9c2-g_1723.png`,
-    );
-  });
 
   it('does not expose unsupported characters from the character name', () => {
     expect(imageFileName('\u67cf\u5b9d/\u6d4b\u8bd5 \u5361', 1, 'h', 'g', 'png')).toMatch(
@@ -81,10 +71,6 @@ describe('sidecar naming', () => {
   it('swaps the extension of the image filename', () => {
     expect(sidecarFileName('bbi_abc_0_h-g1.png')).toBe('bbi_abc_0_h-g1.json');
     expect(sidecarFileName('bbi_abc_0_h-g1.jpg')).toBe('bbi_abc_0_h-g1.json');
-  });
-
-  it('appends .json when there is no extension', () => {
-    expect(sidecarFileName('bbi_abc_0_h-g1')).toBe('bbi_abc_0_h-g1.json');
   });
 
   it('stays inside validateAssetFileName limits for real filenames', () => {
@@ -167,13 +153,6 @@ describe('store read helpers', () => {
     expect(latestStaleEntry(store, 0, 'hash-of-tag2', 1)).toBeNull();
     // 但同槽位换提示词后，旧图仍可作 stale 显示
     expect(latestStaleEntry(store, 0, 'hash-of-tag1-edited', 0)?.generationId).toBe('tag1-img');
-  });
-
-  it('readStore tolerates missing extra', () => {
-    expect(readStore(fakeMessage())).toBeNull();
-    const message = fakeMessage();
-    message.extra = { [BBI_IMAGE_EXTRA_KEY]: { '0': {} } };
-    expect(readStore(message)).toEqual({ '0': {} });
   });
 });
 

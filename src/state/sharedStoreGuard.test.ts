@@ -1,88 +1,42 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 
-/**
- * 共享存储「空种子」事故回归测试:
- * 旧版绘在没有任何排除数据时也会用空名单创建共享存储(occupying baibai_exclude_settings),
- * 书启动后领养空 store → 双方互相同步成空,用户配置全灭。
- * 现在的契约:没有用户数据的一方绝不建仓;有数据的一方遇到「空种子 store」时自愈回写。
- *
- * 本文件只测纯逻辑工具(excludesHasUserData 同构实现),settings.ts 的 hydrate 链
- * 依赖 ST getContext,不便在 node 环境完整实例化。
- */
-
-const DEFAULT_WI_PATTERNS = ['\\[mvu[\\s\\S]*?\\]'];
-
-interface ExcludesLike {
-  excludedChars: string[];
-  excludedWorldNames: string[];
-  excludedWorldInfoPatterns: string[];
-  customStripTags: string[];
-}
-
-function excludesHasUserData(ex: ExcludesLike): boolean {
-  const patterns = ex.excludedWorldInfoPatterns.filter(p => !DEFAULT_WI_PATTERNS.includes(p));
-  return (
-    ex.excludedChars.length > 0 ||
-    ex.excludedWorldNames.length > 0 ||
-    patterns.length > 0 ||
-    ex.customStripTags.length > 0
-  );
-}
-
-const emptySeeded = (): ExcludesLike => ({
-  excludedChars: [],
-  excludedWorldNames: [],
-  excludedWorldInfoPatterns: [...DEFAULT_WI_PATTERNS],
-  customStripTags: [],
+const sharedKey = 'baibai_exclude_settings';
+const emptyExcludes = () => ({
+  excludedChars: [], excludedWorldNames: [], excludedWorldInfoPatterns: ['\\[mvu[\\s\\S]*?\\]'], customStripTags: [],
 });
 
-describe('排除名单共享存储空种子守卫', () => {
-  beforeEach(() => vi.restoreAllMocks());
-  afterEach(() => vi.restoreAllMocks());
+async function reload(extensionSettings: Record<string, unknown>) {
+  vi.resetModules();
+  const context = { extensionSettings };
+  vi.stubGlobal('window', Object.assign(new EventTarget(), { SillyTavern: { getContext: () => context } }));
+  const { hydrateSettings, settings } = await import('./settings');
+  await hydrateSettings();
+  return settings.excludes;
+}
 
-  it('空名单 + 仅内置默认规则 = 无用户数据(旧版绘写入的空种子长这样)', () => {
-    expect(excludesHasUserData(emptySeeded())).toBe(false);
-  });
+afterEach(() => vi.unstubAllGlobals());
 
-  it('全空名单(用户刚装插件)= 无用户数据', () => {
-    expect(
-      excludesHasUserData({
-        excludedChars: [],
-        excludedWorldNames: [],
-        excludedWorldInfoPatterns: [],
-        customStripTags: [],
-      }),
-    ).toBe(false);
-  });
+it('首次加载空名单时只启用本地默认规则，不占用共享名单', async () => {
+  const saved = { baibai_image: {} };
+  expect(await reload(saved)).toEqual(emptyExcludes());
+  expect(saved).not.toHaveProperty(sharedKey);
+});
 
-  it('有排除角色 = 有用户数据', () => {
-    const ex = emptySeeded();
-    ex.excludedChars = ['小雪'];
-    expect(excludesHasUserData(ex)).toBe(true);
-  });
+it('旧版空共享名单不会覆盖已保存的排除，修复后重新加载仍存在', async () => {
+  const local = {
+    excludedChars: ['小雪'], excludedWorldNames: ['设定集'],
+    excludedWorldInfoPatterns: ['^状态'], customStripTags: ['private'],
+  };
+  const saved = { baibai_image: { excludes: local }, [sharedKey]: { revision: 2, ...emptyExcludes() } };
+  const repaired = await reload(saved);
+  expect(repaired).toEqual(local);
+  expect(saved[sharedKey]).toMatchObject(local);
+  expect(await reload(JSON.parse(JSON.stringify(saved)))).toEqual(local);
+});
 
-  it('有整本排除的世界书 = 有用户数据', () => {
-    const ex = emptySeeded();
-    ex.excludedWorldNames = ['设定集'];
-    expect(excludesHasUserData(ex)).toBe(true);
-  });
-
-  it('有自定义条目名规则(除内置 mvu 外)= 有用户数据', () => {
-    const ex = emptySeeded();
-    ex.excludedWorldInfoPatterns.push('^\\[状态');
-    expect(excludesHasUserData(ex)).toBe(true);
-  });
-
-  it('有自定义清洗标签 = 有用户数据', () => {
-    const ex = emptySeeded();
-    ex.customStripTags = ['snow'];
-    expect(excludesHasUserData(ex)).toBe(true);
-  });
-
-  it('仅内置 mvu 规则(用户删光了自定义项)= 无用户数据,不会误判为空种子被回写覆盖', () => {
-    // 用户在任一端有意删空自定义项后,store 里只剩内置规则 → 与本地一致,
-    // 自愈守卫不触发(书侧 requires excludesHasUserData(apiSettings) 为 false)
-    const ex = emptySeeded();
-    expect(excludesHasUserData(ex)).toBe(false);
-  });
+it('已有共享名单时载入该名单，保留其它插件维护的世界书排除', async () => {
+  const remote = { ...emptyExcludes(), excludedWorldNames: ['来自柏宝书的排除'] };
+  const saved = { baibai_image: { excludes: { ...emptyExcludes(), excludedChars: ['旧副本'] } }, [sharedKey]: { revision: 3, ...remote } };
+  expect(await reload(saved)).toEqual(remote);
+  expect(saved[sharedKey]).toEqual({ revision: 3, ...remote });
 });

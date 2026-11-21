@@ -66,14 +66,15 @@ describe('fetchComfyModelLists', () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe('http://127.0.0.1:8188/object_info');
   });
 
-  it('同 url 命中缓存不重复请求;force 强制重拉', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse(OBJECT_INFO));
-    vi.stubGlobal('fetch', fetchMock);
-    await fetchComfyModelLists('http://a:8188');
-    await fetchComfyModelLists('http://a:8188');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    await fetchComfyModelLists('http://a:8188', { force: true });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+  it('刷新模型列表能看到 ComfyUI 刚加的 LoRA，之后打开仍能看到', async () => {
+    let loras = ['style.safetensors'];
+    vi.stubGlobal('fetch', async () => jsonResponse({
+      ...OBJECT_INFO, LoraLoader: { input: { required: { lora_name: [loras] } } },
+    }));
+    expect((await fetchComfyModelLists('http://a:8188')).loras).toEqual(loras);
+    loras = [...loras, 'new/detail.safetensors'];
+    expect((await fetchComfyModelLists('http://a:8188', { force: true })).loras).toEqual(loras);
+    expect((await fetchComfyModelLists('http://a:8188')).loras).toContain('new/detail.safetensors');
   });
 
   it('网络级失败回退 ST 转发;loras/clips 为空,models 按 UNet:/GGUF: 前缀分类', async () => {

@@ -196,8 +196,6 @@ describe('NAI 画师串库', () => {
     const { newNaiArtist } = await import('@/state/settings');
     const ids = [newNaiArtist(), newNaiArtist(), newNaiArtist()].map(a => a.id);
     expect(new Set(ids).size).toBe(3);
-    // art_ 前缀不与 wf_ / ch_ 的 id 空间相撞
-    expect(ids.every(id => id.startsWith('art_'))).toBe(true);
   });
 });
 

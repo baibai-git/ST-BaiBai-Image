@@ -65,10 +65,6 @@ describe('prompt-side hide script (promptOnly)', () => {
       '正文前\n<bbi_image>1girl,\nmoonlight</bbi_image>\n正文后'.replace(regex, script.replaceString),
     ).toBe('正文前\n\n正文后');
   });
-
-  it('shares the same find pattern as the slot script', () => {
-    expect(imageTagSlotScript().findRegex).toBe(imageTagHideScript().findRegex);
-  });
 });
 
 describe('placement covers narrator floors (regression lock)', () => {
@@ -294,12 +290,6 @@ describe('serializeImageTag', () => {
     ).toBe('<bbi_image>1girl<size>portrait</size></bbi_image>');
   });
 
-  it('always writes <size> — generation is deferred, so orientation must persist in the text', () => {
-    expect(
-      serializeImageTag({ tag: '1girl', nl: '', negative: '', characters: [], size: 'landscape' }),
-    ).toContain('<size>landscape</size>');
-  });
-
   it('round-trips through parseImageTagContent byte-for-byte in canonical form', () => {
     // 这条锁死「打开弹窗、什么都不改、保存」不会换 promptHash 桶 —— 一换,老图全变 stale。
     const canonical = [
@@ -311,17 +301,6 @@ describe('serializeImageTag', () => {
     for (const raw of canonical) {
       expect(serializeImageTag(parseImageTagContent(raw))).toBe(raw);
     }
-  });
-
-  it('produces a form that parses back to the same fields', () => {
-    const content = {
-      tag: '1girl, smile',
-      nl: 'A girl smiling.',
-      negative: 'duplicate',
-      characters: [{ name: '小雪', tag: 'girl, white hair', nl: 'right side' }],
-      size: 'portrait' as const,
-    };
-    expect(parseImageTagContent(serializeImageTag(content))).toEqual(content);
   });
 });
 

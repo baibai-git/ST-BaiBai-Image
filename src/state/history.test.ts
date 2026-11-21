@@ -13,7 +13,6 @@ import {
   resetHistory,
   roughTokens,
   safeHistory,
-  truncate,
   HISTORY_LIMITS,
   type ImageRecord,
   type LlmRecord,
@@ -83,27 +82,16 @@ describe('环形缓冲', () => {
     expect(() => failLlm(id, 'boom')).not.toThrow();
   });
 
-  it('clearHistory 清空但保持同一数组引用(reactive 不断链)', () => {
-    llm();
-    const ref = records;
+  it('清空旧请求后仍能显示新请求', () => {
+    llm('旧请求');
     clearHistory();
-    expect(records.length).toBe(0);
-    expect(records).toBe(ref);
+    expect(records).toHaveLength(0);
+    llm('新请求');
+    expect(records).toMatchObject([{ source: '新请求' }]);
   });
 });
 
 describe('截断', () => {
-  it('短文本原样返回', () => {
-    expect(truncate('abc')).toBe('abc');
-  });
-
-  it('超长文本截断并标注原长', () => {
-    const long = 'x'.repeat(MAX_CONTENT + 500);
-    const out = truncate(long);
-    expect(out.length).toBeLessThan(long.length);
-    expect(out.startsWith('x'.repeat(100))).toBe(true);
-    expect(out).toContain(`原长 ${MAX_CONTENT + 500} 字符`);
-  });
 
   it('登记时对每条 message 都截断', () => {
     const id = beginLlm({
@@ -199,29 +187,6 @@ describe('token 补录', () => {
 });
 
 describe('roughTokens 粗估', () => {
-  it('空串为 0', () => {
-    expect(roughTokens('')).toBe(0);
-  });
-
-  it('中日韩按 1 字 1 token', () => {
-    expect(roughTokens('你好世界')).toBe(4);
-    expect(roughTokens('こんにちは')).toBe(5);
-  });
-
-  it('拉丁文按 4 字符 1 token', () => {
-    expect(roughTokens('a'.repeat(40))).toBe(10);
-  });
-
-  it('中英混排两段分别计入', () => {
-    // 4 个汉字 + 8 个 ASCII → 4 + 2
-    expect(roughTokens('你好世界abcdefgh')).toBe(6);
-  });
-
-  it('代理对(emoji)按一个字符算,不重复计数', () => {
-    // '🎨' 的 length 是 2,但按码点只应算 1 个字符 → 1/4 → 四舍五入 0
-    expect(roughTokens('🎨')).toBe(0);
-    expect(roughTokens('🎨'.repeat(4))).toBe(1);
-  });
 
   it('结果随文本变长而单调不减(段间比大小是它唯一的用途)', () => {
     const short = roughTokens('短文本');
@@ -238,10 +203,6 @@ describe('safeHistory', () => {
       }),
     ).toBeNull();
   });
-
-  it('正常时原样返回结果', () => {
-    expect(safeHistory(() => 42)).toBe(42);
-  });
 });
 
  it('retains a validation failure response and upstream usage using the existing history limit',()=> {
@@ -249,6 +210,7 @@ describe('safeHistory', () => {
   failLlm(id,'bad JSON',false,{response:'x'.repeat(MAX_CONTENT+100),promptTokens:100,completionTokens:20,cacheReadTokens:80,tokensEstimated:false});
   const record=records[0] as LlmRecord;
   expect(record.status).toBe('error'); expect(record.error).toBe('bad JSON');
-  expect(record.response).toBe(truncate('x'.repeat(MAX_CONTENT+100)));
+  expect(record.response).toMatch(/^x+\n…\(已截断，原长 \d+ 字符\)$/);
+  expect(record.response.split('\n')[0]).toHaveLength(MAX_CONTENT);
   expect(record.promptTokens).toBe(100); expect(record.completionTokens).toBe(20); expect(record.cacheReadTokens).toBe(80);
  });

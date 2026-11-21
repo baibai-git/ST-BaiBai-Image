@@ -26,9 +26,11 @@ DSH 按能力接口的 `image_input.max_images_per_message` 重新分组，同�
 本轮动态文字只提供可选 ID、冷却与回退规则；完整图册及精简槽位/用途目录提供几何信息，不授予选择权限。图片模式移除重复百分比位置说明。
 固定规范仍为纯文本。`dsh_session` 协议、专属入口、Skill 绑定及 `fixed_message_count` 语义不变；图片不进入固定规范同步。
 
-## DSH 专属会话保留（ST-bridge 0.15.0 起）
+## ST-bridge 接入与旧版图册保留
 
-专属模式要求桥接声明 `layout_atlas: {"supported":true,"mode":"session-prefix-v1"}`。
+使用 `/clients/<id>/v1` 专属接入时，柏宝绘每轮发送完整图册，由 ST-bridge 接管会话。这样即使桥接刚切换或重建会话，本次也有完整几何信息。若要减少图片传输，可切换到文字版式说明。
+
+以下为旧版客户端管理会话时的图册缓存。旧专属模式要求桥接声明 `layout_atlas: {"supported":true,"mode":"session-prefix-v1"}`。
 
 - 首次生成发送完整图册和空间目录；`dsh_session.layout_atlas.hash` 标识图册版本，`message_indices` 指向本请求中的图册 user 消息。
 - 桥接独立保存原生图册节点，清理旧正文和回答时保留该节点；后续相同会话和图册只传同一 hash 及空索引，不重复上传图片或目录。固定选版说明和回退控制格式也随图册保留，后续只更新可选/禁用 ID、冷却窗口、放宽状态及是否允许回退。本轮正文与角色资料照常发送。

@@ -6,10 +6,10 @@ import type { STContext } from '@/st/context';
 import { buildMangaSpec, mangaDefaults } from '@/manga/layouts';
 import { createLayoutSelection, setLayoutSelectionMessage } from '@/autoTag/layoutCooldown';
 import { layoutAtlasMessages } from '@/manga/atlas';
+import { clearHistory, records } from '@/state/history';
 
-const h=vi.hoisted(()=>({context:null as STContext|null,begin:vi.fn((_record:{messages:ChatMsg[]})=>1),finish:vi.fn(),fail:vi.fn()}));
+const h=vi.hoisted(()=>({context:null as STContext|null}));
 vi.mock('@/st/context',()=>({getContext:()=>h.context}));
-vi.mock('@/state/history',()=>({beginLlm:h.begin,finishLlm:h.finish,failLlm:h.fail,patchLlmTokens:vi.fn(),FOLLOW_MAIN_API:'主API',safeHistory:(fn:()=>unknown)=>fn()}));
 
 const channel:ApiChannel={id:'dsh',name:'DSH',url:'http://127.0.0.1:43121/v1',key:'test-local-key',model:'dsh-default',temperature:.6,maxTokens:8192,timeoutSec:30,stream:true,excludeParams:[],reasoningEffort:''};
 const fixed:ChatMsg[]=[{role:'system',content:'prefix',purpose:'prefix'},{role:'system',content:'spec',purpose:'spec'},{role:'system',content:'contract',purpose:'contract'},{role:'system',content:'check',purpose:'check'}];
@@ -30,7 +30,7 @@ function server(run:(body:any)=>Response|Promise<Response>=body=>response(body))
     const body=JSON.parse(init.body);calls.push(body);return run(body);
   }));
 }
-beforeEach(()=>{settings.autoTag.dshDedicated=false;settings.autoTag.dshUserMessages=false;settings.autoTag.dshRuleSource='plugin';settings.autoTag.dshSkillRequest=DEFAULT_DSH_SKILL_REQUEST;delete settings.autoTag.dshDedicatedState;vi.clearAllMocks();calls=[];imageLimit=4;clientEndpoints=[{id:'baibaohui',enabled:true,skillId:'moss-layout-spec'}];h.context=context();server();});
+beforeEach(()=>{settings.autoTag.dshDedicated=false;settings.autoTag.dshUserMessages=false;settings.autoTag.dshRuleSource='plugin';settings.autoTag.dshSkillRequest=DEFAULT_DSH_SKILL_REQUEST;delete settings.autoTag.dshDedicatedState;vi.clearAllMocks();clearHistory();calls=[];imageLimit=4;clientEndpoints=[{id:'baibaohui',enabled:true,skillId:'moss-layout-spec'}];h.context=context();server();});
 
 describe('editable per-turn Skill request',()=>{
   const endpoint={...channel,url:'http://127.0.0.1:43121/clients/baibaohui/v1'};
@@ -464,8 +464,7 @@ describe('DSH persistent agent routing',()=>{
     expect(calls[1].messages.map((m:any)=>m.content)).toEqual(['world updated','target updated']);
     expect(payload(calls[1])).toMatchObject({fixed_message_count:0,session_id:'session-'+first.chat_id});
     expect(payload(calls[1]).request_id).not.toBe(first.request_id);
-    expect(h.begin.mock.calls.at(-1)?.[0]?.messages).toHaveLength(2);
-    expect(h.finish.mock.calls.at(-1)?.[1].cacheReadTokens).toBe(40);
+    expect(records[0]).toMatchObject({status:'ok',messages:[{content:'world updated'},{content:'target updated'}],cacheReadTokens:40});
     expect(JSON.stringify(ctx.chatMetadata)).not.toContain(channel.key);
     const reloaded=context();reloaded.chatMetadata=JSON.parse(JSON.stringify(ctx.chatMetadata));h.context=reloaded;
     await requestDshCompletion(channel,messages,reloaded);expect(calls[2].messages).toHaveLength(2);
@@ -524,7 +523,7 @@ describe('DSH persistent agent routing',()=>{
   it('received response marks fixed rules sent even if output validation fails; regenerate gets a new id',async()=>{
     const operation:DshOperation={};
     await expect(requestDshCompletion(channel,messages,h.context!,{operation,validate:()=>{throw new Error('invalid output');}})).rejects.toThrow('invalid output');
-    expect(h.fail).toHaveBeenCalled();
+    expect(records[0]).toMatchObject({status:'error',error:'invalid output',response:'result'});
     await requestDshCompletion(channel,messages,h.context!,{operation});
     expect(calls[1].messages).toHaveLength(2);expect(payload(calls[1]).request_id).not.toBe(payload(calls[0]).request_id);
   });

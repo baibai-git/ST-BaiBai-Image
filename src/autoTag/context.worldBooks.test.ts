@@ -34,9 +34,8 @@ describe('专用书单请求隔离', () => {
     mocks.overlay.mockResolvedValue(activated());
   });
   it('未启用保持原来的酒馆扫描路径', async () => {
-    await fetchWorldInfo(chat, [0], 'User', 'Alice');
-    expect(mocks.standard).toHaveBeenCalledOnce();
-    expect(mocks.dedicated).not.toHaveBeenCalled();
+    mocks.standard.mockResolvedValue({ allActivatedEntries: new Set([{ world: 'Normal', uid: 1, content: 'Tavern entry' }]) });
+    expect(await fetchWorldInfo(chat, [0], 'User', 'Alice')).toBe('Tavern entry');
   });
   it('启用后仅把独立书单交给原生扫描器，保留排除规则', async () => {
     mocks.settings.worldBooks = { enabled: true, includeTavern: false, names: ['Dedicated', 'Excluded'] };
@@ -44,7 +43,6 @@ describe('专用书单请求隔离', () => {
     expect(await fetchWorldInfo(chat, [0], 'User', 'Alice')).toBe('Ocean');
     expect(mocks.standard).not.toHaveBeenCalled();
     expect(mocks.dedicated).toHaveBeenCalledWith(expect.any(Array), expect.any(Number), true, ['Dedicated', 'Excluded']);
-    expect(mocks.dedicated.mock.calls[0][3]).not.toBe(mocks.settings.worldBooks.names);
   });
   it('空专用书单不借用酒馆书单', async () => {
     mocks.settings.worldBooks.enabled = true;

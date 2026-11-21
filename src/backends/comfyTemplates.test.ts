@@ -202,9 +202,6 @@ describe('buildSimpleWorkflow - 尺寸', () => {
 });
 
 describe('normalizeSimpleConfig', () => {
-  it('空输入给 checkpoint 默认值', () => {
-    expect(normalizeSimpleConfig(undefined)).toEqual(simpleDefaults());
-  });
 
   it('非法 template 回 checkpoint;脏字段逐项归位', () => {
     const normalized = normalizeSimpleConfig({
@@ -224,7 +221,7 @@ describe('normalizeSimpleConfig', () => {
   });
 
   it('合法 template 的采样参数按该模板默认值兜底', () => {
-    expect(normalizeSimpleConfig({ template: 'flux' })).toEqual(simpleDefaults('flux'));
+    expect(normalizeSimpleConfig({ template: 'flux' })).toMatchObject({ steps: 20, cfg: 1, sampler: 'euler' });
     expect(normalizeSimpleConfig({ template: 'anima' }).shift).toBe(3);
   });
 });

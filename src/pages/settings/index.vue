@@ -7,7 +7,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { fetchModels, testChannel } from '@/api/client';
-import { controlDshSession } from '@/autoTag/runner';
+import { dshChannelMode } from '@/api/dsh';
 import {
   BACKENDS,
   DEFAULT_COMFY_SPEC,
@@ -17,6 +17,7 @@ import {
   DEFAULT_NAI_V5_SPEC,
   DEFAULT_NAI_V5_THINKING,
   IMAGE_DISPLAY_SIZES,
+  getTagGenChannel,
   newChannel,
   sanitizeTagName,
   settings,
@@ -36,6 +37,8 @@ import {
 } from '@/state/ui';
 import { checkForUpdate, performUpdate, updateState } from '@/update';
 import { computed, onMounted, ref } from 'vue';
+
+const showDshOptions = computed(() => !!dshChannelMode(getTagGenChannel()));
 
 const dshSkillEnabled = computed({
   get: () => settings.autoTag.dshRuleSource === 'skill',
@@ -127,14 +130,6 @@ const editingId = ref<string | null>(null);
 // 编辑用「草稿副本」:v-model 全改在草稿上,只有点「完成」才写回 settings(避免每敲一字就触发存盘)。
 // 弹窗开关也以它为准:草稿存在 = 弹窗打开。
 const editingChannel = ref<ApiChannel | null>(null);
-const dshBusy = ref(false), dshNotice = ref('');
-async function sendDshControl(action: 'sync_rules' | 'reset'): Promise<void> {
-  if (dshBusy.value) return;
-  dshBusy.value=true; dshNotice.value='';
-  try { dshNotice.value=await controlDshSession(action); }
-  catch(error) { dshNotice.value=error instanceof Error?error.message:String(error); }
-  finally { dshBusy.value=false; }
-}
 // 深拷贝渠道(纯数据,JSON 即可),切断与 settings 真身的引用
 function cloneChannel(ch: ApiChannel): ApiChannel {
   return JSON.parse(JSON.stringify(ch)) as ApiChannel;
@@ -714,21 +709,13 @@ async function confirmUpdate() {
         </div>
         <p class="bbi-field-hint">不指派渠道时跟随主 API:直接借用你主界面当前正在用的 API(聊天补全/文本补全)来生成画图 tag,无需额外配置。想用不同模型再在下方建副渠道指派。渠道列表与柏宝书共享,任一端改动都会自动同步到另一端。</p>
 
-        <label class="bbi-switch-row">
-          <span class="bbi-field-label">DSH 持久 Agent 会话</span>
-          <input v-model="settings.autoTag.dshSession" type="checkbox" class="bbi-checkbox" aria-label="DSH 持久 Agent 会话" />
-        </label>
-        <template v-if="settings.autoTag.dshSession">
+        <template v-if="showDshOptions">
+          <p class="bbi-field-hint">会话设置和重建请在 ST-bridge 管理。</p>
           <label class="bbi-switch-row">
             <span class="bbi-field-label">以 USER 消息发送</span>
             <input v-model="settings.autoTag.dshUserMessages" type="checkbox" class="bbi-checkbox" aria-label="以 USER 消息发送" />
           </label>
-          <p class="bbi-field-hint">开启后，柏宝绘发往 DSH 的消息统一使用 user，保留内容、顺序和图片，便于在会话中查看资料。固定规范仍按原来的会话同步规则由桥接管理；普通 API 不受影响。默认关闭。</p>
-          <label class="bbi-switch-row">
-            <span class="bbi-field-label">柏宝绘专属会话</span>
-            <input v-model="settings.autoTag.dshDedicated" type="checkbox" class="bbi-checkbox" aria-label="柏宝绘专属会话" />
-          </label>
-          <p v-if="settings.autoTag.dshDedicated" class="bbi-field-hint">切换酒馆聊天仍复用专属会话。插件发送的固定内容变化会在下次生成前同步；每次任务只使用本轮资料，历史保留在 DSH 日志中。需要支持专属模式的 ST-bridge。</p>
+          <p class="bbi-field-hint">柏宝绘发往 DSH 的消息统一使用 user，便于在会话中查看。</p>
           <label class="bbi-switch-row">
             <span class="bbi-field-label">每轮请求指定 Skill</span>
             <input v-model="dshSkillEnabled" type="checkbox" class="bbi-checkbox" aria-label="每轮请求指定 Skill" />
@@ -739,12 +726,6 @@ async function confirmUpdate() {
             <p class="bbi-field-hint"><code v-text="'{{skill_id}}'"></code> 自动替换为绑定的 Skill；KEEP 保护自动添加。留空使用默认文案。</p>
             <button type="button" class="bbi-btn bbi-btn-sm" @click="dshSkillRequest=DEFAULT_DSH_SKILL_REQUEST">恢复默认文案</button>
           </Collapsible>
-          <p class="bbi-field-hint">本轮资料每次发送；{{ settings.autoTag.dshDedicated ? '固定规范变化时自动同步。' : '固定规范首次发送，修改后手动同步。' }}</p>
-          <div class="bbi-channel-bar">
-            <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('sync_rules')">{{ settings.autoTag.dshRuleSource==='skill' && settings.defaultBackend==='comfyui' && settings.manga.enabled ? '重新发送宿主协议' : '重新发送固定规范' }}</button>
-            <button type="button" class="bbi-btn" :disabled="dshBusy || !settings.assignments.tagGen" @click="sendDshControl('reset')">重建 DSH 会话</button>
-          </div>
-          <p v-if="dshBusy || dshNotice" class="bbi-field-hint" role="status">{{ dshBusy ? '正在请求 DSH…' : dshNotice }}</p>
         </template>
 
         <hr class="bbi-rule" />

@@ -43,21 +43,21 @@ describe('tagPlanState', () => {
     expect(isTagPlanning(KEY)).toBe(false);
   });
 
-  /**
-   * 弹窗「续上」的命门:关掉弹窗不中断重写,重开时要能 await 回同一个在途请求。
-   * 若这里返回的不是同一个 promise,重开的弹窗就只会干转圈、等不到收尾。
-   */
-  it('awaitTagPlan 取回的是同一个在途 promise', async () => {
+  it('重新打开编辑窗可以等到在途重写结束，而不会提前读回旧提示词', async () => {
     const gate = deferred();
-    const task = runTagPlan(KEY, () => gate.promise);
-    const rejoined = awaitTagPlan(KEY);
-    expect(rejoined).toBe(task);
+    let prompt = '旧提示词';
+    void runTagPlan(KEY, async () => {
+      await gate.promise;
+      prompt = '重写后的提示词';
+    });
+    let shown: string | undefined;
+    const restored = awaitTagPlan(KEY)?.then(() => { shown = prompt; });
+    expect(restored).toBeDefined();
+    await Promise.resolve();
+    expect(shown).toBeUndefined();
     gate.resolve();
-    await task;
-    expect(awaitTagPlan(KEY)).toBeNull();
-  });
-
-  it('无在途任务时 awaitTagPlan 返回 null', () => {
+    await restored;
+    expect(shown).toBe('重写后的提示词');
     expect(awaitTagPlan(KEY)).toBeNull();
   });
 

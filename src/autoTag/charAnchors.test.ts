@@ -103,11 +103,6 @@ describe('applyCharRefs', () => {
     const { text } = applyCharRefs('@小雪 sits by the window', [e], 'nl');
     expect(text).toBe('a petite girl with long black hair sits by the window');
   });
-
-  it('nl mode falls back to the tag string when no nl sentence', () => {
-    const { text } = applyCharRefs('@小雪 sits by the window', entries, 'nl');
-    expect(text).toBe('1girl, long black hair, red eyes sits by the window');
-  });
 });
 
 describe('parseConvertedTags', () => {

@@ -23,13 +23,6 @@ describe('genState', () => {
     clearAllGen();
   });
 
-  it('slotKey 区分 chat / 楼层 / swipe / 槽位', () => {
-    expect(slotKey('c', 1, 0, 0)).toBe('c|1|0|0');
-    expect(slotKey('c', 1, 0, 1)).not.toBe(slotKey('c', 1, 0, 0));
-    expect(slotKey('c', 1, 1, 0)).not.toBe(slotKey('c', 1, 0, 0));
-    expect(slotKey('d', 1, 0, 0)).not.toBe(slotKey('c', 1, 0, 0));
-  });
-
   it('beginGen 登记运行态并给出未取消的 signal', () => {
     const { signal } = beginGen(KEY, 'hash1');
     expect(signal.aborted).toBe(false);
@@ -41,14 +34,6 @@ describe('genState', () => {
     const second = beginGen(KEY, 'hash1');
     expect(first.signal.aborted).toBe(true);
     expect(second.signal.aborted).toBe(false);
-  });
-
-  it('每个任务拿到不同票据', () => {
-    const a = beginGen(KEY, 'hash1');
-    const b = beginGen(KEY, 'hash1');
-    expect(a.token).not.toBe(b.token);
-    expect(isCurrentGen(KEY, a.token)).toBe(false);
-    expect(isCurrentGen(KEY, b.token)).toBe(true);
   });
 
   it('cancelGen 中止在途请求并清掉记录', () => {
@@ -125,10 +110,6 @@ describe('genState', () => {
       // 记录已清:迟到的 A 不该再落盘
       expect(isCurrentGen(KEY, a.token)).toBe(false);
     });
-  });
-
-  it('reconcileGen 对无记录的槽位是安全空操作', () => {
-    expect(reconcileGen(KEY, 'hash1')).toBe(false);
   });
 
   it('clearAllGen 中止全部并清空(切聊天/删楼)', () => {

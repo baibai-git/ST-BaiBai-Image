@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { groupKey, groupVibes, isGroupActive, matchVibe, UNGROUPED } from '@/backends/vibeGroups';
+import { groupVibes, isGroupActive, matchVibe } from '@/backends/vibeGroups';
 import type { NaiVibe } from '@/state/settings';
 
 function vibe(id: string, group = '', enabled = false, name = id): NaiVibe {
@@ -18,19 +18,6 @@ function vibe(id: string, group = '', enabled = false, name = id): NaiVibe {
   };
 }
 
-describe('groupKey', () => {
-  it('真实组名加前缀装箱,空名为未分组哨兵', () => {
-    expect(groupKey('战斗组')).toBe('g:战斗组');
-    expect(groupKey('')).toBe(UNGROUPED);
-    expect(groupKey('   ')).toBe(UNGROUPED);
-  });
-
-  it('用户把组命名成哨兵字面量也不会撞车', () => {
-    expect(groupKey('ungrouped')).not.toBe(UNGROUPED);
-    expect(groupKey('new')).toBe('g:new');
-  });
-});
-
 describe('matchVibe', () => {
   it('空查询全部命中', () => {
     expect(matchVibe(vibe('a'), '')).toBe(true);
@@ -47,6 +34,13 @@ describe('matchVibe', () => {
 });
 
 describe('groupVibes', () => {
+  it('名为 ungrouped 的分组不与未分组的图片混在一起', () => {
+    const groups = groupVibes([vibe('named', 'ungrouped'), vibe('loose', '   ')]);
+    expect(groups.map(group => [group.label, group.all.map(item => item.id)])).toEqual([
+      ['ungrouped', ['named']], ['未分组', ['loose']],
+    ]);
+  });
+
   it('按组归拢,未分组永远垫底', () => {
     const groups = groupVibes([
       vibe('1'),

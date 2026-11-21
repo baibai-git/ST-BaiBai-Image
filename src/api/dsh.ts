@@ -10,6 +10,7 @@ interface Pending { rulesHash?: string; atlasHash?: string; capabilities?: DshCa
 /** Kept by one runner invocation: ambiguous network retries reuse the exact request. */
 export interface DshOperation { pending?: Pending; acknowledged?: boolean }
 interface DshOptions extends RequestOptions {
+  bridgeManaged?: boolean;
   action?: DshSessionRequest['action'];
   target?: DshSessionRequest['target'];
   operation?: DshOperation;
@@ -23,6 +24,20 @@ export function dshChatId(context: STContext): string {
   if (!id) throw new ApiError('请先打开一个酒馆聊天。');
   const owner=context.groupId ? ['group',context.groupId] : ['character',context.characters?.[Number(context.characterId)]?.avatar ?? context.name2];
   return JSON.stringify([...owner,id]);
+}
+
+function dshEndpointId(url: string): string | undefined {
+  try {
+    return new URL(url).pathname.match(/^\/clients\/([a-z][a-z0-9_-]{0,63})\/v1(?:\/chat\/completions)?\/*$/)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+export function dshChannelMode(channel: ApiChannel | null): 'bridge' | 'legacy' | undefined {
+  if (!channel) return;
+  if (dshEndpointId(channel.url)) return 'bridge';
+  if (settings.autoTag.dshSession === true && channel.model.trim() === 'dsh-default') return 'legacy';
 }
 
 function bindingKey(channel: ApiChannel): string {
@@ -82,14 +97,15 @@ async function digest(value: string): Promise<string> {
 }
 
 export async function requestDshCompletion(channel: ApiChannel, messages: ChatMsg[], context: STContext, options: DshOptions = {}): Promise<string> {
-  const dedicated = settings.autoTag.dshDedicated === true;
+  const managed = options.bridgeManaged === true;
+  const dedicated = !managed && settings.autoTag.dshDedicated === true;
   const origin = options.expectedChatId ?? (context.getCurrentChatId() ? dshChatId(context) : undefined);
   const action = options.action ?? 'generate';
   if ((!dedicated || action==='generate') && !origin) throw new ApiError('请先打开一个酒馆聊天。');
   const profile = options.protocolKey ?? (settings.defaultBackend==='comfyui' && settings.manga.enabled ? 'manga' : settings.defaultBackend);
   const skillMode = settings.autoTag.dshRuleSource==='skill' && profile==='manga';
   const route = bindingKey(channel);
-  const clientId = new URL(channel.url).pathname.match(/^\/clients\/([a-z][a-z0-9_-]{0,63})\/v1(?:\/chat\/completions)?\/*$/i)?.[1] ?? 'baibai-image';
+  const clientId = dshEndpointId(channel.url) ?? 'baibai-image';
   if (dedicated && !settings.autoTag.dshDedicatedState) {
     settings.autoTag.dshDedicatedState={instanceId:crypto.randomUUID(),bindings:{}};
   }
@@ -105,8 +121,9 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
   if (settings.autoTag.dshUserMessages===true) effectiveMessages=effectiveMessages.map(message=>({...message,role:'user'}));
   let parts=splitDshMessages(effectiveMessages);
   const rulesHash=dedicated && parts.fixed.length ? await digest(JSON.stringify(parts.fixed)) : undefined;
-  const read=():Binding|undefined => dedicated ? state!.bindings[key] : bindings(context)[key];
+  const read=():Binding|undefined => managed ? undefined : dedicated ? state!.bindings[key] : bindings(context)[key];
   const save=(value?:Binding) => {
+    if (managed) return;
     if (state) { if (value) state.bindings[key]=value; else delete state.bindings[key]; }
     else saveBinding(context,origin!,key,value);
   };
@@ -173,7 +190,7 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
         operation.pending={rulesHash,...(currentAction==='generate' && atlasHash ? {atlasHash} : {}),...(capabilities ? {capabilities} : {}),key:operationKey,channel:{...channel,excludeParams:[...(channel.excludeParams ?? [])]},messages:outgoing.map(({role,content,images})=>({role,content,...(images?.length ? {images:[...images]} : {})})),session:{
           protocol_version:1,chat_id:chatId,request_id:requestId(),action:currentAction,
           ...(dedicated ? {session_mode:'dedicated',client_id:clientId,task_id:profile,...(origin ? {source_chat_id:origin} : {})} : {}),
-          ...(skillMode && !dedicated ? {client_id:clientId,task_id:`${profile}-skill`} : {}),
+          ...(managed ? {client_id:clientId} : skillMode && !dedicated ? {client_id:clientId,task_id:`${profile}-skill`} : {}),
           ...(skillId ? {skill_id:skillId} : {}),
           skill_enabled:skillMode,
           ...(atlas ? {layout_atlas:atlas} : {}),

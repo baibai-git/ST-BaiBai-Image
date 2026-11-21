@@ -5,7 +5,6 @@ import {
   generateComfyImage,
   ComfyUIError,
   parseWorkflowTemplate,
-  randomSeed,
   renderWorkflowTemplate,
   type ComfyWorkflow,
 } from '@/backends/comfyui';
@@ -22,25 +21,6 @@ function seedOf(workflow: ComfyWorkflow): unknown {
 }
 
 afterEach(() => vi.restoreAllMocks());
-
-describe('randomSeed', () => {
-  it('returns an integer in [0, 2**53)', () => {
-    const seed = randomSeed();
-    expect(Number.isInteger(seed)).toBe(true);
-    expect(seed).toBeGreaterThanOrEqual(0);
-    expect(seed).toBeLessThan(2 ** 53);
-  });
-
-  it('is derived from Math.random (range = Python random.randint(0, 2**53 - 1))', () => {
-    vi.spyOn(Math, 'random').mockReturnValue(0.5);
-    expect(randomSeed()).toBe(Math.floor(0.5 * 2 ** 53));
-  });
-
-  it('produces different seeds across calls', () => {
-    const seeds = new Set(Array.from({ length: 50 }, () => randomSeed()));
-    expect(seeds.size).toBeGreaterThan(1);
-  });
-});
 
 describe('parseWorkflowTemplate', () => {
   it('hints that placeholders must be quoted strings when JSON parse fails on %', () => {

@@ -1,5 +1,5 @@
 import { requestCompletion, requestViaMainApi } from '@/api/client';
-import { dshChatId, requestDshCompletion, type DshOperation } from '@/api/dsh';
+import { dshChannelMode, dshChatId, requestDshCompletion, type DshOperation } from '@/api/dsh';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   applyPositionedCharRefs,
@@ -8,7 +8,7 @@ import {
 } from '@/autoTag/charAnchors';
 import { prepareTargetText } from '@/autoTag/clean';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
-import { autoTagLayoutSelection, autoTagProfile, buildAutoTagMessages, buildAutoTagFixedMessages } from '@/autoTag/prompt';
+import { autoTagLayoutSelection, autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
 import { ensureLayoutCapacity, recordLayoutRound, relaxLayoutSelection, prepareLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from '@/autoTag/layoutCooldown';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
@@ -332,10 +332,12 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
     const profile = autoTagProfile();
     const layoutSelection = autoTagLayoutSelection(context, profile);
     if (layoutSelection && !layoutSelection.singleImageMode) ensureLayoutCapacity(layoutSelection, promptOptions.minImages);
+    const channel = getTagGenChannel();
+    const dshMode = dshChannelMode(channel);
     const messages = await buildAutoTagMessages(
       context,
       floor,
-      promptOptions,
+      { ...promptOptions, dshSession: !!dshMode },
       memory,
       preparedTarget,
       anchors.text,
@@ -343,9 +345,6 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
       profile,
       layoutSelection,
     );
-    const channel = getTagGenChannel();
-    const dshOn = settings.autoTag.dshSession === true;
-    if (dshOn && !channel) throw new Error('DSH 持久会话需要先为“生成 tag 使用”指派独立副 API 渠道。');
     const dshOperation: DshOperation = {};
     // 失败重试:请求异常与「返回无法解析/校验不通过」都视为可重试的异常(后者常见于模型没遵守协议);
     // 中止信号立即收手,不消耗重试。parseImagePlan 对坏输出抛错,「无画面」则是正常返回空数组。
@@ -397,10 +396,10 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
             ? `自动 tag(第 ${floor} 楼 · 第 ${attempt + 1} 次)`
             : `自动 tag(第 ${floor} 楼)`;
         const source = sourceBase + (layoutSelection?.released ? ` · 冷却放宽 ${layoutSelection.released} 轮` : '');
-        if (dshOn && channel) {
+        if (dshMode && channel) {
           await requestDshCompletion(channel, messages, context, {
             signal:controller.signal, source, validate,
-            operation:dshOperation, expectedChatId:dshIdentity,
+            bridgeManaged:dshMode==='bridge', operation:dshOperation, expectedChatId:dshIdentity,
             protocolKey:settings.manga.enabled && profile.layout ? 'manga' : profile.layout ? 'moss-layout' : profile.naiCharPrompts ? 'nai-character' : settings.defaultBackend,
             target:{floor,swipe_id:swipeId ?? null,revision:identity},
           });
@@ -761,29 +760,4 @@ export function bindAutoTagging(): void {
     diagnostic('CHAT_CHANGED', { args, currentChatId: getContext()?.getCurrentChatId?.() ?? '' });
     cancelAll();
   });
-}
-
-
-/** Manual controls update rules/session only; they never request another image plan. */
-export async function controlDshSession(action: 'sync_rules' | 'reset'): Promise<string> {
-  const context=getContext(), channel=getTagGenChannel();
-  if (!settings.autoTag.dshSession || !channel) throw new Error('请启用 DSH 持久会话并指派副 API 渠道。');
-  if (!context) throw new Error('酒馆尚未就绪。');
-  const dedicated=settings.autoTag.dshDedicated===true;
-  if (!dedicated && !context.getCurrentChatId()) throw new Error('请先打开一个酒馆聊天。');
-  const expectedChatId=context.getCurrentChatId() ? dshChatId(context) : undefined;
-  const profile=autoTagProfile();
-  let messages: Awaited<ReturnType<typeof buildAutoTagMessages>>=[];
-  if (action==='sync_rules') {
-    if (dedicated) messages=buildAutoTagFixedMessages(settings.autoTag,profile);
-    else {
-      const floor=context.chat.findLastIndex(message=>typeof message.mes==='string' && !!message.mes.trim());
-      if (floor<0) throw new Error('当前聊天还没有正文，请先发送一条消息。');
-      const anchors=resolveCharAnchors(charTagsBeforeFloor(floor),lockedCharTagNames());
-      messages=await buildAutoTagMessages(context,floor,settings.autoTag,readBookMemory(floor,context.chat[floor].mes,context.name1),undefined,anchors.text);
-    }
-  }
-  return requestDshCompletion(channel,messages,context,{action,expectedChatId,
-    protocolKey:settings.manga.enabled && profile.layout ? 'manga' : profile.layout ? 'moss-layout' : profile.naiCharPrompts ? 'nai-character' : settings.defaultBackend,
-    source:action==='reset'?'DSH 重建会话':'DSH 手动发送固定规范'});
 }
