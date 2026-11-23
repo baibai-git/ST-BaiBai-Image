@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { autoTagProfile, buildAutoTagMessages, expandNlSections } from '@/autoTag/prompt';
+import {
+  autoTagProfile,
+  buildAutoTagMessages,
+  buildPresetWorldInfoScanPrompts,
+  expandNlSections,
+} from '@/autoTag/prompt';
 import {
   activeComfyPreset,
   activeNaiPlan,
@@ -1297,5 +1302,55 @@ describe('NAI「生成自然语言」开关与渠道画幅锁', () => {
       state.preset.promptSetId = savedSet;
       state.restore();
     }
+  });
+
+  it('当前预设模式保留虚构创作免责前提，把生图规范与剧情归入 system，末尾只留精简 user 执行指令', async () => {
+    const ctx = context();
+    ctx.chat = [
+      { name: 'Char', is_user: false, is_system: false, mes: '之前 AI 楼' },
+      { name: 'User', is_user: true, is_system: false, mes: '中间用户楼' },
+      { name: 'Char', is_user: false, is_system: false, mes: '目标正文' },
+    ];
+    ctx.characterId = 0;
+    ctx.characters = [{ name: 'Char', avatar: 'char.png', description: '不应重复装配的角色卡' }];
+    const opts = options({ jailbreak: '不应出现的插件破限' });
+
+    const messages = await buildAutoTagMessages(
+      ctx,
+      2,
+      opts,
+      null,
+      undefined,
+      null,
+      '',
+      undefined,
+      'current-preset',
+    );
+    const prompt = messages.map(message => message.content).join('\n\n');
+    const lastMessage = messages[messages.length - 1];
+
+    expect(prompt).not.toContain('不应出现的插件破限');
+    expect(prompt).not.toContain('不应重复装配的角色卡');
+    expect(prompt).not.toContain('停止角色扮演');
+    expect(prompt).not.toContain('<blend>');
+    expect(prompt).toContain('COMPANION ILLUSTRATION METADATA MODE');
+    expect(prompt).toContain('完整沿用当前预设中的虚构创作身份');
+    expect(prompt).toContain('<readonly_story_source>');
+    expect(prompt).toContain('你是严谨的剧情画面规划与生图提示词编写员');
+    expect(prompt).toContain('之前 AI 楼');
+    expect(prompt).toContain('中间用户楼');
+    expect(prompt).toContain('目标正文 ⟦P1⟧');
+    expect(messages.slice(0, -1).every(m => m.role === 'system')).toBe(true);
+    expect(lastMessage.role).toBe('user');
+    expect(lastMessage.content).toContain('不续写故事');
+    expect(lastMessage.content).toContain('仅针对上方「目标正文」');
+    expect(lastMessage.content).toContain('"images"');
+
+    const wiPrompts = buildPresetWorldInfoScanPrompts(ctx, 2, opts.contextMessages);
+    expect(wiPrompts).toEqual([
+      { role: 'assistant', content: '之前 AI 楼' },
+      { role: 'user', content: '中间用户楼' },
+      { role: 'assistant', content: '目标正文' },
+    ]);
   });
 });

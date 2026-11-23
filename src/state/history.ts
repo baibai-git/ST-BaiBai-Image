@@ -97,11 +97,22 @@ export const records = reactive<HistoryRecord[]>([]);
 
 let nextId = 1;
 
-/** 超长文本截断并标注原长;短文本原样返回(不产生新字符串)。 */
+/**
+ * 超长文本截断并标注原长;短文本原样返回(不产生新字符串)。
+ * 采用「首尾保留、中间省略」:像「压缩系统消息」把整份预设拼成一条超长 system 时,
+ * 末尾追加的生图规范与楼层目标正文也在尾部,单纯切头会把它完全吞掉。
+ */
 export function truncate(text: string): string {
   if (typeof text !== 'string') return '';
   if (text.length <= MAX_CONTENT) return text;
-  return `${text.slice(0, MAX_CONTENT)}\n…(已截断，原长 ${text.length} 字符)`;
+  const tailLen = Math.floor(MAX_CONTENT / 2);
+  const headLen = MAX_CONTENT - tailLen;
+  const omitted = text.length - MAX_CONTENT;
+  return (
+    `${text.slice(0, headLen)}` +
+    `\n…(中间已截断 ${omitted} 字符，原长 ${text.length} 字符)…\n` +
+    `${text.slice(text.length - tailLen)}`
+  );
 }
 
 /** 中日韩表意文字/假名/谚文/全角标点:这些大致 1 字 = 1 token。 */
@@ -203,12 +214,24 @@ export function finishLlm(id: number, info: LlmFinish): void {
  * 请求失败或被取消。aborted 与 error 分开:前者是用户主动取消,不是故障,
  * UI 用中性色而非红色。
  */
-export function failLlm(id: number, message: string, aborted = false): void {
+export function failLlm(id: number, message: string, aborted = false, response = ''): void {
   const record = find(id);
   if (record?.kind !== 'llm') return;
   record.status = aborted ? 'aborted' : 'error';
   record.durationMs = Date.now() - record.startedAt;
   record.error = aborted ? '' : message;
+  // 上游已返回但内容为空/协议失败时也保留原始返回,在历史里照常显示「返回」段。
+  if (response) record.response = truncate(response);
+}
+
+/**
+ * 请求进入宿主生成管线后,补录它实际组装出的完整消息。
+ * 当前预设模式在 begin 时只有插件任务输入;捕获 TH 的 generate_after_data 后据此替换。
+ */
+export function patchLlmMessages(id: number, messages: ChatMsg[]): void {
+  const record = find(id);
+  if (record?.kind !== 'llm' || !messages.length) return;
+  record.messages = truncateMessages(messages);
 }
 
 /** 估算 token 补录:请求已成功但真值拿不到时,估算结果晚于 finishLlm 到达。 */

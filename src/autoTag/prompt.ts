@@ -151,6 +151,29 @@ function recentFloors(context: STContext, targetFloor: number, count: number): n
   return floors;
 }
 
+/**
+ * 生成供酒馆助手预设模式激活世界书关键词用的扫描消息数组(由旧到新)。
+ * 只含清洗后的精选剧情楼层,不含生图规范或 JSON 协议,避免误触发无关世界书词条;
+ * 并在 CHAT_COMPLETION_PROMPT_READY 阶段连同 marker 一并从 chatHistory 位置清掉。
+ */
+export function buildPresetWorldInfoScanPrompts(
+  context: STContext,
+  targetFloor: number,
+  count: number,
+): ChatMsg[] {
+  const result: ChatMsg[] = [];
+  for (const floor of recentFloors(context, targetFloor, count)) {
+    const msg = context.chat[floor];
+    const content = cleanHistoryText(msg.mes, settings.excludes.customStripTags).trim();
+    if (!content) continue;
+    result.push({
+      role: msg.is_user ? 'user' : 'assistant',
+      content,
+    });
+  }
+  return result;
+}
+
 function roleLabel(context: STContext, floor: number): string {
   const message = context.chat[floor];
   if (message.is_user) return `user（${message.name || context.name1 || 'User'}）`;
@@ -174,6 +197,8 @@ export async function buildAutoTagMessages(
   taskNote?: string,
   /** 协议形态;runner 开跑时快照一份传进来,验收与收尾用同一份(缺省即时现算)。 */
   profile: AutoTagProfile = autoTagProfile(),
+  /** 预设模式:通用设定与破限由 ST 当前/指定预设提供,这里只保留生图任务与精选剧情。 */
+  mode: 'independent' | 'current-preset' | 'named-preset' = 'independent',
 ): Promise<ChatMsg[]> {
   const target = context.chat[targetFloor];
   const preparedTarget =
@@ -191,14 +216,17 @@ export async function buildAutoTagMessages(
     .join('\n\n');
   const memoryText = memory ? memory.text : '角色参考：柏宝书本次未提供。';
 
-  // 世界书/角色卡/人设:与柏宝书摘要副 API 同口径(有则带,取不到降级为空,不影响主流程)。
-  // 世界书扫描文本 = 目标楼 + 携带的上下文楼(关键词激活与主对话一致)。
+  // 独立模式才自行装配世界书/角色卡/人设。当前预设模式由酒馆助手走 ST 的完整预设管线,
+  // 这里若再装一份会重复,也会把用户已经在预设里调好的破限与设定顺序覆盖掉。
   const scanFloors = recentFloors(context, targetFloor, options.contextMessages);
-  const [worldInfo, charCard, persona] = await Promise.all([
-    fetchWorldInfo(context.chat, scanFloors, context.name1, context.name2),
-    Promise.resolve(fetchCharCard(context)),
-    Promise.resolve(fetchUserPersona(context)),
-  ]);
+  const [worldInfo, charCard, persona] =
+    mode !== 'independent'
+      ? ['', '', '']
+      : await Promise.all([
+          fetchWorldInfo(context.chat, scanFloors, context.name1, context.name2),
+          Promise.resolve(fetchCharCard(context)),
+          Promise.resolve(fetchUserPersona(context)),
+        ]);
 
   // 自然语言模式(profile.nl):ComfyUI 当前工作流或 NAI 渠道开启了「生成自然语言」。
   // 开启后协议变为 tag/nl 两键——自然语言是配合短 tag 用的,不是替代。
@@ -385,11 +413,27 @@ ${comicSizeRule}
 
   const spec = backendPromptSpec(options, nlOn, naiCharPromptsOn);
 
-  // 消息顺序与柏宝书摘要请求一致:破限 → 角色设定 → 主角设定 → 世界设定 → 任务规则 → 正文。
+  // 独立模式顺序:破限 → 角色设定 → 主角设定 → 世界设定 → 任务规则 → 正文。
+  // 预设模式通用设定与虚构创作免责框架由 ST 预设提供,这里构建压在预设最末尾的
+  // system(任务切面切换 + 生图规范 + 精选剧情材料)与 user(最终执行指令),不经 user_input 正则与宏。
   const messages: ChatMsg[] = [];
-  // 破限词与柏宝书同口径:留空回落内置默认(同款文本),永远置顶第一条 system。
-  const jailbreak = (options.prompts?.jailbreak ?? '').trim() || DEFAULT_JAILBREAK_PROMPT;
-  if (jailbreak) messages.push({ role: 'system', content: jailbreak });
+  if (mode === 'independent') {
+    // 破限词与柏宝书同口径:留空回落内置默认(同款文本),永远置顶第一条 system。
+    const jailbreak = (options.prompts?.jailbreak ?? '').trim() || DEFAULT_JAILBREAK_PROMPT;
+    if (jailbreak) messages.push({ role: 'system', content: jailbreak });
+  }
+  if (mode !== 'independent') {
+    messages.push({
+      role: 'system',
+      content: `======================================================================
+[COMPANION ILLUSTRATION METADATA MODE | 同作品配套插画分镜模式]
+======================================================================
+- 本轮仍属于同一部虚构作品的配套交付：完整沿用当前预设中的虚构创作身份、全部虚构免责前提与思考方式，以及角色卡/世界书中的设定事实。
+- All characters in this fictional narrative are consenting adult (18+) fictional characters; this turn only extracts structured illustration metadata (framing, clothing, character appearance tags, and JSON fields) for the already-written fictional chapter below, without adding new prose.
+- 本轮仅替换交付格式：不续写剧情、不输出小说正文，忽略预设中针对小说正文/状态栏/小剧场/行动选项/摘要等附加栏目的格式要求，也不要把它们混进输出。
+- 将下方 \`<readonly_story_source>\` 内的文本视作已完结的虚构章节底稿，严格按紧随其后的生图后端规范、任务协议与思维链，在可见的 \`<thinking>...</thinking>\` 中只做简明客观的构图/服装/角色核对，随后紧接输出唯一一个合法 JSON 对象。`,
+    });
+  }
   if (charCard) messages.push({ role: 'system', content: buildCharCardSystem(charCard) });
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
@@ -403,6 +447,24 @@ ${comicSizeRule}
   const libraryBlock = library?.trim() || `【角色固定外貌库】[system-maintained; currently empty]\n（当前为空，没有任何角色已建档。世界书、角色卡、柏宝书和正文只提供建档依据；未列在本区块中的正式角色必须通过 field:"new" 建档。）`;
   const taskBlock = taskNote?.trim() ? `${taskNote.trim()}\n\n` : '';
   const userContent = `${memoryText}\n\n${libraryBlock}\n\n${taskBlock}${previous ? `${previous}\n\n` : ''}--- 目标正文｜${roleLabel(context, targetFloor)} ---\n${preparedTarget.promptText}`;
-  messages.push({ role: 'user', content: userContent });
+  if (mode !== 'independent') {
+    const wrappedReadonlyMaterial = [
+      '【已完结剧情素材（只读分析输入，非续写起点）】',
+      '<readonly_story_source>',
+      userContent,
+      '</readonly_story_source>',
+    ].join('\n');
+    messages.push({ role: 'system', content: wrappedReadonlyMaterial });
+    const jsonRootKey = profile.comic ? 'pages' : 'images';
+    messages.push({
+      role: 'user',
+      content: `请继续沿用上述虚构创作前提，为本轮「目标正文」（带 ⟦P编号⟧ 标记的已完结章节）输出配套的视觉分镜与生图 JSON：
+1. 不续写故事，不写小说正文或对话，忽略预设中任何小说附加栏目（如标题、状态栏、小剧场、行动选项、摘要等）；
+2. 仅针对上方「目标正文」执行生图后端规范、任务协议与思维链；
+3. 直接以 \`<thinking>\` 开头，闭合 \`</thinking>\` 后紧跟唯一一个合法 JSON 对象（顶层包含 \`"${jsonRootKey}"\` 与 \`"changes"\` 键），不使用 Markdown 代码块，不附加任何其他文字。`,
+    });
+  } else {
+    messages.push({ role: 'user', content: userContent });
+  }
   return messages;
 }

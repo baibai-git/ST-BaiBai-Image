@@ -1,4 +1,4 @@
-import { requestCompletion, requestViaMainApi } from '@/api/client';
+import { requestCompletion, requestViaMainApi, requestViaPreset } from '@/api/client';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   applyPositionedCharRefs,
@@ -7,8 +7,9 @@ import {
   type PositionedCharOp,
 } from '@/autoTag/charAnchors';
 import { prepareTargetText } from '@/autoTag/clean';
+import { resolveTagGenSelection } from '@/autoTag/presetMode';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
-import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
+import { autoTagProfile, buildAutoTagMessages, buildPresetWorldInfoScanPrompts } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import {
@@ -340,6 +341,14 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       : settings.autoTag;
     // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一
     const profile = autoTagProfile();
+    // 开跑时快照生成方式与指定预设;已删除的指定预设自动回退独立模式,不让生成卡死。
+    const selection = resolveTagGenSelection();
+    if (selection.removedPreset) {
+      toastr.warning(`指定预设「${selection.removedPreset}」已不存在，已切换为独立组装模式`, '柏宝绘');
+    }
+    const tagGenMode = selection.mode;
+    const usePreset = tagGenMode !== 'independent';
+    const presetName = selection.presetName;
     const messages = await buildAutoTagMessages(
       context,
       floor,
@@ -349,7 +358,11 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       anchors.text,
       slot ? buildSlotTaskNote(rawSource, slot.seq) : '',
       profile,
+      tagGenMode,
     );
+    const wiScanPrompts = usePreset
+      ? buildPresetWorldInfoScanPrompts(context, floor, promptOptions.contextMessages)
+      : undefined;
     const channel = getTagGenChannel();
     // 失败重试:请求异常与「返回无法解析/校验不通过」都视为可重试的异常(后者常见于模型没遵守协议);
     // 中止信号立即收手,不消耗重试。parseImagePlan 对坏输出抛错,「无画面」则是正常返回空数组。
@@ -395,7 +408,16 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           : retries > 0
             ? `自动 tag(第 ${floor} 楼 · 第 ${attempt + 1} 次)`
             : `自动 tag(第 ${floor} 楼)`;
-        if (channel) {
+        if (usePreset) {
+          await requestViaPreset(messages, {
+            signal: controller.signal,
+            source,
+            validate,
+            presetName,
+            channel: channel ?? undefined,
+            worldInfoScanPrompts: wiScanPrompts,
+          });
+        } else if (channel) {
           await requestCompletion(channel, messages, {
             signal: controller.signal,
             source,
