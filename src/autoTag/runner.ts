@@ -328,8 +328,8 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
     const promptOptions = slot
       ? { ...settings.autoTag, minImages: 1, maxImages: 1 }
       : settings.autoTag;
-    // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一
     const profile = autoTagProfile();
+    const plainComfy = settings.defaultBackend === 'comfyui' && !profile.layout;
     const layoutSelection = autoTagLayoutSelection(context, profile);
     if (layoutSelection && !layoutSelection.singleImageMode) ensureLayoutCapacity(layoutSelection, promptOptions.minImages);
     const channel = getTagGenChannel();
@@ -346,10 +346,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
       layoutSelection,
     );
     const dshOperation: DshOperation = {};
-    // 失败重试:请求异常与「返回无法解析/校验不通过」都视为可重试的异常(后者常见于模型没遵守协议);
-    // 中止信号立即收手,不消耗重试。parseImagePlan 对坏输出抛错,「无画面」则是正常返回空数组。
-    // 解析/校验放进 validate 回调:不过则请求历史如实记为失败(而非「HTTP 拿到文本」的绿色成功),
-    // 错误原样抛回这里走重试——显示与行为同口径。
+    // 在请求的 validate 回调校验，失败会记入历史并重试。
     const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
     let plan: ImagePlan | null = null;
     let lastError = '';
@@ -375,6 +372,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
             promptOptions.maxImages,
             settings.defaultBackend !== 'comfyui' || activeComfyPreset().generateNegative === true,
             !!layoutSelection && layoutSelection.released < layoutSelection.recent.length,
+            plainComfy,
           );
           if (layoutSelection && !candidate.layoutFallback) selectedLayouts = validateLayoutSelection(candidate, layoutSelection);
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
@@ -466,10 +464,8 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
     // @占位符按正文位置替换：变化前图片用旧档，变化位置及之后用新档。
     const unknownNames = new Set<string>();
     for (const image of plan.images) {
-      // 协议只要 tag 时,模型照写的 nl 一律丢掉(ComfyUI 关自然语言同一口径):
-      // 留着它就会照常发送,开关等于没关。渠道锁了方向则统一改记锁定值——出图本就按锁走,
-      // 这里只是让 tag 里记的方向与实际画幅一致。
-      if (!profile.nl) {
+      // 普通 ComfyUI 保留模型生成的两种正面提示词。
+      if (!profile.nl && !plainComfy) {
         image.nl = '';
         for (const character of image.characters) character.nl = '';
       }

@@ -88,7 +88,9 @@ export function setLayoutSelectionMessage(messages: ChatMsg[], selection: Layout
   const candidates = layoutCandidates(selection);
   const canRelax = selection.released < selection.recent.length;
   const content = [HEADER, '<<<STB-KEEP>>>',
-    ...(selection.visual ? [] : ['只从下面的可选 ID 中选择；每个 ID 的格位、大小和槽位见后面的空间目录。历史清单和协议示例不授予选择权限。']),
+    selection.visual
+      ? '格位、槽位和用途以本会话最近上传的完整版式图册为准；选版以本轮白名单为准。'
+      : '只从下面的可选 ID 中选择；每个 ID 的格位、大小和槽位见后面的空间目录。历史清单和协议示例不授予选择权限。',
     selection.singleImageMode ? '单图模式：仅全页单格；同轮允许复用同一ID，不执行跨轮布局冷却。' : selection.visual ? `冷却窗口：${selection.rounds} 次已采纳规划。` : selection.rounds
       ? `最近 ${selection.rounds} 次已采纳规划结果使用过的 ID 暂不可选；同轮多页也必须使用不同 ID。`
       : '跨轮冷却已关闭；同轮多页仍必须使用不同 ID。',

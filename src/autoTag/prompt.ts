@@ -47,10 +47,7 @@ export interface AutoTagProfile {
   singleImageMode?: boolean;
   /** NAI 4.5/V5:Base + 原生 Character Prompts(characters[])。 */
   naiCharPrompts: boolean;
-  /**
-   * 协议含 nl:ComfyUI 当前工作流开了「生成自然语言」,或 NAI 4.5/V5 开了「生成自然语言」。
-   * 两个开关同一口径,只管 AI 写不写;已写进 tag 的 nl 照常发送。
-   */
+  /** 自然语言开关：普通 ComfyUI 用于示例和附加规范，NAI 4.5/V5 用于输出协议。 */
   nl: boolean;
   /** 渠道锁定的画幅方向;null = 由 AI 按后端规范的判据自选。 */
   lockedSize: Orientation | null;
@@ -170,11 +167,9 @@ export function buildAutoTagFixedMessages(
   profile: AutoTagProfile = autoTagProfile(),
   library?: string | null,
 ): ChatMsg[] {
-  // 自然语言模式(profile.nl):ComfyUI 当前工作流或 NAI 渠道开启了「生成自然语言」。
-  // 开启后协议变为 tag/nl 两键——自然语言是配合短 tag 用的,不是替代。
-  // 动态负面词同样取自当前预设:切工作流即同时切走自然语言与动态负面词的口径。
   const comfyOn = settings.defaultBackend === 'comfyui';
   const layoutOn = comfyOn && (settings.manga.enabled || profile.layout === true || usesMossLayout(options.prompts?.comfySpec));
+  const plainComfy = comfyOn && !layoutOn;
   const singleImageMode = layoutOn && settings.manga.enabled && (profile.singleImageMode ?? settings.manga.singleImageMode) === true;
   const mangaConfig = { ...settings.manga, singleImageMode };
   const naiCharPromptsOn = profile.naiCharPrompts;
@@ -270,8 +265,8 @@ export function buildAutoTagFixedMessages(
     ? nlOn
       ? `4. Every image must include Base tag, English Base nl, and characters. Write every nl in English even when the story text is in another language, but keep every character name exactly as in the story: Chinese names stay Chinese (小雪, never Xiaoxue or Snow) in characters[].name, changes[].name, and inside any tag/nl text. Base contains only global counts, scene, composition, lighting, and shared relations — this applies to the Base nl as much as to the Base tag. Give each individual character visible inside the selected frame one Character Prompt ordered left-to-right then top-to-bottom; name/tag/nl are all required. ${naiCharacterRuleTail}`
       : `4. Every image must include Base tag and characters. This output is tag-only: write no nl key anywhere, neither in Base nor in characters[]. Keep every character name exactly as in the story: Chinese names stay Chinese (小雪, never Xiaoxue or Snow) in characters[].name, changes[].name, and inside any tag text. Base contains only global counts, scene, composition, lighting, and shared relations. Give each individual character visible inside the selected frame one Character Prompt ordered left-to-right then top-to-bottom; name and tag are both required. ${naiCharacterRuleTail}`
-    : nlOn
-    ? '4. tag 与 nl 是同一画面的两种写法：tag 是 danbooru 短 tag，nl 是连贯的自然语言；二者都只含正面内容，不得包含质量词、负面词、JSON 以外的说明或 <bbi_image>/<tag>/<nl>/<size> 标签。'
+    : plainComfy
+    ? '4. 每张图任选只写 tag、只写 nl，或两个都写，至少有一项非空。tag 用 Danbooru 短词，nl 用连贯英文描述主体、动作、构图、环境和光线；两者都写时描述同一画面。后端的 tag 写法只约束 tag 字段。只写正面内容，不得包含质量词、负面词及 XML 标签。'
     : '4. tag 只能是该画面的正面内容提示词；不得包含质量词、负面词、JSON 以外的说明或 <bbi_image> 标签。';
   const negativeRule = negativeOn
     ? '\n   negative 是本画面专用的 danbooru 负面短 tag：只排除与正文冲突或本构图特别容易误生成的内容，可为空；禁止输出通用质量、画质、审美或技术性负面词，包括但不限于 worst quality、low quality、blurry、lowres、bad anatomy、bad hands、jpeg artifacts；不要写希望出现的内容，不得使用 @角色占位符。\n   negative 里绝不能出现正文已明确成立的事实，也不能否定你自己刚写进本图 tag/nl 的任何东西：正文写了在下雨、或你自己的 nl 写了 drizzle，就绝不许在 negative 写 rain；写了角色戴眼镜就不许写 glasses——那是在抹掉画面本该有的东西。写完 negative 逐词回看本图的 tag 与 nl，凡是能在里面找到对应内容的词一律删掉。拿不准时留空，空的 negative 永远比抵消正文的 negative 安全。'
@@ -313,13 +308,13 @@ export function buildAutoTagFixedMessages(
    - 建档字段只放**长期不变的身体特征**：sex/hair/eyes/skin/body/extra 填性别、发色发型、瞳色、肤色、体型、标志特征；outfit 只填该角色**固定不换的招牌着装**；判定为同人角色的，fields 里必须写 fandom（模型可识别的英文 Danbooru 身份 tag，格式 character name (copyright name)），原创角色不写 fandom。动作、姿势、所在场景、临时状态（lying on carpet、standing、sitting、unzipped、湿身、伤势等）一律不得写进任何字段——档案会在他之后每一张图里被照抄，把姿势写进去会让他在所有画面里都保持那个姿势。
    - 建档取值优先级：目标正文明确的当前外貌 > 柏宝书当前角色状态 > 角色卡/世界书明确人设 > 合理补全。人设明确写了颜色时必须原样转换，不得擅改；hair 与 eyes 必填，hair 至少包含发色和长度/发型，eyes 必须包含瞳色，缺任一项该条建档会被丢弃。
    - 如果设定没写发色、发型或瞳色，根据世界观、种族、身份、性格和其余角色设定补出简洁、协调、可长期复用的颜色与发型；这是一次性建档决定，后续不得重新随机。
-   - 建完档就直接用：同一次输出里，先在 changes 里确立该角色的固定外貌，再在图片 ${naiCharPromptsOn ? 'characters[].tag' : 'tag'} 中照抄这套外貌，并围绕它补充服装、动作、场景等其余 tag；同一张图里这套外貌只写一遍。${newCharacterNlRule}`;
+   - 建完档就直接用：同一次输出里，先在 changes 里确立该角色的固定外貌，再在图片 ${naiCharPromptsOn ? 'characters[].tag' : plainComfy ? '实际填写的正面提示词' : 'tag'} 中照抄这套外貌，并补充可见服装、动作和场景；同一张图里这套外貌只写一遍。${newCharacterNlRule}`;
   const multiCharacterBindingRule = naiCharPromptsOn
     ? '- 多人画面中，每个角色的发色、瞳色、体型、服装、物件和个人动作都必须放进各自的 characters[].tag，禁止放进 Base 或分配给其他角色。'
     : '- 多人画面中，每个角色的发色、瞳色、体型、服装、物件和个人动作都必须使用该角色的区分性称谓邻接绑定，禁止把两人的外貌特征散放成无法归属的一串公共 tag。';
   const characterRule = `7. 角色状态与 changes：${newCharacterRule}
    ${libraryReferenceRule}
-   - 按正文 P 位置为每个角色维护临时服装状态：正文未明确初始穿着时可以合理决定一次；没有穿上、脱下、换装、衣物损坏或场景/时间跳跃时沿用上一状态，发生明确变化后从对应 P 位置起更新。首次确定一套临时服装时，必须冻结足以复现款式的“服装视觉指纹”：服装类别之外，再固定版型/剪裁、主色和关键部件，涉及裤袜时固定颜色与透明度；例如不能只写 school uniform, pantyhose，而应具体到 navy school blazer, white collared shirt, red ribbon, dark pleated skirt, opaque white pantyhose。只补少量关键特征，不堆无关装饰。相同状态复用同一视觉指纹；镜头外不可见的部件可以省略，但省略不等于脱掉，后续重新可见且中间没有变化时必须恢复。每张图的 ${nlOn ? 'tag 与 nl 都' : 'tag 都'}要写出当前镜头可见的关键服装特征。临时穿着不得写进固定 outfit，除非设定明确它是长期不换的招牌着装。
+   - 按正文 P 位置为每个角色维护临时服装状态：正文未明确初始穿着时可以合理决定一次；没有穿上、脱下、换装、衣物损坏或场景/时间跳跃时沿用上一状态，发生明确变化后从对应 P 位置起更新。首次确定一套临时服装时，必须冻结足以复现款式的“服装视觉指纹”：服装类别之外，再固定版型/剪裁、主色和关键部件，涉及裤袜时固定颜色与透明度；例如不能只写 school uniform, pantyhose，而应具体到 navy school blazer, white collared shirt, red ribbon, dark pleated skirt, opaque white pantyhose。只补少量关键特征，不堆无关装饰。相同状态复用同一视觉指纹；镜头外不可见的部件可以省略，但省略不等于脱掉，后续重新可见且中间没有变化时必须恢复。每张图的 ${plainComfy ? '每份正面提示词都' : nlOn ? 'tag 与 nl 都' : 'tag 都'}要写出当前镜头可见的关键服装特征。临时穿着不得写进固定 outfit，除非设定明确它是长期不换的招牌着装。
    ${multiCharacterBindingRule}
    - 库中已有角色发生**永久外貌变化**（染发、剪发、留疤、长大、永久变身、固定造型改变等）时，必须通过 changes 报告：{"name":"角色名","field":"hair","value":"short red hair","position":"P4","reason":"在此处染发并剪短"}；field 只能是 sex/hair/eyes/skin/body/extra/outfit/fandom。
    - 已建档角色被判定为同人、但档案里没有 fandom 的，必须补一条 changes：{"name":"角色名","field":"fandom","value":"character name (copyright name)","reason":"判定为同人，补身份 tag"}；档案已有 fandom 的直接照抄，不重复报告。

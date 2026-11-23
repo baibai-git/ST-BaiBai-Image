@@ -71,6 +71,15 @@ describe('auto tag position protocol', () => {
     });
   });
 
+  it('still rejects a missing main prompt outside ordinary ComfyUI and rejects blank prompts in all modes', () => {
+    const onlyNl = '{"images":[{"position":"P1","tag":"","nl":"An adult opens a book."}]}';
+    expect(() => parseImagePlanWithRange(onlyNl, segments, 1, 2)).toThrow('tag 不能为空');
+    expect(parseImagePlanWithRange(onlyNl, segments, 1, 2, true, false, true).images[0].tag).toBe('An adult opens a book.');
+
+    const blank = '{"images":[{"position":"P1","tag":" ","nl":" "}]}';
+    expect(() => parseImagePlanWithRange(blank, segments, 1, 2, true, false, true)).toThrow('tag 和 nl 至少填写一项');
+  });
+
   it('keeps the optional nl part and collapses its newlines', () => {
     const raw = '{"images":[{"position":"P1","tag":"1girl","nl":"A girl.\\nShe smiles."}]}';
     expect(parseImagePlan(raw, segments, 1)).toEqual({

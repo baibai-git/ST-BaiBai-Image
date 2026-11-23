@@ -20,7 +20,7 @@ export interface ImageInsertion {
   sourceLine: number;
   /** danbooru 短 tag 部分(必填)。 */
   tag: string;
-  /** 自然语言部分(可空;ComfyUI「生成自然语言」开启时由模型一并输出)。 */
+  /** 可选的自然语言部分。 */
   nl: string;
   /** 本画面动态负面 tag(可空;仅在 ComfyUI 工作流使用 %negative_prompt% 时要求模型输出)。 */
   negative: string;
@@ -165,7 +165,7 @@ function sanitizePosition(value: unknown, index: number): string {
 }
 
 /**
- * 解析并严格校验模型给出的“目标位置 ID + 提示词”列表。tag 必填;nl/negative 选填。
+ * 解析模型给出的画面计划。普通 ComfyUI 允许用 nl 作为主提示词。
  * size 一律容忍:归一不出就当竖屏——为它抛错会白白吃掉 runner 的重试次数。
  * 图片超过上限时本地硬截断;少于用户明确设置的下限则抛错,交给 runner 重试。
  * changes 全程宽容:单条坏就丢弃,绝不连累 images——角色档案漏一条只是这个角色本轮
@@ -178,6 +178,7 @@ export function parseImagePlan(
   maxImages: number,
   allowNegative = true,
   allowLayoutFallback = false,
+  allowNlOnly = false,
 ): ImagePlan {
   const parsed = parseObject(raw);
   if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
@@ -211,13 +212,17 @@ export function parseImagePlan(
     }
     // 兼容模型按旧协议/习惯返回 prompt 键的情况
     const tag = sanitizeContent(entry.tag ?? entry.prompt, 'tag', index);
-    if (!tag) throw new Error(`images[${index}].tag 不能为空`);
     const nl = sanitizeContent(entry.nl, 'nl', index);
+    if (!tag && !(allowNlOnly && nl)) {
+      const fields = allowNlOnly ? 'tag 和 nl 至少填写一项' : 'tag 不能为空';
+      throw new Error(`images[${index}].${fields}`);
+    }
     const negative = allowNegative ? sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index) : '';
     const characters = sanitizeCharacters(entry.characters, index);
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
-    images.push({ position, sourceLine, tag, nl, negative, characters, size });
+    // The main prompt is used for both new and saved images. Store a lone nl there once.
+    images.push({ position, sourceLine, tag: tag || nl, nl: tag ? nl : '', negative, characters, size });
   }
 
   const limitedImages = images.slice(0, normalizedMax);

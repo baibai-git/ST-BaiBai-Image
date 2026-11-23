@@ -14,9 +14,9 @@ interface ImageInput {
 
 export interface DshCapabilities {
   skill_updates?: { mode?: string; toggle?: string; retry?: string };
-  layout_atlas?: { supported?: boolean; mode?: string };
+  layout_atlas?: { supported?: boolean; mode?: string; managed?: boolean };
   image_input?: ImageInput;
-  client_endpoints?: { id?: unknown; enabled?: unknown; skillId?: unknown }[];
+  client_endpoints?: { id?: unknown; enabled?: unknown; skillId?: unknown; persistentSession?: boolean }[];
 }
 
 /** Match the paired adapter's credential only to its configured service origin. */

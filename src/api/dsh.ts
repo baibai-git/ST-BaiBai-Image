@@ -6,7 +6,8 @@ import { regroupLayoutAtlasMessages } from '@/manga/atlas';
 
 const STORE='baibai_dsh_sessions';
 interface Binding { session_id: string; initialized: boolean; rulesHash?: string; atlasHash?: string }
-interface Pending { rulesHash?: string; atlasHash?: string; capabilities?: DshCapabilities; key: string; messages: ChatMsg[]; session: DshSessionRequest; channel: ApiChannel }
+interface Pending { rulesHash?: string; atlasHash?: string; atlasSent?: boolean; capabilities?: DshCapabilities; key: string; messages: ChatMsg[]; session: DshSessionRequest; channel: ApiChannel }
+const sharedBindings = new Map<string, Binding>();
 /** Kept by one runner invocation: ambiguous network retries reuse the exact request. */
 export interface DshOperation { pending?: Pending; acknowledged?: boolean }
 interface DshOptions extends RequestOptions {
@@ -53,7 +54,9 @@ function bindings(context: STContext): Record<string, Binding> {
 }
 
 function saveBinding(context: STContext, chatId: string, key: string, value?: Binding): void {
-  const values={...bindings(context)};
+  const stored=bindings(context);
+  if (JSON.stringify(stored[key])===JSON.stringify(value)) return;
+  const values={...stored};
   if (value) values[key]=value; else delete values[key];
   context.chatMetadata[STORE]=values;
   const active=getContext();
@@ -110,20 +113,30 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
     settings.autoTag.dshDedicatedState={instanceId:crypto.randomUUID(),bindings:{}};
   }
   const state = dedicated ? settings.autoTag.dshDedicatedState! : undefined;
-  // Keep existing plugin bindings intact; the other source uses a separate remote scope.
-  const key = dedicated ? JSON.stringify([profile,route,...(skillMode ? ['skill'] : [])]) : JSON.stringify([origin,route,...(skillMode ? ['skill',profile] : [])]);
+  let key = managed ? JSON.stringify([origin,route,'bridge-atlas',profile])
+    : dedicated ? JSON.stringify([profile,route,...(skillMode ? ['skill'] : [])])
+    : JSON.stringify([origin,route,...(skillMode ? ['skill',profile] : [])]);
   const chatId = state ? `baibai-dedicated:${state.instanceId}:${(await digest(key)).slice(0,24)}` : origin!;
-  const scopeKey = JSON.stringify([chatId,route,...(!dedicated && skillMode ? [profile,'skill'] : [])]);
+  const scopeKey = managed ? JSON.stringify([route,'bridge'])
+    : JSON.stringify([chatId,route,...(!dedicated && skillMode ? [profile,'skill'] : [])]);
   const operationKey = JSON.stringify([scopeKey,origin ?? null]);
   const operation=options.operation ?? {};
   let effectiveMessages=skillMode ? messages.filter(message=>message.purpose!=='spec' && message.purpose!=='check') : messages;
   // Preserve purpose/order/attachments; an ambiguous retry still uses pending.messages verbatim.
   if (settings.autoTag.dshUserMessages===true) effectiveMessages=effectiveMessages.map(message=>({...message,role:'user'}));
   let parts=splitDshMessages(effectiveMessages);
-  const rulesHash=dedicated && parts.fixed.length ? await digest(JSON.stringify(parts.fixed)) : undefined;
-  const read=():Binding|undefined => managed ? undefined : dedicated ? state!.bindings[key] : bindings(context)[key];
+  const rulesHash=(dedicated || managed) && parts.fixed.length ? await digest(JSON.stringify(parts.fixed)) : undefined;
+  let shared=false;
+  const read=():Binding|undefined => (shared ? sharedBindings.get(key) : undefined)
+    ?? (dedicated ? state!.bindings[key] : bindings(context)[key]);
   const save=(value?:Binding) => {
-    if (managed) return;
+    if (shared) {
+      if (value) sharedBindings.set(key,value); else sharedBindings.delete(key);
+    }
+    if (managed) {
+      const active=getContext();
+      if (!active?.getCurrentChatId() || dshChatId(active)!==origin) return;
+    }
     if (state) { if (value) state.bindings[key]=value; else delete state.bindings[key]; }
     else saveBinding(context,origin!,key,value);
   };
@@ -143,14 +156,32 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
         !!retry?.session.layout_atlas || effectiveMessages.some(message=>message.atlasRevision)));
     const capabilities=retry?.capabilities ?? (needsCapabilities
       ? await readDshCapabilities(retry?.channel ?? channel,options.signal) : undefined);
+    let checkedAttachments: ChatMsg[] = [];
+    const validateImages = async (target: ApiChannel, batch: ChatMsg[]) => {
+      const attachments = batch.filter(message => message.images?.length);
+      if (!attachments.length || (attachments.length === checkedAttachments.length &&
+        attachments.every((message, index) => message === checkedAttachments[index]))) return;
+      await assertDshImageSupport(target, attachments, options.signal, capabilities);
+      checkedAttachments = attachments;
+    };
+    const entry=Array.isArray(capabilities?.client_endpoints)
+      ? capabilities.client_endpoints.find(entry=>entry && typeof entry==='object' && entry.id===clientId && entry.enabled!==false)
+      : undefined;
+    if (managed && entry) {
+      shared=entry.persistentSession===true;
+      const sharedKey=JSON.stringify([route,'bridge-shared-atlas']);
+      if (shared) key=sharedKey; else sharedBindings.delete(sharedKey);
+    }
     if (skillMode && !retry && capabilities) {
       if (capabilities.skill_updates?.mode!=='per-request' || capabilities.skill_updates.toggle!=='skill_enabled' || capabilities.skill_updates.retry!=='frozen-version') throw new ApiError('当前桥接不支持每轮更新 Skill 与请求版本冻结，请更新 ST-bridge 至 0.15.0 或更新版本。');
-      const entry=Array.isArray(capabilities.client_endpoints) ? capabilities.client_endpoints.find(entry=>entry && typeof entry==='object' && entry.id===clientId && entry.enabled!==false) : undefined;
       if (typeof entry?.skillId!=='string' || !entry.skillId.trim()) throw new ApiError('当前 DSH 接入项未绑定 Skill。请在 DSH 为柏宝绘专属入口绑定 Skill，或将规范来源切回插件。');
       skillId=entry.skillId.trim();
     }
     checkSource();
     let atlasHash: string | undefined;
+    const atlasCapability = capabilities?.layout_atlas;
+    const atlasSupported = atlasCapability?.supported === true && atlasCapability.mode === 'session-prefix-v1';
+    const managedAtlas = managed && atlasSupported && atlasCapability.managed === true;
     if (action==='generate') {
       const limit=capabilities?.image_input?.max_images_per_message;
       if (!retry && typeof limit==='number' && Number.isSafeInteger(limit) && limit>0) {
@@ -158,43 +189,45 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
         parts=splitDshMessages(effectiveMessages);
       }
       atlasHash=effectiveMessages.find(message=>message.atlasRevision)?.atlasRevision;
-      if (dedicated && atlasHash) {
-        if (capabilities?.layout_atlas?.supported!==true || capabilities.layout_atlas.mode!=='session-prefix-v1') {
-          throw new ApiError('当前 DSH 桥接不支持会话版式图保留，请更新 ST-bridge 至 0.15.0 或更新版本。');
-        }
+      if (dedicated && atlasHash && !atlasSupported) {
+        throw new ApiError('当前 DSH 桥接不支持会话版式图保留，请更新 ST-bridge 至 0.15.0 或更新版本。');
       }
       const validationMessages=atlasHash && read()?.atlasHash===atlasHash
         ? effectiveMessages.filter(message=>message.atlasRevision!==atlasHash) : effectiveMessages;
-      await assertDshImageSupport(retry?.channel ?? channel,retry?.messages ?? validationMessages,options.signal,capabilities);
+      await validateImages(retry?.channel ?? channel, retry?.messages ?? validationMessages);
       checkSource();
     }
     const send=async(currentAction:DshSessionRequest['action']):Promise<string>=>{
+      checkSource();
       const stored=read();
-      const binding=stored && typeof stored.session_id==='string' && stored.session_id.trim() ? stored : undefined;
+      const binding=typeof stored?.session_id==='string' && stored.session_id.trim() ? stored : undefined;
       if (!operation.pending || operation.acknowledged || operation.pending.key!==operationKey || operation.pending.session.action!==currentAction) {
-        const sendFixed=currentAction==='sync_rules' || currentAction==='generate' && !binding?.initialized;
+        const sendFixed=currentAction==='sync_rules' || currentAction==='generate' && (managed || !binding?.initialized);
         if (sendFixed && !parts.fixed.length) throw new ApiError('DSH 未找到固定规范分组，已取消发送。');
         let outgoing=currentAction==='reset' ? [] : currentAction==='sync_rules' ? parts.fixed : sendFixed ? effectiveMessages : parts.dynamic;
         let atlas: DshSessionRequest['layout_atlas'];
+        let atlasSent=false;
         if (currentAction==='generate' && atlasHash) {
           if (binding?.atlasHash===atlasHash) outgoing=outgoing.filter(message=>message.atlasRevision!==atlasHash);
-          if (dedicated) atlas={hash:atlasHash,message_indices:outgoing.flatMap((message,index)=>message.atlasRevision===atlasHash ? [index] : [])};
+          const indices=outgoing.flatMap((message,index)=>message.atlasRevision===atlasHash ? [index] : []);
+          atlasSent=indices.length>0;
+          if (dedicated || managedAtlas) atlas={hash:atlasHash,message_indices:indices};
         }
         if (currentAction==='generate' && skillId) outgoing=[...outgoing,{role:'user',content:[
           '<<<STB-KEEP>>>',
           (settings.autoTag.dshSkillRequest?.trim() || DEFAULT_DSH_SKILL_REQUEST).replaceAll('{{skill_id}}',()=>skillId!),
           '<<<STB-/KEEP>>>',
         ].join('\n')}];
-        if (currentAction==='generate') await assertDshImageSupport(channel,outgoing,options.signal,capabilities);
+        if (currentAction==='generate') await validateImages(channel, outgoing);
         const fixed=sendFixed ? parts.fixed : [];
-        operation.pending={rulesHash,...(currentAction==='generate' && atlasHash ? {atlasHash} : {}),...(capabilities ? {capabilities} : {}),key:operationKey,channel:{...channel,excludeParams:[...(channel.excludeParams ?? [])]},messages:outgoing.map(({role,content,images})=>({role,content,...(images?.length ? {images:[...images]} : {})})),session:{
+        operation.pending={rulesHash,...(currentAction==='generate' && atlasHash ? {atlasHash,atlasSent} : {}),...(capabilities ? {capabilities} : {}),key:operationKey,channel:{...channel,excludeParams:[...(channel.excludeParams ?? [])]},messages:outgoing.map(({role,content,images})=>({role,content,...(images?.length ? {images:[...images]} : {})})),session:{
           protocol_version:1,chat_id:chatId,request_id:requestId(),action:currentAction,
           ...(dedicated ? {session_mode:'dedicated',client_id:clientId,task_id:profile,...(origin ? {source_chat_id:origin} : {})} : {}),
           ...(managed ? {client_id:clientId} : skillMode && !dedicated ? {client_id:clientId,task_id:`${profile}-skill`} : {}),
           ...(skillId ? {skill_id:skillId} : {}),
           skill_enabled:skillMode,
           ...(atlas ? {layout_atlas:atlas} : {}),
-          ...(binding ? {session_id:binding.session_id} : {}),
+          ...(binding && !(managed && currentAction==='sync_rules') ? {session_id:binding.session_id} : {}),
           fixed_message_count:fixed.length,fixed_message_types:fixed.map(message=>message.purpose!),
           ...(currentAction==='generate' && options.target ? {target:options.target} : {}),
         }};
@@ -204,7 +237,7 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
       try {
         return await requestCompletion(pending.channel,pending.messages,{
           ...options,validate:currentAction==='generate' ? options.validate : undefined,dshSession:pending.session,
-          source:currentAction!==action ? skillMode ? 'DSH 宿主协议同步' : 'DSH 专属规范同步' : options.source,
+          source:currentAction!==action ? managed || skillMode ? 'DSH 宿主协议同步' : 'DSH 专属规范同步' : options.source,
           onDshResponse(data){
             const acknowledgement=(data as {dsh_session?:{session_id?:unknown;capabilities?:unknown;skill_id?:unknown;layout_atlas_hash?:unknown}} | null)?.dsh_session;
             const session=acknowledgement?.session_id;
@@ -215,25 +248,38 @@ export async function requestDshCompletion(channel: ApiChannel, messages: ChatMs
             if (pending.session.skill_id && acknowledgement?.skill_id!==pending.session.skill_id) throw new ApiError('DSH 未确认加载所绑定的 Skill，未确认本次规则状态。请检查绑定或重建会话。');
             if (pending.session.skill_enabled===false && acknowledgement?.skill_id) throw new ApiError('已关闭每轮 Skill，但桥接仍注入了 Skill；请更新桥接以支持 skill_enabled:false。');
             if (pending.session.layout_atlas && acknowledgement?.layout_atlas_hash!==pending.session.layout_atlas.hash) throw new ApiError('DSH 未确认保留完整版式图册，未确认本次请求状态。');
-            // Ordinary sessions keep the first atlas in their native conversation history.
-            // A silently replaced session has no confirmed copy; upload again on its next turn.
+            // Ordinary bridges retain the catalog in conversation history; only the confirming session can reuse it.
+            const hadDifferentSession=pending.session.session_id && session!==pending.session.session_id;
             const savedAtlas=currentAction==='generate'
-              ? !dedicated && pending.session.session_id && session!==pending.session.session_id ? undefined : pending.atlasHash
+              ? !dedicated && hadDifferentSession && !(managed && (pending.atlasSent || pending.session.layout_atlas))
+                ? undefined : pending.atlasHash
               : currentAction==='sync_rules' && session===binding?.session_id ? binding.atlasHash : undefined;
-            save({session_id:session,initialized:currentAction!=='reset',...(savedAtlas ? {atlasHash:savedAtlas} : {}),...(dedicated && currentAction!=='reset' ? {rulesHash:pending.session.fixed_message_count ? pending.rulesHash : binding?.rulesHash} : {})});
+            save({session_id:session,initialized:currentAction!=='reset',...(savedAtlas ? {atlasHash:savedAtlas} : {}),...((dedicated || managed) && currentAction!=='reset' ? {rulesHash:pending.session.fixed_message_count ? pending.rulesHash : binding?.rulesHash} : {})});
             operation.acknowledged=true;
+            if (managed && pending.atlasHash && !savedAtlas) {
+              throw new ApiError('DSH 已换绑会话，正在补发版式图册。', undefined, 'atlas_session_changed');
+            }
           },
         });
       } catch(error) {
-        if (error instanceof ApiError && error.status===410) { save();operation.pending=undefined;operation.acknowledged=false; }
+        if (error instanceof ApiError && error.status===410) {
+          save();operation.pending=undefined;operation.acknowledged=false;
+          if (managed && currentAction==='generate' && pending.session.session_id) return send(currentAction);
+        }
+        if (error instanceof ApiError && error.code==='atlas_session_changed') return send(currentAction);
         throw error;
       }
     };
-    // Capability handshake is a control request, never an extra model generation.
+    const binding=read();
+    const needsSync=managed ? !binding?.rulesHash
+      : dedicated && (!binding?.initialized || binding.rulesHash!==rulesHash);
     // Resume an ambiguous generate verbatim even if settings changed in the meantime.
-    const retryingGenerate=operation.pending?.key===operationKey && operation.pending.session.action==='generate' && !operation.acknowledged;
-    if (dedicated && action==='generate' && !retryingGenerate && (!read()?.initialized || read()?.rulesHash!==rulesHash)) {
-      await send('sync_rules');checkSource();
+    if (action==='generate' && !retry && needsSync) {
+      try { await send('sync_rules'); }
+      catch (error) {
+        // A missing remote session can be recreated through a full generate request.
+        if (!managed || !(error instanceof ApiError && error.status===410)) throw error;
+      }
     }
     const result=await send(action);
     return skillMode && action==='sync_rules' ? '宿主协议已发送（主规范与检查由 DSH Skill 提供）' : result;

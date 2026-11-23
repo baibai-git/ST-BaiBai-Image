@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LAYOUT_HISTORY_KEY } from './layoutCooldown';
 import { mangaDefaults } from '@/manga/layouts';
 import { requestFloorTags } from './runner';
+import { renderWorkflowTemplate } from '@/backends/comfyui';
 import { newChannel, newComfyWorkflow, settings } from '@/state/settings';
 import { parseImageTags, parseImageTagContent } from '@/st/imageTagRegex';
 import type { STContext } from '@/st/context';
@@ -57,6 +58,36 @@ beforeEach(() => {
   h.responses = []; h.messages = []; h.saved = [];
 });
 afterEach(() => vi.unstubAllGlobals());
+
+it('writes tag-only, nl-only and mixed ComfyUI responses to reusable image cards with the nl preference off', async () => {
+  settings.manga.enabled = false;
+  settings.autoTag.maxImages = 3;
+  settings.comfyui.workflows[0].naturalLanguage = false;
+  const nl = 'An adult opens a book near the window.';
+  h.responses = [JSON.stringify({
+    images: [
+      { position: 'P1', tag: 'adult, book, window' },
+      { position: 'P1', nl },
+      { position: 'P1', tag: 'adult, book', nl },
+    ],
+  })];
+
+  await requestFloorTags(0);
+
+  expect(h.messages).toHaveLength(1);
+  expect(h.messages[0].some(message => message.content.includes('只写 tag、只写 nl，或两个都写'))).toBe(true);
+  expect(h.saved).toHaveLength(1);
+  const template = '{"1":{"class_type":"CLIPTextEncode","inputs":{"text":"%prompt%","description":"%nl%"}}}';
+  const savedPrompts = parseImageTags(h.saved[0][0]).map(raw => {
+    const prompt = parseImageTagContent(raw);
+    return renderWorkflowTemplate(template, { prompt: prompt.tag, nl: prompt.nl })['1'].inputs;
+  });
+  expect(savedPrompts).toEqual([
+    { text: 'adult, book, window', description: '' },
+    { text: nl, description: '' },
+    { text: 'adult, book', description: nl },
+  ]);
+});
 
 describe('runner layout adoption', () => {
   it('single-image mode accepts two portraits with one full-page ID, including retry, without consuming cooldown history', async () => {
@@ -148,7 +179,7 @@ describe('runner layout adoption', () => {
   });
 });
 
-it('uses the ST-bridge entry without local session switches and sends fresh rules with each generation', async () => {
+it('uses the ST-bridge entry without local session switches and updates fixed rules in the same session', async () => {
   const channel = {
     ...newChannel(), url: 'http://localhost:43121/clients/baibaohui/v1', key: 'fixture', model: 'dsh-default',
   };
@@ -169,25 +200,27 @@ it('uses the ST-bridge entry without local session switches and sends fresh rule
       });
     }
     const body = JSON.parse(String(init.body));
-    requests.push({ messages: body.messages, session: JSON.parse(body.custom_include_body).dsh_session });
+    const session = JSON.parse(body.custom_include_body).dsh_session;
+    requests.push({ messages: body.messages, session });
     return Response.json({
       dsh_session: { session_id: 'bridge-selected', skill_id: 'moss-layout-spec' },
-      choices: [{ message: { content: response(requests.length === 1 ? 'a' : 'b') } }],
+      choices: session.action==='sync_rules' ? [] : [{ message: { content: response(requests.length === 2 ? 'a' : 'b') } }],
     });
   });
   await requestFloorTags(0);
   settings.autoTag.prompts.jailbreak = 'Revised fixed rule';
   await requestFloorTags(1);
 
-  expect(requests).toHaveLength(2);
-  expect(requests.map(request => request.messages[0].content)).toEqual(['Initial fixed rule', 'Revised fixed rule']);
-  for (const request of requests) {
-    expect(request.session).toMatchObject({ action: 'generate', client_id: 'baibaohui', skill_enabled: true, fixed_message_types: ['prefix', 'contract'] });
-    for (const field of ['session_mode', 'session_id', 'task_id']) expect(request.session).not.toHaveProperty(field);
+  expect(requests.map(request => request.session.action)).toEqual(['sync_rules', 'generate', 'generate']);
+  expect(requests[0].session).not.toHaveProperty('session_id');
+  const generations=requests.slice(1);
+  expect(generations.map(request => request.messages[0].content)).toEqual(['Initial fixed rule', 'Revised fixed rule']);
+  for (const request of generations) {
+    expect(request.session).toMatchObject({ action: 'generate', client_id: 'baibaohui', session_id: 'bridge-selected', skill_enabled: true, fixed_message_types: ['prefix', 'contract'] });
+    for (const field of ['session_mode', 'task_id']) expect(request.session).not.toHaveProperty(field);
     expect(request.messages.every(message => message.role === 'user')).toBe(true);
     expect(request.messages.at(-1)?.content).toBe('<<<STB-KEEP>>>\nLoad moss-layout-spec now.\n<<<STB-/KEEP>>>');
   }
   expect(writtenLayouts(0)).toEqual(['a']);
   expect(writtenLayouts(1)).toEqual(['b']);
-  expect(h.context.chatMetadata).not.toHaveProperty('baibai_dsh_sessions');
 });
