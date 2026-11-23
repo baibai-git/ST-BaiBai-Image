@@ -360,6 +360,16 @@ describe('changes parsing', () => {
     expect(parseImagePlan('{"images":[{"position":"P1","tag":"a"}]}', segments, 1).changes).toEqual([]);
   });
 
+  it('reports user-friendly errors for empty replies vs malformed/refusal replies', () => {
+    expect(() => parseImagePlan('', segments, 1)).toThrow('空回复');
+    expect(() => parseImagePlan('   \n  ', segments, 1)).toThrow('空回复');
+    expect(() => parseImagePlan('抱歉，我无法生成此类内容。', segments, 1)).toThrow('AI破甲失败或掉格式');
+    expect(() => parseImagePlan('{"other":1}', segments, 1)).toThrow('AI破甲失败或掉格式');
+    expect(() => parseComicPlan('   ', segments)).toThrow('空回复');
+    expect(() => parseComicPlan('直接续写了剧情段落', segments)).toThrow('AI破甲失败或掉格式');
+    expect(() => parseComicPlan('{"other":1}', segments)).toThrow('AI破甲失败或掉格式');
+  });
+
   it('no longer requires a character audit array', () => {
     expect(parseImagePlan('{"images":[],"changes":[]}', segments, 1)).toEqual({
       images: [],

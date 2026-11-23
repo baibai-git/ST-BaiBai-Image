@@ -89,6 +89,8 @@ export interface STContext {
   ) => unknown;
   /** 扩展全局设置对象(= extension_settings,写进服务器 settings.json,跨设备同步)。ST 稳定 API。 */
   extensionSettings?: Record<string, unknown>;
+  /** 各插件当前注册的全局提示词注入表(= extension_prompts)。ST 稳定 API。 */
+  extensionPrompts?: Record<string, Record<string, unknown>>;
   /** 防抖保存全局设置(连同 extensionSettings 落盘到服务器)。ST 稳定 API。 */
   saveSettingsDebounced?: () => void;
   /**
@@ -135,6 +137,14 @@ export interface STContext {
   getWorldInfoNames?: () => string[];
   /** 主上下文最大 token(给 getWorldInfoPrompt 的预算参数) */
   maxContext?: number;
+  /** 聊天补全预设设置对象(= oai_settings)。 */
+  chatCompletionSettings?: Record<string, unknown>;
+  /** ST 宏系统(macros.registry.getMacro 等)。 */
+  macros?: {
+    registry?: {
+      getMacro?: (name: string) => { handler?: (...args: unknown[]) => unknown } | undefined;
+    };
+  };
   // 兼容旧式命名
   event_types?: STEventTypes;
   eventSource: STEventSource;

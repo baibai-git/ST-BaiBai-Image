@@ -5,7 +5,7 @@ import Collapsible from '@/components/Collapsible.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
-import { fetchModels, testChannel } from '@/api/client';
+import { fetchModels, listStPresetNames, testChannel } from '@/api/client';
 import {
   BACKENDS,
   DEFAULT_JAILBREAK_PROMPT,
@@ -19,8 +19,10 @@ import {
   type AutoTagPrompts,
   type BackendId,
   type ImageDisplaySize,
+  type TagGenMode,
 } from '@/state/settings';
 import { getContext } from '@/st/context';
+import { resolveTagGenSelection } from '@/autoTag/presetMode';
 import {
   ORB_SHAPES,
   THEMES,
@@ -43,12 +45,13 @@ const BACKEND_OPTIONS = BACKENDS.filter(b => b.value !== 'webui');
 
 /**
  * 思考强度候选:各家取值的并集,**不是**某一家的官方列表。
- * auto 是显式选项(值为空串 = 不发送该参数),不是「留空」——
+ * auto 是显式选项(值为空串 = 独立模式不发送该参数,预设模式沿用预设自身的值),不是「留空」——
  * 用 BbiSelect 而非可输入的 BbiCombo:移动端点输入框会弹出输入法,很打扰。
  * 取值不做校验,原样发给端点(见 ApiChannel.reasoningEffort)。
  */
 const REASONING_EFFORT_OPTIONS = [
   { value: '', label: 'auto' },
+  { value: 'none', label: 'none' },
   { value: 'minimal', label: 'minimal' },
   { value: 'low', label: 'low' },
   { value: 'medium', label: 'medium' },
@@ -92,6 +95,42 @@ const TAG_GEN_OPTIONS = computed(() => [
   { value: '', label: '跟随主 API' },
   ...settings.channels.map(c => ({ value: c.id, label: c.name || '未命名渠道' })),
 ]);
+const tagGenModeSel = computed<string>({
+  get: () => settings.apiPresets.mainApi.mode,
+  set: v => {
+    const next = v as TagGenMode;
+    settings.apiPresets.mainApi.mode = next;
+    if (next !== 'named-preset') settings.apiPresets.mainApi.presetName = '';
+    if (next === 'named-preset') refreshStPresetNames();
+  },
+});
+const TAG_GEN_MODE_OPTIONS = [
+  { value: 'independent', label: '独立组装提示词' },
+  { value: 'current-preset', label: '使用 ST 当前预设' },
+  { value: 'named-preset', label: '使用指定预设' },
+];
+const stPresetNames = ref<string[]>([]);
+function refreshStPresetNames(): void {
+  stPresetNames.value = listStPresetNames();
+  const selection = resolveTagGenSelection();
+  if (selection.removedPreset) {
+    toastr.warning(`指定预设「${selection.removedPreset}」已不存在，已切换为独立组装模式`, '柏宝绘');
+  }
+}
+const tagGenPresetSel = computed<string>({
+  get: () => settings.apiPresets.mainApi.presetName,
+  set: v => (settings.apiPresets.mainApi.presetName = v),
+});
+function stPresetOptions(saved: string) {
+  const options = [
+    { value: '', label: stPresetNames.value.length ? '请选择 ST 预设' : '未读取到 ST 预设' },
+    ...stPresetNames.value.map(name => ({ value: name, label: name })),
+  ];
+  // 列表暂时读不到时仍显示已保存值;确认被删除时 resolveTagGenSelection 已回退并清空它。
+  if (saved && !stPresetNames.value.includes(saved)) options.push({ value: saved, label: saved });
+  return options;
+}
+const TAG_GEN_PRESET_OPTIONS = computed(() => stPresetOptions(settings.apiPresets.mainApi.presetName));
 
 /* —— 渠道:列表只读展示,编辑/新建都在弹窗里进行,避免一长列表平铺误触。
    渠道列表与柏宝书共享(见 state/settings.ts 的共享存储),任一端改动自动同步。 —— */
@@ -100,6 +139,23 @@ const editingId = ref<string | null>(null);
 // 编辑用「草稿副本」:v-model 全改在草稿上,只有点「完成」才写回 settings(避免每敲一字就触发存盘)。
 // 弹窗开关也以它为准:草稿存在 = 弹窗打开。
 const editingChannel = ref<ApiChannel | null>(null);
+// 预设模式配置随独立共享存储(baibai_api_preset_settings)跨柏宝插件同步;这里只在「完成」时写回。
+const editingTagGenMode = ref<TagGenMode>('independent');
+const editingTagGenPreset = ref('');
+const editingTagGenModeSel = computed<string>({
+  get: () => editingTagGenMode.value,
+  set: v => {
+    const next = v as TagGenMode;
+    editingTagGenMode.value = next;
+    // 选中使用当前/指定预设时,把思考强度切到 auto(沿用所选预设的思考强度),
+    // 避免副渠道原先填的 high 等档位意外覆盖预设本身配置;用户之后仍可按需手动改。
+    if (next !== 'independent' && editingChannel.value) {
+      editingChannel.value.reasoningEffort = '';
+    }
+    if (next === 'named-preset') refreshStPresetNames();
+  },
+});
+const CHANNEL_TAG_GEN_PRESET_OPTIONS = computed(() => stPresetOptions(editingTagGenPreset.value));
 // 深拷贝渠道(纯数据,JSON 即可),切断与 settings 真身的引用
 function cloneChannel(ch: ApiChannel): ApiChannel {
   return JSON.parse(JSON.stringify(ch)) as ApiChannel;
@@ -150,7 +206,7 @@ const TAG_PROMPT_METAS: TagPromptMeta[] = [
   {
     key: 'jailbreak',
     label: '破限词',
-    hint: '作为置顶 system 附加在自动 tag 请求里，降低副 API 拒答率。留空则用内置默认（与柏宝书同款文本）。全后端通用。',
+    hint: '仅在独立组装模式下作为置顶 system 附加，降低拒答率；使用 ST 当前预设时由该预设自己的破限生效。留空则用内置默认（与柏宝书同款文本）。',
     builtin: DEFAULT_JAILBREAK_PROMPT,
     macros: [],
   },
@@ -224,6 +280,8 @@ function addChannel() {
   showKey.value = false;
   editingId.value = null; // null = 新建,完成时 push
   editingChannel.value = newChannel(); // 草稿,尚未进 settings
+  editingTagGenMode.value = 'independent';
+  editingTagGenPreset.value = '';
 }
 function openChannel(id: string) {
   const src = settings.channels.find(c => c.id === id);
@@ -231,6 +289,10 @@ function openChannel(id: string) {
   showKey.value = false;
   editingId.value = id;
   editingChannel.value = cloneChannel(src); // 编辑草稿副本,不动真身
+  refreshStPresetNames();
+  const prefs = settings.apiPresets.channels[id];
+  editingTagGenMode.value = prefs?.mode ?? 'independent';
+  editingTagGenPreset.value = prefs?.presetName ?? '';
 }
 /** 取消(× / 点遮罩):丢弃草稿,不写回 settings(无论新建还是编辑,改动都作废)。 */
 function closeChannel() {
@@ -254,6 +316,14 @@ function confirmChannel() {
     } else {
       list.push(draft);
     }
+    if (editingTagGenMode.value === 'independent') {
+      delete settings.apiPresets.channels[draft.id];
+    } else {
+      settings.apiPresets.channels[draft.id] = {
+        mode: editingTagGenMode.value,
+        presetName: editingTagGenMode.value === 'named-preset' ? editingTagGenPreset.value : '',
+      };
+    }
   }
   showKey.value = false;
   editingId.value = null;
@@ -275,6 +345,7 @@ function removeChannel(id: string) {
   const list = settings.channels;
   const idx = list.findIndex(c => c.id === id);
   if (idx >= 0) list.splice(idx, 1);
+  delete settings.apiPresets.channels[id];
   // 清理指派:生成 tag 若指派了该渠道则清空(回落跟随主 API)
   if (settings.assignments.tagGen === id) settings.assignments.tagGen = '';
 }
@@ -468,7 +539,10 @@ function closeModelMenuSoon() {
 }
 
 const updateConfirmOpen = ref(false);
-onMounted(() => void checkForUpdate(true));
+onMounted(() => {
+  refreshStPresetNames();
+  void checkForUpdate(true);
+});
 
 function openUpdateConfirm() {
   if (updateState.available) updateConfirmOpen.value = true;
@@ -637,14 +711,33 @@ async function confirmUpdate() {
 
       <!-- 副 API:生成画图 tag 用的模型渠道(与柏宝书共享渠道列表) -->
       <Collapsible title="副 API" :open="false">
-        <!-- 任务指派:只有一个任务——生成 tag -->
-        <div class="bbi-field bbi-assign">
-          <div class="bbi-assign-row">
-            <span class="bbi-field-label">生成 tag 使用</span>
-            <BbiSelect v-model="tagGenSel" :options="TAG_GEN_OPTIONS" aria-label="生成 tag 使用的 API 渠道" />
+        <div class="bbi-tag-gen-mode">
+          <div class="bbi-assign">
+            <div class="bbi-assign-row">
+              <span class="bbi-field-label">生成 tag 使用</span>
+              <BbiSelect v-model="tagGenSel" :options="TAG_GEN_OPTIONS" aria-label="生成 tag 使用的 API 渠道" />
+            </div>
           </div>
+          <!-- 主 API 的提示词方式跟在指派下面;副 API 则在各自编辑窗口独立设置。 -->
+          <template v-if="!settings.assignments.tagGen">
+            <div class="bbi-assign">
+              <div class="bbi-assign-row">
+                <span class="bbi-field-label">提示词方式</span>
+                <BbiSelect v-model="tagGenModeSel" :options="TAG_GEN_MODE_OPTIONS" aria-label="主 API 的 tag 提示词方式" />
+              </div>
+            </div>
+            <div v-if="settings.apiPresets.mainApi.mode === 'named-preset'" class="bbi-assign">
+              <div class="bbi-assign-row">
+                <span class="bbi-field-label">指定预设</span>
+                <BbiSelect v-model="tagGenPresetSel" :options="TAG_GEN_PRESET_OPTIONS" aria-label="主 API 生成 tag 使用的 ST 预设" />
+              </div>
+            </div>
+            <p v-if="settings.apiPresets.mainApi.mode === 'current-preset'" class="bbi-field-hint">使用当前预设进行生成tag</p>
+            <p v-else-if="settings.apiPresets.mainApi.mode === 'named-preset'" class="bbi-field-hint">使用指定预设进行生成tag</p>
+            <p v-else class="bbi-field-hint">由插件独立组装提示词</p>
+          </template>
+          <p v-else class="bbi-field-hint">提示词方式在所选渠道的编辑窗口中设置</p>
         </div>
-        <p class="bbi-field-hint">不指派渠道时跟随主 API:直接借用你主界面当前正在用的 API(聊天补全/文本补全)来生成画图 tag,无需额外配置。想用不同模型再在下方建副渠道指派。渠道列表与柏宝书共享,任一端改动都会自动同步到另一端。</p>
 
         <hr class="bbi-rule" />
 
@@ -691,7 +784,7 @@ async function confirmUpdate() {
             @change="normalizeAutoTagNumbers"
           />
         </label>
-        <p class="bbi-field-hint">按 AI 故事楼计数,中间的 user 楼一并携带。</p>
+        <p class="bbi-field-hint">按 AI 故事楼计数,中间的 user 楼一并携带；两种生成方式共用此范围。</p>
 
         <label class="bbi-num-row">
           <span class="bbi-field-label">单楼最少图片数</span>
@@ -757,7 +850,7 @@ async function confirmUpdate() {
       <!-- 排除世界书内容:与柏宝书同名单共享 -->
       <Collapsible title="排除世界书内容" :open="false">
         <p class="bbi-field-hint">
-          从生成 tag 参考的世界书里剔除对画面无用的条目,省 token 也避免干扰。名单与柏宝书共享;仅影响副 API。
+          从生成 tag 参考的世界书里剔除对画面无用的条目,省 token 也避免干扰。名单与柏宝书共享；仅影响独立组装模式，当前预设模式由 ST 自己激活世界书。
         </p>
 
         <!-- 整本排除:复刻排除角色的搜索+勾选弹窗 -->
@@ -775,7 +868,7 @@ async function confirmUpdate() {
             </button>
           </li>
         </ul>
-        <p v-else class="bbi-field-hint">未排除任何世界书,全部激活条目都会进 tag 生成参考。</p>
+        <p v-else class="bbi-field-hint">未排除任何世界书；独立组装模式下，全部激活条目都会进 tag 生成参考。</p>
 
         <hr class="bbi-rule" />
 
@@ -1032,11 +1125,40 @@ async function confirmUpdate() {
             />
           </div>
         </div>
-        <span class="bbi-field-hint">思考强度不知道的就选 auto，DS 系推荐 max</span>
+        <span class="bbi-field-hint">
+          {{
+            editingTagGenMode === 'independent'
+              ? '思考强度不知道的就选 auto，关思考选 none，DS 系推荐 max'
+              : '预设模式下选 auto 将沿用所选预设里的思考强度；也可手动指定 none / low / high 等覆盖'
+          }}
+        </span>
         <label class="bbi-switch-row">
           <span class="bbi-modal-label">流式传输</span>
           <input v-model="editingChannel.stream" type="checkbox" class="bbi-checkbox" />
         </label>
+
+        <div class="bbi-tag-gen-mode">
+          <div class="bbi-assign">
+            <div class="bbi-assign-row">
+              <span class="bbi-field-label">tag 提示词方式</span>
+              <BbiSelect v-model="editingTagGenModeSel" :options="TAG_GEN_MODE_OPTIONS" aria-label="此渠道的 tag 提示词方式" />
+            </div>
+          </div>
+          <div v-if="editingTagGenMode === 'named-preset'" class="bbi-assign">
+            <div class="bbi-assign-row">
+              <span class="bbi-field-label">指定预设</span>
+              <BbiSelect
+                v-model="editingTagGenPreset"
+                :options="CHANNEL_TAG_GEN_PRESET_OPTIONS"
+                aria-label="此渠道生成 tag 使用的 ST 预设"
+              />
+            </div>
+          </div>
+          <p v-if="editingTagGenMode === 'current-preset'" class="bbi-field-hint">使用当前预设进行生成tag</p>
+          <p v-else-if="editingTagGenMode === 'named-preset'" class="bbi-field-hint">使用指定预设进行生成tag</p>
+          <p v-else class="bbi-field-hint">由插件独立组装提示词</p>
+        </div>
+
         <label class="bbi-modal-field">
           <span class="bbi-modal-label">排除参数</span>
           <input
@@ -1249,6 +1371,17 @@ async function confirmUpdate() {
 }
 
 /* ============ 副 API:渠道(与柏宝书同款) ============ */
+
+/* tag 生成方式 + 可选预设 + 一行说明是同一组,不叠通用 bbi-field 的 18px 间距。 */
+.bbi-tag-gen-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+.bbi-tag-gen-mode .bbi-field-hint {
+  margin: 0;
+}
 
 /* 任务指派 */
 .bbi-assign {

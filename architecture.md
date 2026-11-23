@@ -45,7 +45,7 @@ src/
 │   └── globalCharTags.ts # 全局角色库(extensionSettings,跨聊天/跨设备):仅手动维护的冻结模板,
 │                      # AI 永不可写;提升为全局/复制回本聊天两条迁移路径
 ├── api/
-│   └── client.ts      # LLM 请求:副 API 走 ST 服务端代理 / 跟随主 API 走 generateRaw
+│   └── client.ts      # LLM 请求:副 API 代理 / generateRaw / 当前预设实验模式走酒馆助手 generate
 ├── autoTag/           # ★ 链路 A:自动生 tag(独立 LLM 请求 → 协议校验 → 注入正文)
 │   ├── runner.ts      # 事件监听、去重、重试、编排(入口)
 │   ├── generationGate.ts # 生成门:把自动 tag 与真实生成配对(GENERATION_STARTED 武装 → 最终 RENDERED 消费)
@@ -151,11 +151,13 @@ src/
 | `SillyTavern.getContext()` | st/context.ts | 唯一上下文入口,ST 未就绪返回 null,调用方轮询/降级 |
 | `extensionSettings['baibai_image']` | state/settings.ts | 本插件设置(全局,跨设备同步) |
 | `extensionSettings['baibai_api_channels']` | state/settings.ts | 跨「柏宝」插件共享的副 API 渠道(revision + 广播事件同步) |
+| `extensionSettings['baibai_api_preset_settings']` | state/settings.ts | 跨「柏宝」插件共享的 API 预设模式配置(`mainApi` + `channels[id]`,独立建仓防旧版兄弟插件洗字段) |
 | `extensionSettings.regex` | st/imageTagRegex.ts | 托管两条正则(固定 id,幂等注册/覆盖) |
 | `chatMetadata['baibai_image_char_tags']` | state/charTags.ts | 角色库**本聊天手动基线**;AI 自动变化存各消息 extra `bbiCharChanges` |
 | `extensionSettings['baibai_image_char_global']` | state/globalCharTags.ts | **全局角色库**(跨聊天,revision + 广播事件);仅手动维护,AI changes 按锁定名丢弃 |
 | ST 事件 | 各 bind 处 | `CHARACTER_MESSAGE_RENDERED / USER_MESSAGE_RENDERED / MESSAGE_UPDATED / MESSAGE_SWIPED / MESSAGE_DELETED / CHAT_CHANGED` |
-| `generateRaw` | api/client.ts | 跟随主 API 的一次性补全(ST 稳定 API) |
+| `generateRaw` | api/client.ts | 独立模式下跟随主 API 的一次性补全(ST 稳定 API) |
+| `globalThis.TavernHelper.generate/stopGenerationById` | api/client.ts | 当前预设实验模式;无 TH 时明确报错 |
 | `getWorldInfoPrompt` / 动态 import `checkWorldInfo` | autoTag/context.ts | 世界书激活(后者拿条目对象可逐条渲染;取不到自动降级前者) |
 | `globalThis.EjsTemplate`(ST-Prompt-Template) | autoTag/context.ts | 世界书条目 EJS 执行(未装则降级) |
 | `globalThis.STBaiBaiBook` | autoTag/bookMemory.ts | 柏宝书角色状态(apiVersion 1;不可用返回 null 降级) |
@@ -201,8 +203,10 @@ runForFloor(floor, opts)
      - bookMemory.readBookMemory  → 柏宝书角色参考块(可 null)
      - charAnchors.resolveCharAnchors → 库文本(纯本地渲染,无请求;空库返回 text=null)
      - prompt.buildAutoTagMessages → 消息数组(见下)
-  5. 请求:getTagGenChannel() 有指派渠道 → requestCompletion(服务端代理);
-     否则 requestViaMainApi(generateRaw)。**每楼只此一次请求** —— 建档与选图同属一次
+  5. 请求:resolveTagGenSelection 按当前指派从共享 `apiPresets` 取提示词方式——主 API 读 `apiPresets.mainApi`,
+     副 API 读 `apiPresets.channels[channelId]`(真身在独立共享键 `baibai_api_preset_settings`,不污染共享渠道对象)。
+     独立模式走 requestCompletion(副渠道代理)或 requestViaMainApi(generateRaw);预设模式走 requestViaPreset
+     (酒馆助手 generate,当前/指定预设),有副渠道时经 custom_api 映射 URL/Key/模型/参数,不强制主 API。**每楼只此一次请求** —— 建档与选图同属一次
      推理:先在 changes 里确立新角色外貌,再在同一次输出的 tag 里 @引用它并围绕它补
      其余 tag。(旧版另有一次「中文外貌 → 字段」转换请求,已删:柏宝书的中文 desc 本就
      随角色参考块发给主请求,主请求还多了世界书/角色卡/正文佐证,判断更准。
@@ -232,9 +236,20 @@ runForFloor(floor, opts)
      成功才 recomputeCharTags;失败撤销标记;仅 changes 无图片也走写回。
 ```
 
-消息顺序(prompt.ts 固定):破限 system → 角色卡 system → persona system → 世界书 system →
+独立模式消息顺序(prompt.ts 固定):破限 system → 角色卡 system → persona system → 世界书 system →
 后端规范 system(ComfyUI/NAI 内置 spec,`{{nl}}` 宏与 `{{#nl}}`/`{{^nl}}` 条件段按「生成自然语言」开关展开)→ 固定协议
 (身份定义 + 输出契约:一个 `<thinking>` 块和一个 JSON 对象,JSON 含 images + changes)→ 思维链 system → user(角色参考 + 角色库 + 清洗后的最近 N 个 AI 故事楼及其间 user 楼 + 带段尾位置 ID 的目标正文)。
+
+当前/指定预设实验模式复用后面的规范/协议/思维链/user,但跳过插件破限、角色卡、persona 与世界书装配,
+把这些通用内容交给 ST。runner 将剩余消息按序合成一条 `user_input`,经酒馆助手
+`generate({preset_name:'in_use' 或指定名称, should_silence:true, overrides:{chat_history:{prompts:[]}}})` 发送:
+空默认历史防止整段聊天与未来楼混入,精选剧情已经在 user 输入里。`contextMessages` 两种模式共用。
+该路径使用 `generation_id` + `stopGenerationById` 接入每楼取消;历史标题取 TH `getLoadedPresetName()`。
+开始只登记任务输入,监听 `generate_after_data` 后按 user_input 内的生成 ID 标记认领并改存完整真实消息,
+避免并发串记;不对完整预设 token 作误导性估算。TH 会把上游响应压成 content/reasoning,故请求期间
+以共享 fetch 包装器按 generation_id 认领并 clone 原始 JSON;空内容/协议失败的历史「返回」段保存这份完整
+上游响应(含 choices/finish_reason/usage),捕获失败才退回 TH 结果。
+未安装/未启用酒馆助手时明确报错,不静默降级为全量上下文。
 
 **协议形态只算一次(prompt.ts 的 `autoTagProfile()`)**:`{naiCharPrompts, nl, lockedSize}` 按默认后端
 与其开关算出,写协议(prompt.ts)与验收/收尾(runner.ts,每次开跑快照一份)共用同一份——两边各算各的
@@ -834,6 +849,12 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
     白名单校验原样透传(各家词汇不统一)。⚠ 跨插件:柏宝书 ≤ 当前版本的 normalizeChannel
     是「逐字段重建对象」,在书里新增/编辑/测试渠道会回写共享存储、**抹掉本字段**(绘独有),
     等书那边补同名字段后风险消失。
+- **API 预设模式(跨插件共享)**:真身存 `extensionSettings['baibai_api_preset_settings']`(带 revision),
+  镜像在 `settings.apiPresets`(`{ mainApi, channels: Record<channelId, { mode, presetName }> }`);
+  协议与渠道/排除设置同构(指纹防回环 + revision 取 max + 消费者模式全默认不建仓),事件
+  `st-baibai-api-preset-settings:changed`。刻意独立建仓而非塞进 `baibai_api_channels` 的渠道对象:
+  未更新的柏宝书/柏宝砚/柏宝阁 `normalizeChannel` 是逐字段重建,塞进渠道对象会被它们顺手抹掉;
+  独立键既保证只更新绘时零丢失,又可供其他柏宝插件后续按同协议直接接入共享。
 - **排除设置(跨插件共享)**:真身存 `extensionSettings['baibai_exclude_settings']`(带 revision),
   镜像在 `settings.excludes`(四张名单:excludedChars / excludedWorldNames /
   excludedWorldInfoPatterns / customStripTags);协议与渠道同构(指纹防回环 + revision 取 max),
@@ -942,7 +963,10 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
 - **abort 贯通**:AbortController 从 runner 一路传到 fetch/轮询(comfyui 的 abortableDelay);
 - **纯函数可测**:解析/协议/参数构造均为纯函数,配 `*.test.ts`(vitest,与被测文件同目录)。
   改协议/后端参数时跑 `pnpm test` 保底;
-- **渠道二选一**:`getTagGenChannel()` 有指派 → 副 API(服务端代理);否则跟随主 API(generateRaw)。
+- **tag 生成三模式**:默认独立组装(`getTagGenChannel()` 有指派 → 副 API,否则 generateRaw 跟随主 API);
+  实验当前/指定预设模式 → 酒馆助手 generate,复用 ST 预设但屏蔽默认聊天历史(见 §5)。
+  `autoTag/presetMode.ts` 在生成前/设置页读取列表时校验指定预设;确认已删除则清空对应主 API/渠道配置、
+  回退该来源的独立模式并提示,TH 未加载或列表读取失败(null)不误回退。
 - **随机段一律走 `randomUuid()`**(src/randomUuid.ts):ST 常在非安全上下文(http)下运行,
   那里 `crypto.randomUUID` 直接抛错;vibe 缓存键/文件名随机段只是防撞,不需要密码学强度。
 - **文本转 base64 一律走 `utf8ToBase64()`**(src/base64.ts):`btoa` 的入参是 latin1 二进制串,

@@ -7,6 +7,7 @@ import {
   failImage,
   failLlm,
   finishLlm,
+  patchLlmMessages,
   patchLlmTokens,
   records,
   resetHistory,
@@ -74,12 +75,16 @@ describe('截断', () => {
     expect(truncate('abc')).toBe('abc');
   });
 
-  it('超长文本截断并标注原长', () => {
-    const long = 'x'.repeat(MAX_CONTENT + 500);
+  it('超长文本首尾保留、中间省略并标注原长', () => {
+    const head = 'A'.repeat(100);
+    const tail = 'Z'.repeat(100);
+    const long = `${head}${'x'.repeat(MAX_CONTENT + 300)}${tail}`;
     const out = truncate(long);
     expect(out.length).toBeLessThan(long.length);
-    expect(out.startsWith('x'.repeat(100))).toBe(true);
-    expect(out).toContain(`原长 ${MAX_CONTENT + 500} 字符`);
+    expect(out.startsWith(head)).toBe(true);
+    expect(out.endsWith(tail)).toBe(true);
+    expect(out).toContain(`原长 ${long.length} 字符`);
+    expect(out).toContain('中间已截断 500 字符');
   });
 
   it('登记时对每条 message 都截断', () => {
@@ -96,6 +101,17 @@ describe('截断', () => {
     const record = records.find(r => r.id === id) as LlmRecord;
     expect(record.messages[0].content).toContain('已截断');
     expect(record.messages[1].content).toBe('短的');
+  });
+
+  it('补录完整预设消息时同样逐段截断', () => {
+    const id = llm();
+    patchLlmMessages(id, [
+      { role: 'system', content: 'x'.repeat(MAX_CONTENT + 1) },
+      { role: 'user', content: '任务' },
+    ]);
+    const record = records[0] as LlmRecord;
+    expect(record.messages[0].content).toContain('已截断');
+    expect(record.messages[1].content).toBe('任务');
   });
 
   it('返回正文同样截断', () => {
@@ -131,6 +147,15 @@ describe('状态流转', () => {
     failLlm(b, '500 炸了');
     expect(records[0].status).toBe('error');
     expect(records[0].error).toBe('500 炸了');
+  });
+
+  it('失败记录可保留原始返回,供空响应/协议错误排查', () => {
+    const id = llm();
+    failLlm(id, 'API未返回有效内容', false, '{\n  "content": ""\n}');
+    const record = records[0] as LlmRecord;
+    expect(record.status).toBe('error');
+    expect(record.error).toBe('API未返回有效内容');
+    expect(record.response).toBe('{\n  "content": ""\n}');
   });
 
   it('生图记录同样区分取消与失败', () => {

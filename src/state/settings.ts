@@ -1131,6 +1131,25 @@ export interface AutoTagPrompts {
   naiV5Thinking: string;
 }
 
+export type TagGenMode = 'independent' | 'current-preset' | 'named-preset';
+
+export interface PresetModePref {
+  mode: TagGenMode;
+  presetName: string;
+}
+
+/**
+ * 跨「柏宝」插件共享的 API 预设模式配置(镜像共享存储;真身在 extensionSettings['baibai_api_preset_settings'])。
+ * 独立建仓而不塞进 `baibai_api_channels` 的渠道对象,避免未更新的柏宝书/柏宝砚/柏宝阁在
+ * `normalizeChannel` 时抹掉未知字段;未来其余柏宝插件按同协议接入本键即可全员共享。
+ */
+export interface SharedApiPresetSettings {
+  /** 「跟随主 API」时的预设模式配置 */
+  mainApi: PresetModePref;
+  /** 各副 API 渠道的预设模式配置(key = channelId;仅存非 independent 项) */
+  channels: Record<string, PresetModePref>;
+}
+
 export interface ImageSettings {
   /** 插件总开关。 */
   enabled: boolean;
@@ -1144,8 +1163,10 @@ export interface ImageSettings {
   nai: NaiSettings;
   /** 副 API 渠道列表(镜像共享存储;真身在 extensionSettings['baibai_api_channels']) */
   channels: ApiChannel[];
-  /** 任务指派的渠道 id。tagGen=生成画图 tag;空串=跟随主 API。 */
+  /** 任务指派(空串 = 跟随主 API,其余为渠道 id)。 */
   assignments: { tagGen: string };
+  /** API 预设模式配置(镜像共享存储;真身在 extensionSettings['baibai_api_preset_settings'])。 */
+  apiPresets: SharedApiPresetSettings;
   /** 自动判断并向正文插入生图 tag。 */
   autoTag: AutoTagSettings;
   /** 排除设置(镜像共享存储;真身在 extensionSettings['baibai_exclude_settings'])。 */
@@ -1159,6 +1180,38 @@ const SETTINGS_KEY = 'baibai_image';
 
 /** 内置默认条目名规则:共享存储创建时播种(与柏宝书 DEFAULT_WI_PATTERNS 同值)。 */
 const DEFAULT_WI_PATTERNS = ['\\[mvu[\\s\\S]*?\\]'];
+
+function apiPresetsDefaults(): SharedApiPresetSettings {
+  return {
+    mainApi: { mode: 'independent', presetName: '' },
+    channels: {},
+  };
+}
+
+function normalizePresetModePref(raw: unknown): PresetModePref {
+  const r = raw && typeof raw === 'object' ? (raw as Partial<PresetModePref>) : {};
+  const mode: TagGenMode =
+    r.mode === 'current-preset' || r.mode === 'named-preset' ? r.mode : 'independent';
+  return {
+    mode,
+    presetName: mode === 'named-preset' && typeof r.presetName === 'string' ? r.presetName : '',
+  };
+}
+
+function normalizeApiPresets(raw: unknown): SharedApiPresetSettings {
+  const r = raw && typeof raw === 'object' ? (raw as Partial<SharedApiPresetSettings>) : {};
+  const mainApi = normalizePresetModePref(r.mainApi);
+  const channels: Record<string, PresetModePref> = {};
+  if (r.channels && typeof r.channels === 'object') {
+    for (const [id, prefs] of Object.entries(r.channels)) {
+      if (!id) continue;
+      const normalized = normalizePresetModePref(prefs);
+      if (normalized.mode === 'independent') continue;
+      channels[id] = normalized;
+    }
+  }
+  return { mainApi, channels };
+}
 
 function excludesDefaults(): ExcludesSettings {
   return {
@@ -1456,6 +1509,7 @@ function defaults(): ImageSettings {
     nai: naiDefaults(),
     channels: [],
     assignments: { tagGen: '' },
+    apiPresets: apiPresetsDefaults(),
     autoTag: {
       enabled: true,
       contextMessages: 2,
@@ -2276,9 +2330,12 @@ function normalize(raw: unknown): ImageSettings {
   merged.nai = normalizeNai(r.nai, d.nai);
   // 副 API 渠道:逐个补全字段并校验类型
   merged.channels = (Array.isArray(r.channels) ? r.channels : []).map(normalizeChannel);
-  // 任务指派:嵌套对象,逐字段兜底(老数据没有 assignments 键时回退空串=跟随主 API)
+  // 任务指派:嵌套对象,逐字段兜底。
   const ra = (r.assignments ?? {}) as Partial<{ tagGen: string }>;
-  merged.assignments = { tagGen: typeof ra.tagGen === 'string' ? ra.tagGen : '' };
+  merged.assignments = {
+    tagGen: typeof ra.tagGen === 'string' ? ra.tagGen : '',
+  };
+  merged.apiPresets = normalizeApiPresets(r.apiPresets);
   const rt = (r.autoTag ?? {}) as Partial<AutoTagSettings>;
   // 存量配置只有 maxImages:缺少 minImages 时回落 0,完整保留「没好画面可以不出图」的旧行为。
   // 先归一化上限,再把下限夹进 [0,上限],保证所有后续调用都能直接依赖范围不变式。
@@ -2359,6 +2416,7 @@ function applyInto(target: ImageSettings, src: ImageSettings): void {
   target.nai = src.nai;
   target.channels = src.channels;
   target.assignments = src.assignments;
+  target.apiPresets = src.apiPresets;
   target.autoTag = src.autoTag;
   target.excludes = src.excludes;
   target.storage = src.storage;
@@ -2427,10 +2485,13 @@ function applySharedChannels(store: SharedChannelsStore): void {
   settings.channels = store.channels;
   sharedChannelsFingerprint = fingerprint;
 
-  // 被指派的渠道已不在共享列表里 → 清掉指派(回落跟随主 API)
+  // 被指派的渠道已不在共享列表里 → 清掉指派(回落跟随主 API)与该渠道的预设配置
   const ids = new Set(settings.channels.map(channel => channel.id));
   if (settings.assignments.tagGen && !ids.has(settings.assignments.tagGen)) {
     settings.assignments.tagGen = '';
+  }
+  for (const id of Object.keys(settings.apiPresets.channels)) {
+    if (!ids.has(id)) delete settings.apiPresets.channels[id];
   }
 }
 
@@ -2464,6 +2525,115 @@ function hydrateSharedChannels(legacyChannels: ApiChannel[]): void {
     if (settings.channels.length > 0) writeSharedChannels(false);
   }
   bindSharedChannelsListener();
+}
+
+/* ============ API 预设模式共享存储(与柏宝全家共用,独立键防旧版兄弟插件洗字段) ============ */
+
+const SHARED_API_PRESETS_KEY = 'baibai_api_preset_settings';
+const SHARED_API_PRESETS_EVENT = 'st-baibai-api-preset-settings:changed';
+const SHARED_API_PRESETS_SCHEMA_VERSION = 1;
+
+interface SharedApiPresetsStore extends SharedApiPresetSettings {
+  schemaVersion: number;
+  revision: number;
+}
+
+let sharedApiPresetsFingerprint = '';
+let sharedApiPresetsRevision = 0;
+let sharedApiPresetsListenerBound = false;
+
+function apiPresetsFingerprint(presets: SharedApiPresetSettings): string {
+  const normalized = normalizeApiPresets(presets);
+  const sortedChannels: Record<string, PresetModePref> = {};
+  for (const key of Object.keys(normalized.channels).sort()) {
+    sortedChannels[key] = normalized.channels[key];
+  }
+  return JSON.stringify({ mainApi: normalized.mainApi, channels: sortedChannels });
+}
+
+function apiPresetsHasUserData(presets: SharedApiPresetSettings): boolean {
+  return presets.mainApi.mode !== 'independent' || Object.keys(presets.channels).length > 0;
+}
+
+function readSharedApiPresets(raw: unknown): SharedApiPresetsStore | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const store = raw as Partial<SharedApiPresetsStore>;
+  if (!store.mainApi && !store.channels) return null;
+  const normalized = normalizeApiPresets(store);
+  return {
+    schemaVersion: SHARED_API_PRESETS_SCHEMA_VERSION,
+    revision:
+      typeof store.revision === 'number' && Number.isFinite(store.revision)
+        ? Math.max(0, Math.floor(store.revision))
+        : 0,
+    ...normalized,
+  };
+}
+
+function writeSharedApiPresets(dispatch = true): void {
+  const ctx = getContext();
+  if (!ctx?.extensionSettings) return;
+  const normalized = normalizeApiPresets(settings.apiPresets);
+  sharedApiPresetsRevision += 1;
+  const store: SharedApiPresetsStore = {
+    schemaVersion: SHARED_API_PRESETS_SCHEMA_VERSION,
+    revision: sharedApiPresetsRevision,
+    ...normalized,
+  };
+  ctx.extensionSettings[SHARED_API_PRESETS_KEY] = store;
+  sharedApiPresetsFingerprint = apiPresetsFingerprint(store);
+  ctx.saveSettingsDebounced?.();
+  if (dispatch) {
+    window.dispatchEvent(
+      new CustomEvent(SHARED_API_PRESETS_EVENT, {
+        detail: { revision: store.revision, source: 'ST-BaiBai-Image' },
+      }),
+    );
+  }
+}
+
+function applySharedApiPresets(store: SharedApiPresetsStore): void {
+  const fingerprint = apiPresetsFingerprint(store);
+  sharedApiPresetsRevision = Math.max(sharedApiPresetsRevision, store.revision);
+  if (fingerprint === sharedApiPresetsFingerprint) return;
+  settings.apiPresets = {
+    mainApi: { ...store.mainApi },
+    channels: JSON.parse(JSON.stringify(store.channels)) as Record<string, PresetModePref>,
+  };
+  sharedApiPresetsFingerprint = fingerprint;
+}
+
+function bindSharedApiPresetsListener(): void {
+  if (sharedApiPresetsListenerBound) return;
+  sharedApiPresetsListenerBound = true;
+  window.addEventListener(SHARED_API_PRESETS_EVENT, () => {
+    const ctx = getContext();
+    const store = readSharedApiPresets(ctx?.extensionSettings?.[SHARED_API_PRESETS_KEY]);
+    if (store) applySharedApiPresets(store);
+  });
+}
+
+/**
+ * API 预设模式共享存储接管(消费者模式,与渠道/排除名单共享存储同构):
+ * - 共享存储存在 → 领养(顺带按当前有效渠道 id 清理残留的已删渠道配置);
+ * - 共享存储不存在且本插件已有用户配置 → 以自身为种子建仓;
+ * - 共享存储不存在且本插件全默认(independent) → 不建仓,避免空 store 占位。
+ */
+function hydrateSharedApiPresets(): void {
+  const ctx = getContext();
+  if (!ctx?.extensionSettings) return;
+  const stored = readSharedApiPresets(ctx.extensionSettings[SHARED_API_PRESETS_KEY]);
+  if (stored) {
+    applySharedApiPresets(stored);
+  } else {
+    sharedApiPresetsFingerprint = apiPresetsFingerprint(settings.apiPresets);
+    if (apiPresetsHasUserData(settings.apiPresets)) writeSharedApiPresets(false);
+  }
+  const validChannelIds = new Set(settings.channels.map(channel => channel.id));
+  for (const id of Object.keys(settings.apiPresets.channels)) {
+    if (!validChannelIds.has(id)) delete settings.apiPresets.channels[id];
+  }
+  bindSharedApiPresetsListener();
 }
 
 /* ============ 排除设置共享存储(与柏宝书共用,协议与渠道完全同构) ============ */
@@ -2635,6 +2805,9 @@ function persist(): void {
   // 渠道有改动 → 同步写共享存储并广播(指纹比对防回环)
   const fingerprint = channelFingerprint(settings.channels);
   if (fingerprint !== sharedChannelsFingerprint) writeSharedChannels();
+  // API 预设模式有改动 → 同步写共享存储并广播(指纹比对防回环)
+  const presetsFingerprint = apiPresetsFingerprint(settings.apiPresets);
+  if (presetsFingerprint !== sharedApiPresetsFingerprint) writeSharedApiPresets();
   // 排除名单有改动 → 同步写共享存储并广播(指纹比对防回环)
   const exFingerprint = excludesFingerprint(settings.excludes);
   if (exFingerprint !== sharedExcludesFingerprint) writeSharedExcludes();
@@ -2670,6 +2843,9 @@ export async function hydrateSettings(): Promise<void> {
 
   // 渠道列表改由共享存储接管(存在则以共享为准,不存在则以自身为种子写入)
   hydrateSharedChannels(settings.channels);
+
+  // API 预设模式改由独立共享存储接管(需在渠道接管之后,以便按有效渠道 id 清理残留项)
+  hydrateSharedApiPresets();
 
   // 排除名单同样改由共享存储接管(创建时播种内置默认条目名规则)
   hydrateSharedExcludes();

@@ -120,6 +120,7 @@ function jsonObjects(raw: string): string[] {
 }
 
 function parseObject(raw: string): Record<string, unknown> {
+  if (!raw.trim()) throw new Error('空回复');
   for (const candidate of jsonObjects(raw)) {
     try {
       const value: unknown = JSON.parse(candidate);
@@ -130,7 +131,7 @@ function parseObject(raw: string): Record<string, unknown> {
       // 尝试下一个候选 JSON 块。
     }
   }
-  throw new Error('AI 没有返回可解析的 JSON 对象');
+  throw new Error('AI破甲失败或掉格式');
 }
 
 /** tag / nl / negative 内容里不允许出现的子标签字面量（口径见 st/imageTagRegex.ts）。 */
@@ -183,7 +184,7 @@ export function parseImagePlan(
   maxImages: number,
 ): ImagePlan {
   const parsed = parseObject(raw);
-  if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
+  if (!Array.isArray(parsed.images)) throw new Error('AI破甲失败或掉格式');
   const normalizedMax = Math.max(1, Math.floor(Number(maxImages)) || 1);
   const normalizedMin = Math.min(
     normalizedMax,
@@ -239,7 +240,7 @@ export function parseImagePlan(
 export function parseComicPlan(raw: string, segments: TargetSegment[]): ImagePlan {
   const parsed = parseObject(raw);
   const pages = Array.isArray(parsed.pages) ? parsed.pages : parsed.images;
-  if (!Array.isArray(pages)) throw new Error('AI 返回的 JSON 缺少 pages 数组');
+  if (!Array.isArray(pages)) throw new Error('AI破甲失败或掉格式');
   if (!pages.length) throw new Error('AI 没有画任何一页漫画');
   const positions = new Map(segments.map(segment => [segment.id, segment.sourceLine]));
 
