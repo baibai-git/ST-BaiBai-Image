@@ -50,6 +50,8 @@ src/
 │   ├── runner.ts      # 事件监听、去重、重试、编排(入口)
 │   ├── generationGate.ts # 生成门:把自动 tag 与真实生成配对(GENERATION_STARTED 武装 → 最终 RENDERED 消费)
 │   ├── prompt.ts      # 组装消息:破限/角色/人设/世界书/规范/协议/思维链
+│   ├── macroExpand.ts # 展开 Tavern-Helper 变量宏({{format_message_variable::…}} 等):
+│   │                  # TH 只在 ST 生成链路里展开,副 API 直连会漏;未装 TH 时零影响
 │   ├── protocol.ts    # 段尾位置 ID、JSON 严格解析校验、tag 注入格式
 │   ├── clean.ts       # 历史/目标正文清洗(共享排除标签;历史保留 bbi_image)
 │   ├── context.ts     # 世界书激活(条目级渲染:展宏+EJS)、角色卡、user 人设
