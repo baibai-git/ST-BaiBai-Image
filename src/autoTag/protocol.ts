@@ -18,7 +18,7 @@ export interface ImageInsertion {
   position: string;
   /** 位置 ID 对应的原始物理行(0-based，仅插件内部使用)。 */
   sourceLine: number;
-  /** danbooru 短 tag 部分(必填)。 */
+  /** 正向提示词，漫画 Layout 存为 JSON 字符串。 */
   tag: string;
   /** 可选的自然语言部分。 */
   nl: string;
@@ -27,6 +27,8 @@ export interface ImageInsertion {
   characters: ImageCharacterPrompt[];
   /** 画幅方向:模型只判横/竖,具体像素由用户在后端面板配置。漏给/乱给一律降级竖屏。 */
   size: Orientation;
+  /** 漫画模式下区分显式画幅和解析器默认值。 */
+  sizeProvided?: boolean;
 }
 
 export interface ImagePlan {
@@ -86,22 +88,37 @@ function sourceLines(source: string): SourceLine[] {
   return lines;
 }
 
-function parseObject(raw: string): Record<string, unknown> {
-  const cleaned = raw.replace(/<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
-  const object = (value: unknown): Record<string, unknown> => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('AI 返回的 JSON 最外层必须是对象');
-    }
-    return value as Record<string, unknown>;
-  };
-  let whole: unknown;
-  let parsed = false;
-  try { whole = JSON.parse(cleaned); parsed = true; } catch { /* tolerate prose or fences */ }
-  if (parsed) return object(whole);
+function parsePlanRoot(json: string, commas: number[]): Record<string, unknown> {
+  let value: unknown;
+  try { value = JSON.parse(json); }
+  catch { throw new Error('AI 返回的外层 JSON 语法错误；请检查括号、逗号及字符串转义'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('AI 返回的 JSON 最外层必须是对象');
+  const root = value as Record<string, unknown>;
+  if (!commas.length) return root;
 
+  // JSON.parse 保留同名键的最后一个值。逐个读取顶层成员，保住前面的页和角色变更。
+  const images: unknown[][] = [], changes: unknown[][] = [];
+  let start = 1;
+  for (const end of [...commas, json.length - 1]) {
+    const member = JSON.parse('{' + json.slice(start, end) + '}');
+    start = end + 1;
+    if ('images' in member) {
+      if (!Array.isArray(member.images)) throw new Error('AI 返回的 JSON 缺少有效的 images 数组');
+      images.push(member.images);
+    }
+    if (Array.isArray(member.changes)) changes.push(member.changes);
+  }
+  if (images.length > 1) root.images = images.flat();
+  if (changes.length) root.changes = changes.flat();
+  return root;
+}
+
+function parsePlanObject(raw: string): Record<string, unknown> {
+  const cleaned = raw.replace(/<think(?:ing)?\b[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
   // Scan only outer objects: a broken response must never fall back to a valid child page.
-  const candidates: string[] = [];
+  const roots: Record<string, unknown>[] = [];
   let start = -1, depth = 0, quoted = false, escaped = false;
+  let commas: number[] = [];
   for (let index = 0; index < cleaned.length; index++) {
     const char = cleaned[index];
     if (start < 0) {
@@ -114,18 +131,22 @@ function parseObject(raw: string): Record<string, unknown> {
       else if (char === '"') quoted = false;
     } else if (char === '"') quoted = true;
     else if (char === '{' || char === '[') depth++;
+    else if (char === ',' && depth === 1 && cleaned[start] === '{') commas.push(index - start);
     else if ((char === '}' || char === ']') && --depth === 0) {
-      candidates.push(cleaned.slice(start, index + 1));
+      roots.push(parsePlanRoot(cleaned.slice(start, index + 1), commas));
       start = -1;
+      commas = [];
     }
   }
   if (start >= 0) throw new Error('AI 返回的外层 JSON 未闭合或不完整；所有页须放在同一个顶层 images 数组中');
-  if (candidates.length > 1) throw new Error('AI 返回了多个外层 JSON 对象；所有页须合并到唯一顶层 images 数组，changes 只放最外层');
-  if (!candidates.length) throw new Error('AI 没有返回可解析的 JSON 对象');
-  let value: unknown;
-  try { value = JSON.parse(candidates[0]); }
-  catch { throw new Error('AI 返回的外层 JSON 语法错误；请检查括号、逗号及字符串转义'); }
-  return object(value);
+  if (!roots.length) throw new Error('AI 没有返回可解析的 JSON 对象');
+  if (roots.length === 1) return roots[0];
+  if (roots.some(root => !Array.isArray(root.images))) throw new Error('每个外层 JSON 对象都需要 images 数组');
+  if (roots.some(root => 'layout_fallback' in root)) throw new Error('layout_fallback 必须单独返回，不能与其他外层对象合并');
+  return {
+    images: roots.flatMap(root => root.images as unknown[]),
+    changes: roots.flatMap(root => Array.isArray(root.changes) ? root.changes : []),
+  };
 }
 
 /** tag / nl / negative 内容里不允许出现的子标签字面量（口径见 st/imageTagRegex.ts）。 */
@@ -178,9 +199,9 @@ export function parseImagePlan(
   maxImages: number,
   allowNegative = true,
   allowLayoutFallback = false,
-  allowNlOnly = false,
+  promptFormat: 'tag' | 'tag-or-nl' | 'manga' = 'tag',
 ): ImagePlan {
-  const parsed = parseObject(raw);
+  const parsed = parsePlanObject(raw);
   if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
   if (parsed.layout_fallback !== undefined) {
     if (!allowLayoutFallback || typeof parsed.layout_fallback !== 'string' || !parsed.layout_fallback.trim() || parsed.images.length) {
@@ -211,8 +232,11 @@ export function parseImagePlan(
       throw new Error(`images[${index}].position=${position} 不在目标正文可选位置中`);
     }
     // 兼容模型按旧协议/习惯返回 prompt 键的情况
-    const tag = sanitizeContent(entry.tag ?? entry.prompt, 'tag', index);
+    const rawTag = entry.tag ?? entry.prompt;
+    const tag = sanitizeContent(promptFormat === 'manga' && rawTag && typeof rawTag === 'object' && !Array.isArray(rawTag)
+      ? JSON.stringify(rawTag) : rawTag, 'tag', index);
     const nl = sanitizeContent(entry.nl, 'nl', index);
+    const allowNlOnly = promptFormat === 'tag-or-nl';
     if (!tag && !(allowNlOnly && nl)) {
       const fields = allowNlOnly ? 'tag 和 nl 至少填写一项' : 'tag 不能为空';
       throw new Error(`images[${index}].${fields}`);
@@ -220,9 +244,11 @@ export function parseImagePlan(
     const negative = allowNegative ? sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index) : '';
     const characters = sanitizeCharacters(entry.characters, index);
     // 兼容模型按习惯返回 orientation / aspect 键
-    const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
+    const rawSize = entry.size ?? entry.orientation ?? entry.aspect;
+    const size = normalizeOrientation(rawSize);
     // The main prompt is used for both new and saved images. Store a lone nl there once.
-    images.push({ position, sourceLine, tag: tag || nl, nl: tag ? nl : '', negative, characters, size });
+    images.push({ position, sourceLine, tag: tag || nl, nl: tag ? nl : '', negative, characters, size,
+      ...(promptFormat === 'manga' ? { sizeProvided: typeof rawSize === 'string' && !!rawSize.trim() } : {}) });
   }
 
   const limitedImages = images.slice(0, normalizedMax);

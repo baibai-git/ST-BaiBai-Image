@@ -74,10 +74,10 @@ describe('auto tag position protocol', () => {
   it('still rejects a missing main prompt outside ordinary ComfyUI and rejects blank prompts in all modes', () => {
     const onlyNl = '{"images":[{"position":"P1","tag":"","nl":"An adult opens a book."}]}';
     expect(() => parseImagePlanWithRange(onlyNl, segments, 1, 2)).toThrow('tag 不能为空');
-    expect(parseImagePlanWithRange(onlyNl, segments, 1, 2, true, false, true).images[0].tag).toBe('An adult opens a book.');
+    expect(parseImagePlanWithRange(onlyNl, segments, 1, 2, true, false, 'tag-or-nl').images[0].tag).toBe('An adult opens a book.');
 
     const blank = '{"images":[{"position":"P1","tag":" ","nl":" "}]}';
-    expect(() => parseImagePlanWithRange(blank, segments, 1, 2, true, false, true)).toThrow('tag 和 nl 至少填写一项');
+    expect(() => parseImagePlanWithRange(blank, segments, 1, 2, true, false, 'tag-or-nl')).toThrow('tag 和 nl 至少填写一项');
   });
 
   it('keeps the optional nl part and collapses its newlines', () => {
@@ -385,12 +385,34 @@ it('关闭动态负面词时丢弃AI误返回的negative及别名，包括其中
     const raw = '<thinking>brief check</thinking>{"images":[{"position":"P1","tag":"first"},{"images":[{"position":"P2","tag":"second"}],"changes":[]}';
     expect(()=>parseImagePlan(raw,segments,3)).toThrow('外层 JSON 未闭合');
   });
-  it('rejects nested responses and multiple outer objects instead of dropping pages',()=> {
+  it('rejects nested and malformed responses instead of dropping pages',()=> {
     expect(()=>parseImagePlan('{"images":[{"images":[{"position":"P2","tag":"second"}]}]}',segments,3)).toThrow('嵌套了 images');
-    expect(()=>parseImagePlan('{"images":[]} {"images":[]}',segments,3)).toThrow('多个外层 JSON');
     expect(()=>parseImagePlan('{"images":[{"position":"P1","tag":"first"}],}',segments,3)).toThrow('外层 JSON 语法错误');
     expect(()=>parseImagePlan('[{"images":[]}]',segments,3)).toThrow('最外层必须是对象');
     expect(()=>parseImagePlan('```json\n[{"images":[]}]\n```',segments,3)).toThrow('最外层必须是对象');
+  });
+  it('merges image arrays and character changes from separate replies or repeated root keys', () => {
+    const first = { position: 'P1', tag: 'Scene with "images": [brackets] and a comma, indoors' };
+    const second = { position: 'P2', tag: 'Second scene' };
+    const hair = { name: 'Ada', field: 'hair', value: 'short black hair', position: 'P1' };
+    const outfit = { name: 'Ada', field: 'outfit', value: 'blue coat', position: 'P2' };
+    const firstBlock = JSON.stringify({ images: [first], changes: [hair] });
+    const secondBlock = JSON.stringify({ images: [second], changes: [outfit] });
+    for (const raw of [
+      firstBlock + '\n' + secondBlock,
+      firstBlock.slice(0, -1) + ',' + secondBlock.slice(1),
+    ]) {
+      const plan = parseImagePlanWithRange(raw, segments, 2, 2);
+      expect(plan.images.map(item => [item.position, item.tag])).toEqual([['P1', first.tag], ['P2', second.tag]]);
+      expect(plan.changes.map(change => [change.field, change.value])).toEqual([
+        ['hair', hair.value], ['outfit', outfit.value],
+      ]);
+      expect(parseImagePlan(raw, segments, 1).images.map(item => item.tag)).toEqual([first.tag]);
+    }
+  });
+  it('keeps a cooldown fallback separate from the images it controls', () => {
+    const raw = '{"images":[],"layout_fallback":"No compatible layouts"}\n{"images":[{"position":"P1","tag":"scene"}]}';
+    expect(() => parseImagePlanWithRange(raw, segments, 0, 2, true, true)).toThrow('layout_fallback 必须单独返回');
   });
   it('keeps quoted braces and escaped quotes in a two-page response intact',()=> {
     const raw=JSON.stringify({images:[{position:'P1',tag:'a "quote" and } brace'},{position:'P2',tag:'second { scene'}],changes:[]});

@@ -66,7 +66,7 @@ describe('single-image mode', () => {
     const wrong = page(); wrong.summary.canvas = 'multi_panel';
     expect(() => applyMangaFrames(JSON.stringify(wrong),manga(),size)).toThrow(/canvas/);
     const other = page(); other.items[0].panel = 2;
-    expect(() => applyMangaFrames(JSON.stringify(other),manga(),size)).toThrow(/panel/);
+    expect(() => applyMangaFrames(JSON.stringify(other),manga(),size)).toThrow(/没有第 2 格/);
   });
 
   it('keeps the host contract in single mode and distinguishes identity from current clothing', () => {
@@ -81,7 +81,15 @@ describe('single-image mode', () => {
     expect(contract).not.toContain('用词一字不改，不得自行改写或增删其固定外貌');
     const example = JSON.parse(contract.split('\n').find(line => line.startsWith('{"images":'))!);
     expect(example.images).toHaveLength(2);
-    expect(example.images.map((image:{tag:string}) => JSON.parse(image.tag).layout)).toEqual(['single','single']);
+    expect(example.images.map((image:{tag:{layout:string}}) => image.tag.layout)).toEqual(['single','single']);
+    expect(example.images[0]).not.toHaveProperty('size');
+    expect(example.images[0].tag.items[0]).not.toHaveProperty('panel');
+    const skill = buildAutoTagFixedMessages({ ...options, dshSession: true, dshRuleSource: 'skill' })
+      .find(x => x.purpose === 'contract')!.content;
+    expect(skill).toContain('开头必须写一个 <thinking> 草稿');
+    const skillExample = JSON.parse(skill.split('\n').find(line => line.startsWith('{"images":'))!);
+    expect(skillExample.images[0].tag).toMatchObject({ layout: 'single', items: [{ slot: expect.any(String) }] });
+    expect(skillExample.images[0].tag).not.toHaveProperty('bbox_format');
     const spec = buildMangaSpec(settings.manga,false);
     expect(spec).toContain('semi-transparent bubble fill');
     expect(spec).not.toContain('simultaneous inset');

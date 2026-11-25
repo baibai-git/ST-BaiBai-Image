@@ -378,7 +378,7 @@ describe('buildMangaSpec', () => {
     expect(spec).toContain('landscape(1920×1088)');
     expect(spec).toMatch(/1\(single\):[^\n]*槽位 F[^\n]*\bS\b/);
     expect(spec).not.toMatch(/1\(single\):[^\n]*\bX\b/);
-    expect(spec).toContain('顶层增加 layout');
+    expect(spec).toContain('选择 layout');
     expect(spec).toContain('位置[');
     expect(spec).toMatch(/；槽位 [^；\n]*\bC\b/);
     expect(spec).not.toContain('[-924,-504,924,504]');

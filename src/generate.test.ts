@@ -72,12 +72,20 @@ describe('backendStatus', () => {
     try {
       settings.manga = { ...mangaDefaults(), enabled: true };
       preset.portraitSize = '1088x1920';
-      const prompt = JSON.stringify({ layout: 'balanced_1', items: [{ panel: 1, slot: 'C', label: 'object', caption: 'A quiet room.' }] });
+      const prompt = JSON.stringify({ layout: 'balanced_1', items: [
+        { panel: 1, slot: 'C', label: 'object', caption: 'A quiet room.' },
+        { panel: 1, slot: 'T', label: 'text', caption: 'An empty balloon.', text: ' ' },
+        { panel: 1, slot: 'T', label: 'text', caption: 'A sign on the wall.', text: '安静' },
+      ] });
       await generateImage({ prompt, nl: 'stale nl', seed: 1 });
       const sent = vi.mocked(generateComfyImage).mock.calls[0][1];
       expect(sent.nl).toBe('');
-      expect(JSON.parse(sent.prompt).items[0].bbox).toHaveLength(4);
-      expect(JSON.parse(sent.prompt).layout).toBeUndefined();
+      const compiled = JSON.parse(sent.prompt);
+      expect(compiled.items).toMatchObject([
+        { label: 'object', bbox: expect.any(Array) },
+        { label: 'text', text: '安静', bbox: expect.any(Array) },
+      ]);
+      expect(compiled.layout).toBeUndefined();
       preset.portraitSize = '512x768';
       await expect(generateImage({ prompt, seed: 1 })).rejects.toThrow(/画布/);
       expect(generateComfyImage).toHaveBeenCalledTimes(1);

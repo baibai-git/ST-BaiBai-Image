@@ -1,4 +1,4 @@
-/** Final MOSS fields only. Never drop a content item to repair its schema. */
+/** Final MOSS fields and content validation. */
 const ROOT = new Set(['summary','items','layout','bbox_coord_space','bbox_format']);
 const SUMMARY = new Set(['caption','canvas','meta','palette']);
 const ITEM = new Set(['panel','slot','label','caption','bbox','text','tags','palette']);
@@ -49,6 +49,15 @@ export function cleanMossFields(root: Record<string,unknown>, canvas: {width:num
     }
   });
   return cleaned;
+}
+
+export function skipEmptyTextItems(items: unknown[]): unknown[] {
+  const kept = items.filter(item => !object(item) || item.label !== 'text'
+    || !(item.text == null || typeof item.text === 'string' && !item.text.trim()));
+  if (!kept.length) fail('items', '全部文字项都缺少准确字样，页面没有可编译内容');
+  const skipped = items.length - kept.length;
+  if (skipped) console.warn('[柏宝绘] 漫画 Layout 已跳过空文字项：', skipped);
+  return kept;
 }
 
 /** Run before adding compiler prefixes so an empty caption cannot be disguised. */

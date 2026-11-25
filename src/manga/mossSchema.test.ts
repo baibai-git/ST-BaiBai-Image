@@ -24,7 +24,7 @@ describe('MOSS 无损字段清理',()=>{
   it.each([
     ['人物身份字段错误',(v:any)=>{delete v.items[0].label},'label'],
     ['人物描述为空',(v:any)=>{v.items[0].caption=' '},'caption'],
-    ['台词缺失',(v:any)=>{delete v.items[1].text},'text'],
+    ['台词字段类型错误',(v:any)=>{v.items[1].text=123},'text'],
     ['人物项中有台词',(v:any)=>{v.items[0].text='保留这句台词'},'不能删除'],
     ['非空子项',(v:any)=>{v.items[0].children=[{caption:'another person'}]},'不能安全丢弃'],
     ['非空未知内容',(v:any)=>{v.items[0].font_size=32},'不能安全丢弃'],
@@ -32,5 +32,18 @@ describe('MOSS 无损字段清理',()=>{
     ['可选数组含非空对象',(v:any)=>{v.items[0].tags=[{identity:'courier'}]},'字符串数组'],
   ])('%s 不以删项修复',(_name,change,expected)=>{
     const input=source();change(input);expect(()=>compile(input)).toThrow(expected);
+  });
+
+  it('跳过空文字项，保留画面和其他台词的字区与原文', () => {
+    const input = source();
+    const [character, subtitle] = input.items;
+    const expected = compile(input);
+    const blanks = [
+      { ...subtitle, text: ' \t\n' },
+      { ...subtitle, text: undefined },
+      { ...subtitle, text: null },
+    ];
+    expect(compile({ ...input, items: [character, ...blanks, subtitle] })).toEqual(expected);
+    expect(() => compile({ ...input, items: blanks })).toThrow('页面没有可编译内容');
   });
 });

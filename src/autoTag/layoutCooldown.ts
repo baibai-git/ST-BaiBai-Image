@@ -140,15 +140,28 @@ export async function prepareLayoutSelectionMessage(messages: ChatMsg[], selecti
 export function validateLayoutSelection(plan: ImagePlan, selection: LayoutSelection): string[] {
   const candidates = layoutCandidates(selection);
   const used = new Set<string>();
+  const directions = ['portrait', 'landscape'] as const;
   for (const image of plan.images) {
-    const inner: unknown = JSON.parse(image.tag);
-    const rawId = inner && typeof inner === 'object' && !Array.isArray(inner)
-      ? (inner as { layout?: unknown }).layout : undefined;
-    const id = typeof rawId === 'string' ? rawId.trim() : rawId;
-    if (typeof id !== 'string' || !candidates[selection.lockedSize ?? image.size].some(layout => layout.id === id)) {
+    const parsed: unknown = JSON.parse(image.tag);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('漫画 Layout 的 tag 需要 JSON 对象');
+    const inner = parsed as Record<string, unknown>;
+    const allowed = selection.lockedSize ? [selection.lockedSize] : image.sizeProvided === false ? directions : [image.size];
+    const rawId = inner.layout;
+    let id = typeof rawId === 'string' ? rawId.trim()
+      : typeof rawId === 'number' && Number.isSafeInteger(rawId) ? String(rawId) : rawId;
+    if (id == null || id === '') {
+      if (!Array.isArray(inner.items) || !inner.items.length) throw new Error('漫画 Layout 的 items 必须是非空数组。');
+      const ids = new Set(allowed.flatMap(size => candidates[size].map(layout => layout.id)));
+      if (ids.size !== 1) throw new Error('无法确定版式，请在 layout 中填写本轮匹配的版式 ID。');
+      id = ids.values().next().value;
+    }
+    const matches = allowed.filter(size => candidates[size].some(layout => layout.id === id));
+    if (typeof id !== 'string' || !matches.length) {
       throw new Error(`版式 ${String(id)} 不在本轮冷却白名单中，请按动态白名单重新选版`);
     }
     if (!selection.singleImageMode && used.has(id)) throw new Error(`同轮多页不能重复使用版式 ${id}`);
+    if (id !== rawId) image.tag = JSON.stringify({ ...inner, layout: id });
+    if (matches.length === 1) image.size = matches[0];
     used.add(id);
   }
   return [...used];

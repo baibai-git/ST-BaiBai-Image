@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LAYOUT_HISTORY_KEY } from './layoutCooldown';
-import { mangaDefaults } from '@/manga/layouts';
+import { applyMangaFrames, mangaDefaults } from '@/manga/layouts';
 import { requestFloorTags } from './runner';
 import { renderWorkflowTemplate } from '@/backends/comfyui';
 import { newChannel, newComfyWorkflow, settings } from '@/state/settings';
@@ -90,6 +90,45 @@ it('writes tag-only, nl-only and mixed ComfyUI responses to reusable image cards
 });
 
 describe('runner layout adoption', () => {
+  it('saves a short Layout object and produces the same image prompt as the legacy string', async () => {
+    const canvas = { width: 1728, height: 1152 };
+    settings.comfyui.workflows[0].orientationLock = 'auto';
+    settings.comfyui.workflows[0].landscapeSize = '1728×1152';
+    settings.manga.singleImageMode = true;
+    settings.manga.custom = [{ id: 'wide', canvas, landscape: [{
+      position: 'one', slots: { F: [-576, -864, 576, 864], T: [-530, -820, -380, 0] },
+    }] }];
+    const short = { summary: { caption: 'A traveler opens a book.' },
+      items: [{ slot: 'T', label: 'text', caption: 'Handwritten title.', text: '第一章「相逢」' }] };
+    h.responses = [JSON.stringify({ images: [{ position: 'P1', tag: short }] })];
+
+    await requestFloorTags(0);
+
+    const saved = parseImageTagContent(parseImageTags(h.context.chat[0].mes)[0]);
+    expect(saved.size).toBe('landscape');
+    expect(JSON.parse(saved.tag)).toEqual({ ...short, layout: 'wide' });
+    const legacy = {
+      layout: 'wide', summary: { ...short.summary, canvas: 'single' },
+      items: short.items.map(item => ({ ...item, panel: 1 })),
+      bbox_coord_space: 'abs_centralized', bbox_format: 'yxyx',
+    };
+    expect(JSON.parse(applyMangaFrames(saved.tag, settings.manga, canvas))).toEqual(
+      JSON.parse(applyMangaFrames(JSON.stringify(legacy), settings.manga, canvas)),
+    );
+    expect(h.messages).toHaveLength(1);
+  });
+
+  it('asks for the layout on retry when more than one layout is compatible', async () => {
+    const short = { items: [{ slot: 'F', label: 'object', caption: 'A quiet room.' }] };
+    h.responses = [
+      JSON.stringify({ images: [{ position: 'P1', tag: short }] }),
+      JSON.stringify({ images: [{ position: 'P1', tag: { ...short, layout: 'b' } }] }),
+    ];
+    await requestFloorTags(0);
+    expect(h.messages[1].at(-1)?.content).toContain('请在 layout 中填写本轮匹配的版式 ID');
+    expect(writtenLayouts(0)).toEqual(['b']);
+  });
+
   it('single-image mode accepts two portraits with one full-page ID, including retry, without consuming cooldown history', async () => {
     settings.autoTag.minImages = 2;
     settings.manga.singleImageMode = true;

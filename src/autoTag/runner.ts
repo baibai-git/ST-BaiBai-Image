@@ -361,8 +361,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
         return;
       }
       try {
-        // parsed 用对象壳装着:validate 闭包写入,await 之后读取——请求成功 + 验收通过才非空。
-        // (直接 let 会被 TS 收窄成 null:闭包内的赋值控制流分析看不见。)
+        // 用对象承载 validate 闭包写入的结果，避免 TypeScript 将它收窄为 null。
         const parsed: { plan: ImagePlan | null } = { plan: null };
         const validate = (raw: string) => {
           const candidate = parseImagePlan(
@@ -372,7 +371,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
             promptOptions.maxImages,
             settings.defaultBackend !== 'comfyui' || activeComfyPreset().generateNegative === true,
             !!layoutSelection && layoutSelection.released < layoutSelection.recent.length,
-            plainComfy,
+            layoutSelection ? 'manga' : plainComfy ? 'tag-or-nl' : 'tag',
           );
           if (layoutSelection && !candidate.layoutFallback) selectedLayouts = validateLayoutSelection(candidate, layoutSelection);
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的

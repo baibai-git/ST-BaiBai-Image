@@ -101,15 +101,16 @@ describe('auto tag prompt', () => {
       const options:AutoTagSettings={enabled:true,contextMessages:2,minImages:0,maxImages:3,retryCount:1,autoGenerate:true,prompts:prompts()};
       const messages=await buildAutoTagMessages(context(),1,options,null);
       const contract=messages.find(m=>m.purpose==='contract')!.content;
-      const result=JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
-      expect(result.images).toHaveLength(2); expect(result.changes).toEqual([]);
+      const result=JSON.parse(contract.match(/^\{"images":.+$/m)![0]);
+      expect(result.images).toHaveLength(2);
       const ids=new Set<string>();
       for(const image of result.images) {
         expect(image.images).toBeUndefined(); expect(image.changes).toBeUndefined();
-        const inner=JSON.parse(image.tag); ids.add(inner.layout);
-        expect(()=>applyMangaFrames(image.tag,settings.manga,{width:1088,height:1920})).not.toThrow();
+        ids.add(image.tag.layout);
+        expect(image.nl).toBeUndefined();
+        expect(()=>applyMangaFrames(JSON.stringify(image.tag),settings.manga,{width:1088,height:1920})).not.toThrow();
       }
-      expect(ids.size).toBe(2); expect(contract).toContain('changes 只在最外层汇总');
+      expect(ids.size).toBe(2); expect(contract).toContain('开头必须写一个 <thinking> 草稿');
     } finally {settings.defaultBackend=oldBackend;settings.manga=oldManga;}
   });
   it('协议示例只选启用版式，不引用已删除的 balanced_1，空清单时阻止请求',async()=>{
@@ -121,8 +122,8 @@ describe('auto tag prompt', () => {
       settings.manga={...mangaDefaults(),enabled:true,deleted,custom:[{id:'only_enabled',canvas:{width:1088,height:1920},portrait:[{position:'one',slots:{F:[-900,-500,900,500]}}]}]};
       const messages=await buildAutoTagMessages(context(),1,options,null);
       const contract=messages.find(m=>m.content.startsWith('你是严谨的'))!.content;
-      const example=JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
-      expect(JSON.parse(example.images[0].tag)).toMatchObject({layout:'only_enabled',items:[{panel:1,slot:'F'}]});
+      const example=JSON.parse(contract.match(/^\{"images":.+$/m)![0]);
+      expect(example.images[0].tag).toMatchObject({layout:'only_enabled',items:[{slot:'F'}]});
       expect(contract).not.toContain('balanced_1');
       settings.manga.custom=[];
       await expect(buildAutoTagMessages(context(),1,options,null)).rejects.toThrow(/没有启用的版式/);
@@ -149,10 +150,10 @@ describe('auto tag prompt', () => {
       expect(on.map(m => m.content).join('\n')).toContain('MANGA_CHECK');
       expect(on.map(m => m.content).join('\n')).not.toContain('{{nl}}');
       const contract = on.find(m => m.content.startsWith('你是严谨的'))!.content;
-      const sample = JSON.parse(contract.match(/格式固定为：\n([^\n]+)\n/)![1]);
+      const sample = JSON.parse(contract.match(/^\{"images":.+$/m)![0]);
       const tag = sample.images[0].tag;
-      expect(JSON.parse(tag)).toMatchObject({ layout: 'balanced_1', items: [{ panel: 1, slot: 'C' }] });
-      expect(JSON.parse(applyMangaFrames(tag, settings.manga, { width: 1088, height: 1920 })).items[0].bbox).toHaveLength(4);
+      expect(tag).toMatchObject({ layout: 'balanced_1', items: [{ slot: 'C' }] });
+      expect(JSON.parse(applyMangaFrames(JSON.stringify(tag), settings.manga, { width: 1088, height: 1920 })).items[0].bbox).toHaveLength(4);
     } finally {
       settings.defaultBackend = oldBackend;
       settings.manga = oldManga;
