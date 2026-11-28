@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import Icon from '@/components/Icon.vue';
+import { openImagePanel } from '@/floor/panelSlots';
+import { settings } from '@/state/settings';
 import { openPanel, ui } from '@/state/ui';
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 
@@ -101,6 +103,12 @@ const orbStyle = computed(() => {
 });
 
 const orbImage = computed(() => ui.orbImage.trim());
+const opensImages = computed(() => settings.enabled && settings.ui.floatingImagePanel);
+
+function activate(): void {
+  if (opensImages.value) openImagePanel();
+  else openPanel();
+}
 
 // —— 拖动 ——
 function onDown(e: PointerEvent) {
@@ -142,7 +150,7 @@ function onUp(e: PointerEvent) {
 
   if (moved < CLICK_SLOP) {
     // 视为点击 → 打开柏宝绘(贴边态保持)
-    openPanel();
+    activate();
     return;
   }
 
@@ -160,7 +168,7 @@ function onUp(e: PointerEvent) {
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Enter' || e.key === ' ') {
     e.preventDefault();
-    openPanel();
+    activate();
   }
 }
 
@@ -182,7 +190,7 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     :style="orbStyle"
     role="button"
     tabindex="0"
-    aria-label="打开柏宝绘"
+    :aria-label="opensImages ? '打开看图面板' : '打开柏宝绘'"
     @pointerdown="onDown"
     @pointermove="onMove"
     @pointerup="onUp"
@@ -194,7 +202,7 @@ onUnmounted(() => window.removeEventListener('resize', onResize));
     @keydown="onKey"
   >
     <img v-if="orbImage" :src="orbImage" class="bbi-orb-img" alt="" draggable="false" />
-    <Icon v-else name="palette" class="bbi-orb-icon" />
+    <Icon v-else :name="opensImages ? 'gallery' : 'palette'" class="bbi-orb-icon" />
   </div>
 </template>
 

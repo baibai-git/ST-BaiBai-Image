@@ -220,6 +220,7 @@ function defaults(): ImageSettings {
       cardTheme: 'st',
       autoCollapseImages: false,
       imageDisplaySize: 'medium',
+      floatingImagePanel: false,
     },
     // 出图后端默认 ComfyUI(当前唯一实现的出图后端);webui 渠道已隐藏,不再作为可选值
     defaultBackend: 'comfyui',
@@ -801,10 +802,10 @@ function normalize(raw: unknown): ImageSettings {
     cardTheme: typeof ru.cardTheme === 'string' ? ru.cardTheme : d.ui.cardTheme,
     autoCollapseImages:
       typeof ru.autoCollapseImages === 'boolean' ? ru.autoCollapseImages : d.ui.autoCollapseImages,
-    // 老配置缺字段 → 默认档(中)。不为「保持铺满」做迁移:铺满正是要修的问题,想要回去下拉里选
     imageDisplaySize: IMAGE_DISPLAY_SIZES.some(option => option.value === ru.imageDisplaySize)
       ? (ru.imageDisplaySize as ImageDisplaySize)
       : d.ui.imageDisplaySize,
+    floatingImagePanel: ru.floatingImagePanel === true,
   };
   // webui 已隐藏:存量数据里的 'webui' 一律迁移到默认后端(否则规范/出图口径会落空)
   merged.defaultBackend =

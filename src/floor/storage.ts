@@ -7,23 +7,7 @@ import { getContext, type STContext, type STMessage } from '@/st/context';
 import { deleteUserImage, uploadUserImage } from '@/st/images';
 import { settings } from '@/state/settings';
 
-/**
- * 楼层卡片结果存储层（DESIGN-FLOOR-UI.md §7）。
- *
- * 两层分离：
- * - 新图片二进制 → ST 文件系统（user/images/柏宝绘_<角色名>/），extra 只存指针 path。
- *   旧 user/files 图片保留原位，不迁移、不删除。
- * - 元数据 → message.extra.bbiImage = { [swipeId]: { [promptHash]: BbiImageEntry[] } }
- *   按 swipeId 分桶（滑动互不污染）；promptHash 键下是历史列表（时间正序，
- *   最新在末尾，卡片翻页浏览）；水合时用当前 tag 原文重算 hash 做 stale 检测。
- *
- * 文件夹名由 ST 上传接口清洗，目录内保留原有文件命名：
- *   bbi_<characterNameHash>_<swipeId>_<promptHash>-<generationId>.<ext>
- *
- * 另有第三层「侧写」（sidecar，见 sidecarFileName）：与图片同名的 .json，落在 user/files。
- * 只为图库服务——图库跨全部聊天按目录列图，而提示词只存在某一个聊天的 extra 里，
- * 扫全库 JSONL 反查不可行（实测单个角色目录就有 GB 级、且 /api/chats/get 无分页）。
- */
+// 图片存 user/images，聊天 extra 按重抽版本和提示词保存引用。图库通过同名侧写读取元数据。
 
 export interface BbiImageEntry {
   /** 本次生成唯一 id。 */
@@ -210,7 +194,31 @@ export async function mutateStore(
   ctx: STContext,
   messageId: number,
   mutate: (store: BbiImageStore) => BbiImageStore,
+  panelSwipeId?: number,
 ): Promise<boolean> {
+  if (panelSwipeId !== undefined) {
+    const message = ctx.chat[messageId];
+    const swipe = message?.swipe_info?.[panelSwipeId];
+    const owner = (message?.swipe_id ?? 0) === panelSwipeId ? message : swipe;
+    if (!owner) return false;
+    const previous = owner.extra;
+    const previousSwipe = swipe?.extra;
+    const store = (previous?.[BBI_IMAGE_EXTRA_KEY] as BbiImageStore | undefined) ?? {};
+    const next = mutate(store);
+    if (next === store) return false;
+    const extra = { ...previous, [BBI_IMAGE_EXTRA_KEY]: next };
+    const swipeExtra = { ...previousSwipe, [BBI_IMAGE_EXTRA_KEY]: next };
+    owner.extra = extra;
+    if (swipe && swipe !== owner) swipe.extra = swipeExtra;
+    try {
+      await ctx.saveChat();
+    } catch (error) {
+      if (owner.extra === extra) owner.extra = previous;
+      if (swipe && swipe.extra === swipeExtra) swipe.extra = previousSwipe;
+      throw error;
+    }
+    return true;
+  }
   for (let attempt = 0; attempt < 5; attempt++) {
     const message = ctx.chat[messageId];
     if (!message) return false;
@@ -418,6 +426,7 @@ export async function saveImageResult(
   seed: number,
   result: ComfyImageResult,
   meta?: GenerationMeta,
+  ownsSlot?: () => boolean,
 ): Promise<BbiImageEntry> {
   const ctx = getContext();
   if (!ctx?.saveChat) throw new Error('SillyTavern 上下文不可用');
@@ -435,6 +444,7 @@ export async function saveImageResult(
     result,
     meta,
   );
+  if (ownsSlot && !ownsSlot()) throw new DOMException('生图任务已失效', 'AbortError');
 
   const entry: BbiImageEntry = {
     generationId: genId,
@@ -448,7 +458,8 @@ export async function saveImageResult(
     ...(meta ? { meta } : {}),
   };
 
-  const saved = await mutateStore(ctx, messageId, store => appendEntry(store, swipeId, hash, entry));
+  const saved = await mutateStore(ctx, messageId, store => appendEntry(store, swipeId, hash, entry),
+    seq < 0 ? swipeId : undefined);
   if (!saved) {
     console.warn('[柏宝绘] 图片已上传但 extra 写入失败，文件留作孤儿', path);
     throw new Error('图片已上传，但聊天记录保存失败');
@@ -456,24 +467,7 @@ export async function saveImageResult(
   return entry;
 }
 
-/**
- * 删除一张图的**文件本体**(连同它的侧写 json),不碰任何聊天记录。供图库批量删除使用。
- *
- * 与 deleteImageResult 的分工:那个是「从楼层删一条结果」,先摘 extra 指针再删文件;
- * 这个是「从图库删一个文件」,**没有指针可摘**——图库按目录列图,而指针散在各个聊天的
- * extra 里,两者之间没有反向索引,扫全库反查不可行(实测 chats 目录 7 GB / 1243 个 jsonl,
- * 且 /api/chats/get 无分页)。故这里必然留下破指针,由楼层卡片侧运行时降级兜底
- * (floor/missingImages.ts + Card.vue 的 @error)。
- *
- * 侧写删失败只警告:老图本来就没有侧写,404 属预期常态(deleteUploadedFile 对 404 返回
- * false 不抛);真失败了也只是多个几 KB 的孤儿 json,不值得让整次删除报错。
- *
- * 入口先 `normalizeImagePath`:调用方手上两种写法都有——图库的 src 是逐段
- * encodeURIComponent 过的,extra/目录列表里的是原文。而 ST 的 /api/images/delete 与
- * /api/files/delete 都是把 body.path 直接 path.join 到根目录、**不做 URL 解码**,
- * 编码路径传过去只会 404,还会被 deleteUserImage 当成「本就不存在」静默吞掉——
- * 症状就是图没删掉、侧写却真删了。
- */
+// 图库只删文件和侧写。聊天卡片通过图片加载错误处理失效引用。
 export async function deleteImageFileOnly(path: string): Promise<void> {
   const target = normalizeImagePath(path);
   await deleteUserImage(target);
@@ -497,6 +491,7 @@ export async function deleteImageResult(
   swipeId: number,
   hash: string,
   genId: string,
+  panelSlot = false,
 ): Promise<boolean> {
   const ctx = getContext();
   if (!ctx?.saveChat) return false;
@@ -517,7 +512,7 @@ export async function deleteImageResult(
       delete next[String(swipeId)][hash];
     }
     return next;
-  });
+  }, panelSlot ? swipeId : undefined);
   if (!removed) return false;
   if (/^\/?user\/images\//.test(pathToDelete)) {
     try {

@@ -2,7 +2,10 @@
 import Icon from '@/components/Icon.vue';
 import NavBar from '@/components/NavBar.vue';
 import FloatingOrb from '@/components/FloatingOrb.vue';
+import ImagePanel from '@/floor/ImagePanel.vue';
+import { imagePanel } from '@/floor/panelSlots';
 import { getPage } from '@/pages/registry';
+import { settings } from '@/state/settings';
 import { closePanel, cycleTheme, lastOpenedAt, modalHost, THEMES, ui } from '@/state/ui';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 
@@ -89,7 +92,8 @@ const windowStyle = computed(() => {
          各页弹窗 Teleport 到此,避开 iOS「可滚动祖先内 fixed 后代定位错乱」(详见 state/ui.ts)。 -->
     <div ref="modalHost"></div>
     <!-- 悬浮球:留在 shadow 内才能用 --bbi-* 主题变量;自身 position:fixed 贴边,不受 host 影响 -->
-    <FloatingOrb v-if="ui.showOrb" />
+    <FloatingOrb v-if="ui.showOrb || (settings.enabled && settings.ui.floatingImagePanel)" />
+    <ImagePanel v-if="imagePanel.open && !ui.open" />
     <Transition name="bbi-fade">
       <div
         v-if="ui.open"

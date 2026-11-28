@@ -3,6 +3,7 @@ import BbiSelect from '@/components/BbiSelect.vue';
 import BbiTextarea from '@/components/BbiTextarea.vue';
 import Collapsible from '@/components/Collapsible.vue';
 import MangaSection from '@/pages/settings/MangaSection.vue';
+import PanelModeControls from '@/pages/settings/PanelModeControls.vue';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
@@ -658,14 +659,10 @@ async function confirmUpdate() {
         </label>
         <p class="bbi-field-hint">在酒馆顶部导航栏加一个快速打开柏宝绘的按钮。左下角魔杖入口照旧保留。</p>
 
-        <label class="bbi-switch-row">
-          <span class="bbi-field-label">显示屏幕悬浮球</span>
-          <input v-model="ui.showOrb" type="checkbox" class="bbi-checkbox" />
-        </label>
-        <p class="bbi-field-hint">在屏幕边缘挂一枚可拖动的悬浮球,点击即开柏宝绘。拖到中间可常驻悬浮,拖近左右边缘则吸附贴边。</p>
+        <PanelModeControls />
 
         <!-- 悬浮球外观:配置项多,开启后才收进小分组 -->
-        <Collapsible v-if="ui.showOrb" title="悬浮球外观" :open="false">
+        <Collapsible v-if="ui.showOrb || settings.ui.floatingImagePanel" title="悬浮球外观" :open="false">
           <div class="bbi-select-row">
             <span class="bbi-field-label">形状</span>
             <BbiSelect v-model="orbShapeSel" :options="ORB_SHAPES" aria-label="悬浮球形状" />

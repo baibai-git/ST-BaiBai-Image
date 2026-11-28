@@ -120,6 +120,8 @@ export interface UiPrefs {
    * 与出图分辨率、横竖方向无关,生成的文件一字节不变。
    */
   imageDisplaySize: ImageDisplaySize;
+  /** Store newly generated prompts in the chat image panel instead of the story text. */
+  floatingImagePanel: boolean;
 }
 
 /** 楼层图片显示大小。 */

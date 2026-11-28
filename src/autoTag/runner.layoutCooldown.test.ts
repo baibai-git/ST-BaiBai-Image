@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LAYOUT_HISTORY_KEY } from './layoutCooldown';
 import { applyMangaFrames, mangaDefaults } from '@/manga/layouts';
 import { requestFloorTags } from './runner';
+import { readPanelSlots } from '@/floor/panelSlots';
 import { renderWorkflowTemplate } from '@/backends/comfyui';
 import { newChannel, newComfyWorkflow, settings } from '@/state/settings';
 import { parseImageTags, parseImageTagContent } from '@/st/imageTagRegex';
@@ -51,6 +52,7 @@ beforeEach(() => {
   settings.comfyui.activeWorkflowId = preset.id;
   settings.channels = [];
   settings.assignments.tagGen = '';
+  settings.ui.floatingImagePanel = false;
   Object.assign(settings.autoTag, { enabled: true, minImages: 1, maxImages: 2, retryCount: 1, autoGenerate: false, dshSession: false, dshDedicated: false });
   settings.manga = { ...mangaDefaults(), enabled: true, custom: ['a', 'b', 'c'].map(id => ({
     id, canvas: { width: 1152, height: 1728 }, portrait: [{ position: 'one', slots: { F: [-800, -500, 800, 500] } }],
@@ -58,6 +60,32 @@ beforeEach(() => {
   h.responses = []; h.messages = []; h.saved = [];
 });
 afterEach(() => vi.unstubAllGlobals());
+
+it('keeps panel plans with their swipe and resumes inline insertion when disabled', async () => {
+  const first = h.context.chat[0];
+  first.swipes = ['Different story.', story];
+  first.swipe_id = 1;
+  first.swipe_info = [{ extra: { existing: true } }, {}];
+  settings.ui.floatingImagePanel = true;
+  h.responses = [response('a'), response('b')];
+
+  await requestFloorTags(0);
+
+  expect(h.saved).toEqual([[story, story]]);
+  expect(first.swipes).toEqual(['Different story.', story]);
+  expect(first.swipe_info[0].extra).toEqual({ existing: true });
+  const saved = JSON.parse(JSON.stringify(first));
+  const [slot] = readPanelSlots(saved.swipe_info[1]);
+  expect(slot.excerpt).toBe(story);
+  expect(JSON.parse(parseImageTagContent(slot.tag).tag).layout).toBe('a');
+
+  settings.ui.floatingImagePanel = false;
+  await requestFloorTags(1);
+
+  expect(writtenLayouts(1)).toEqual(['b']);
+  expect(readPanelSlots(h.context.chat[1])).toEqual([]);
+  expect(readPanelSlots(first)).toEqual([slot]);
+});
 
 it('writes tag-only, nl-only and mixed ComfyUI responses to reusable image cards with the nl preference off', async () => {
   settings.manga.enabled = false;

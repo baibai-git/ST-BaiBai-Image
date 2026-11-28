@@ -6,37 +6,30 @@ import { cancelFloorTags } from '@/autoTag/runner';
 import { effectiveOrientation, type Orientation } from '@/backends/size';
 import Icon from '@/components/Icon.vue';
 import { confirmDialog } from '@/components/confirm';
-import { backendStatus, decideSeed, generateImage } from '@/generate';
+import { backendStatus } from '@/generate';
 import { consumeAutoGenerate, shouldAutoGenerate } from '@/floor/autoGenerate';
 import { isCollapsed, setCollapsed } from '@/floor/collapseState';
 import { imageDownloadFileName, saveImageFile } from '@/floor/download';
+import { generateSlot } from '@/floor/generateSlot';
 import {
-  beginGen,
   cancelGen,
-  clearGen,
-  failGen,
   getGenRecord,
-  isCurrentGen,
   reconcileGen,
-  setGenPhase,
-  setGenRetry,
-  setQueueAhead,
   slotKey,
 } from '@/floor/genState';
 import { hydrateMessage } from '@/floor/hydrate';
 import { openLightbox } from '@/floor/lightbox';
 import { confirmImageMissing, isImageMissing } from '@/floor/missingImages';
 import { openPromptEditor } from '@/floor/promptEditor';
+import { imagePanel } from '@/floor/panelSlots';
 import {
   deleteImageResult,
   promptHash,
-  saveImageResult,
   type BbiImageEntry,
 } from '@/floor/storage';
 import { isTagPlanning } from '@/floor/tagPlanState';
 import { formatGenerationMeta } from '@/generationMeta';
-import { activeComfyPreset, activeOrientationLock, imageDisplayMaxHeight, settings } from '@/state/settings';
-import { beginImage, failImage, finishImage, safeHistory } from '@/state/history';
+import { activeOrientationLock, imageDisplayMaxHeight, settings } from '@/state/settings';
 import { copyText } from '@/st/clipboard';
 import { getContext } from '@/st/context';
 import { formatPromptText } from '@/st/imageTagRegex';
@@ -258,81 +251,14 @@ const pendingHint = computed(() => {
 
 async function generate(): Promise<void> {
   if (busy.value || planning.value || !configured.value) return;
-  const slot = key.value;
-  const currentHash = hash.value;
-  // 本次任务的输入全部就地取值:请求在途时本组件很可能已被重水合销毁
-  // (任一兄弟槽位出图都会触发全楼重建),销毁后再读 props 不可靠。
-  const job = {
-    messageId: props.messageId,
-    swipeId: props.swipeId,
-    seq: props.seq,
-    tag: props.tag,
-    prompt: props.prompt,
-    nl: props.nl,
-    negative: props.negative,
-    characters: props.characters.map(character => ({ ...character })),
-    size: effectiveSize.value,
-  };
-  // NAI 需要闸门排队 → 先显示「排队中」;ComfyUI 有服务端队列,直接进 generating
-  const { signal, token } = beginGen(slot, currentHash, naiActive.value ? 'queued' : 'generating');
-  // 历史记录 id:在 seed 确定后才登记(见下),故这里先置空,catch 里据此判断要不要收尾。
-  let historyId: number | null = null;
-
-  try {
-    // 发起时就确定种子(NAI 面板种子 > 0 时用固定值;否则随机),随结果落盘进 extra
-    // (entry.seed),历史翻页可查/可复用。口径在 generate.ts,与公开接口同源。
-    const seed = decideSeed(settings.defaultBackend);
-    // 历史埋点:seed 已定、请求将发,此刻登记。图片本身不进 store(dataURL 会爆内存,
-    // 且图随后就落盘进 ST 了)——只留元信息 + 楼层坐标,够回溯「这张图是怎么来的」。
-    historyId = safeHistory(() =>
-      beginImage({
-        backend: naiActive.value ? 'nai' : 'comfyui',
-        model: naiActive.value ? settings.nai.model : activeComfyPreset().name,
-        prompt: job.prompt,
-        nl: job.nl,
-        negative: job.negative,
-        characters: job.characters,
-        seed,
-        size: job.size,
-        floor: job.messageId,
-        seq: job.seq,
-      }),
-    );
-    // 闸门、后端分派都在 generateImage 里(公开接口走同一条路,见 generate.ts);
-    // 本组件只把进度回调接到自己的槽位运行态上。
-    const { result, meta } = await generateImage({ ...job, seed }, signal, {
-      onStart: () => setGenPhase(slot, token, 'generating'),
-      onQueue: ahead => setQueueAhead(slot, token, ahead),
-      onRetry: retry => setGenRetry(slot, token, retry),
-    });
-    // 图已经拿到手:此时若发现本任务已被取代(取消后重绘 / reconcile),不要落盘,
-    // 否则会把旧提示词的结果写进 extra,并触发一次多余的重水合打断新任务。
-    if (!isCurrentGen(slot, token)) {
-      result.revoke();
-      // 图出来了却被丢弃,历史里记成「已取消」——否则这条会永远停在「进行中」。
-      if (historyId !== null) safeHistory(() => failImage(historyId!, '', true));
-      return;
-    }
-    // 落盘:图片进 ST 文件系统 + extra 写指针。成功后重水合,
-    // 卡片从 extra 恢复为 ready(blob/dataURL 生命周期随之结束)。
-    await saveImageResult(job.messageId, job.swipeId, job.seq, job.tag, seed, result, meta);
-    result.revoke();
-    if (historyId !== null) safeHistory(() => finishImage(historyId!));
-    // 先清运行态再重水合:重水合会重建本组件,清完才不会带着 generating 复活
-    clearGen(slot, token);
-    const ctx = getContext();
-    if (ctx) hydrateMessage(job.messageId, ctx);
-  } catch (e) {
-    const aborted = e instanceof DOMException && e.name === 'AbortError';
-    if (historyId !== null) {
-      safeHistory(() => failImage(historyId!, e instanceof Error ? e.message : String(e), aborted));
-    }
-    if (aborted) {
-      clearGen(slot, token);
-    } else {
-      failGen(slot, token, e instanceof Error ? e.message : String(e));
-    }
-  }
+  const { chatId, messageId, swipeId, seq, tag, prompt, nl, negative, characters, size } = props;
+  await generateSlot({
+    chatId, messageId, swipeId, seq, tag, prompt, nl, negative,
+    characters: characters.map(character => ({ ...character })), size,
+  }, () => {
+    const context = getContext();
+    if (context) hydrateMessage(messageId, context);
+  });
 }
 
 function cancel(): void {
@@ -344,7 +270,7 @@ function openImage(): void {
   if (!entry) return;
   // 就地取值:灯箱挂在插件 shadow root,**活得比本卡片长**——任一兄弟槽位出图都会
   // 重水合销毁本组件,而灯箱还开着。回调里再读 props 就是读已销毁实例,故全部先快照。
-  const at = { messageId: props.messageId, swipeId: props.swipeId };
+  const at = { chatId: props.chatId, messageId: props.messageId, swipeId: props.swipeId };
   openLightbox({
     src: entry.path,
     prompt: lightboxPrompt.value,
@@ -395,7 +321,7 @@ function cancelReplan(): void {
 /** 删除当前展示的这一条结果(DESIGN-FLOOR-UI.md §8.2)。 */function removeCurrent(): void {
   const target = shownEntry.value;
   if (!target) return;
-  void removeEntry(target, { messageId: props.messageId, swipeId: props.swipeId });
+  void removeEntry(target, { chatId: props.chatId, messageId: props.messageId, swipeId: props.swipeId });
 }
 
 /**
@@ -404,7 +330,7 @@ function cancelReplan(): void {
  */
 async function removeEntry(
   target: BbiImageEntry,
-  at: { messageId: number; swipeId: number },
+  at: { chatId: string; messageId: number; swipeId: number },
 ): Promise<void> {
   const ok = await confirmDialog({
     title: '删除这张图',
@@ -412,21 +338,26 @@ async function removeEntry(
     confirmText: '删除',
     tone: 'danger',
   });
-  if (!ok) return;
+  if (!ok || getContext()?.getCurrentChatId() !== at.chatId) return;
   // stale 的图存在别的 hash 桶里,删除要用它自己的 promptHash,不能用当前 tag 的
   const bucketHash = promptHash(target.prompt);
+  const panelSlot = (target.slotSeq ?? 0) < 0;
   const removed = await deleteImageResult(
     at.messageId,
     at.swipeId,
     bucketHash,
     target.generationId,
+    panelSlot,
   );
   if (!removed) {
     toastr.error('删除失败,聊天记录未能保存', '柏宝绘');
     return;
   }
-  const ctx = getContext();
-  if (ctx) hydrateMessage(at.messageId, ctx);
+  if (panelSlot) imagePanel.revision++;
+  else {
+    const ctx = getContext();
+    if (ctx) hydrateMessage(at.messageId, ctx);
+  }
 }
 
 async function copyPrompt(): Promise<void> {

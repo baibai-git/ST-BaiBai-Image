@@ -34,8 +34,8 @@ function summarize(tags: string[], index: number, maxSummary: number): string {
  *
  * 纯函数、无宿主依赖:runner 在发请求前拼好传进 buildAutoTagMessages 的 taskNote。
  */
-export function buildSlotTaskNote(rawSource: string, seq: number, maxSummary = MAX_SUMMARY): string {
-  const tags = parseImageTags(rawSource ?? '');
+export function buildSlotTaskNote(rawSource: string | string[], seq: number, maxSummary = MAX_SUMMARY): string {
+  const tags = typeof rawSource === 'string' ? parseImageTags(rawSource) : rawSource;
   const occupied: string[] = [];
   for (let index = 0; index < tags.length; index += 1) {
     if (index === seq) continue;

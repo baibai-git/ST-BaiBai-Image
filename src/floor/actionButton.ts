@@ -1,9 +1,11 @@
 import { requestFloorTags } from '@/autoTag/runner';
 import { confirmDialog } from '@/components/confirm';
 import { ensureChatObserver, onChatMutation } from '@/floor/chatObserver';
+import { imagePanel, openImagePanel, readPanelSlots } from '@/floor/panelSlots';
 import { isCurrentChatExcluded, settings } from '@/state/settings';
 import { getContext, isAiStoryMessage } from '@/st/context';
 import { hasImageTagTrace } from '@/st/imageTagRegex';
+import { watch } from 'vue';
 
 /**
  * 楼层「生成生图 tag」按钮注入。
@@ -54,11 +56,13 @@ async function onActivate(button: HTMLElement): Promise<void> {
     return;
   }
 
-  const hasTags = hasImageTagTrace(message.mes ?? '');
+  const panel = settings.ui.floatingImagePanel;
+  const hasTags = panel ? readPanelSlots(message).length > 0 : hasImageTagTrace(message.mes ?? '');
   if (hasTags) {
     const ok = await confirmDialog({
       title: '重新生成 tag',
-      text: '本楼已有生图 tag。重新生成会先删除原 tag 再写入新的；已生成的图片保留在卡片历史里，不会丢失。',
+      text: panel ? '重新生成本楼的面板插图计划，旧图片保留在历史里。'
+        : '本楼已有生图 tag。重新规划会替换原标签，旧图片保留在历史里。',
       confirmText: '重新生成',
     });
     if (!ok) return;
@@ -115,6 +119,23 @@ function syncButtons(): void {
     const existing = extra.querySelector<HTMLElement>(`.${BUTTON_CLASS}`);
     if (wanted && !existing) extra.appendChild(createButton());
     else if (!wanted && existing && existing.dataset.running !== '1') existing.remove();
+    const pictureButton = extra.querySelector('.bbi-view-floor-images');
+    if (readPanelSlots(chat[floor]).length) {
+      if (pictureButton) continue;
+      const button = document.createElement('div');
+      button.className = 'mes_button fa-solid fa-image bbi-view-floor-images';
+      button.setAttribute('role', 'button');
+      button.tabIndex = 0;
+      button.title = '看图';
+      button.setAttribute('aria-label', '查看本楼插图');
+      button.addEventListener('click', () => openImagePanel(floor));
+      button.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        openImagePanel(floor);
+      });
+      extra.appendChild(button);
+    } else pictureButton?.remove();
   }
 }
 
@@ -126,6 +147,7 @@ export function bindTagActionButtons(): boolean {
   if (!ensureChatObserver()) return false;
   bound = true;
   onChatMutation(syncButtons);
+  watch(() => imagePanel.revision, syncButtons);
   syncButtons();
   return true;
 }

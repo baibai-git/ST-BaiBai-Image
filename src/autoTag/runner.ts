@@ -4,7 +4,6 @@ import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   applyPositionedCharRefs,
   resolveCharAnchors,
-  type PositionedCharOp,
 } from '@/autoTag/charAnchors';
 import { prepareTargetText } from '@/autoTag/clean';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
@@ -12,19 +11,15 @@ import { autoTagLayoutSelection, autoTagProfile, buildAutoTagMessages } from '@/
 import { ensureLayoutCapacity, recordLayoutRound, relaxLayoutSelection, prepareLayoutSelectionMessage, validateLayoutSelection, withLayoutTurn } from '@/autoTag/layoutCooldown';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
+import { planChangeOps } from '@/autoTag/planChangeOps';
+import { storePanelPlan } from '@/autoTag/storePanelPlan';
 import {
   BBI_CHAR_EXTRA_KEY,
-  CHAR_TAG_FIELDS,
   charTagsBeforeFloor,
-  createCharTagNewOp,
-  createCharTagSetOp,
-  emptyCharFields,
   lockedCharTagNames,
   makeCharTagFloorDelta,
   readCharTagFloorDelta,
   recomputeCharTags,
-  type CharTagAutoOp,
-  type CharTagField,
 } from '@/state/charTags';
 import { injectImageTags, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
 import {
@@ -32,6 +27,7 @@ import {
   consumeAutoGenerate,
   markForAutoGenerate,
 } from '@/floor/autoGenerate';
+import { panelSeq, readPanelSlots } from '@/floor/panelSlots';
 import { applyMessageText, type ApplyMessageResult } from '@/st/messageEdit';
 import { getContext, isAiStoryMessage, type STMessage } from '@/st/context';
 import {
@@ -134,50 +130,6 @@ function describeRebase(report: RebaseReport): string {
   return parts.join(' · ');
 }
 
-/** 把 AI 报告的 changes 转成当前楼层操作;真正写回在正文 CAS 成功时一次完成。 */
-function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
-  const ops: PositionedCharOp[] = [];
-  for (const change of plan.changes) {
-    let op: CharTagAutoOp | null = null;
-    if (change.field === 'new') {
-      // value 可能是结构化字段的 JSON 串(protocol.ts 拼),也可能是整串 tag 文本
-      let fields: Partial<Record<CharTagField, string>> | null = null;
-      let value = '';
-      if (change.value.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(change.value) as Record<string, unknown>;
-          const picked: Partial<Record<CharTagField, string>> = {};
-          for (const field of CHAR_TAG_FIELDS) {
-            const value = parsed[field];
-            if (typeof value === 'string' && value.trim()) picked[field] = value.trim();
-          }
-          if (Object.keys(picked).length) fields = picked;
-        } catch {
-          /* 非 JSON → 当整串处理 */
-        }
-      }
-      if (!fields && change.value) value = change.value;
-      op = createCharTagNewOp(
-        {
-          name: change.name,
-          fields: { ...emptyCharFields(), ...(fields ?? {}) },
-          raw: value,
-          nl: change.nl ?? '',
-          source: 'ai',
-          desc: '',
-        },
-        change.reason,
-      );
-    } else if (change.field === 'nl') {
-      op = createCharTagSetOp(change.name, 'nl', change.value || change.nl || '', change.reason);
-    } else {
-      op = createCharTagSetOp(change.name, change.field, change.value, change.reason);
-    }
-    if (op) ops.push({ op, sourceLine: change.sourceLine });
-  }
-  return ops.sort((left, right) => left.sourceLine - right.sourceLine);
-}
-
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
   const context = getContext();
   if (context && settings.defaultBackend === 'comfyui' && settings.manga.enabled) {
@@ -240,22 +192,25 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
   }
   const rawSource = message.mes;
   const slot = opts.slot;
+  const panel = slot ? slot.seq < 0 : settings.ui.floatingImagePanel;
+  const previousPanelSlots = panel ? readPanelSlots(message) : [];
+  const rewrite = slot && panel ? panelSeq(slot.seq) : undefined;
   // 单槽重写的目标:开跑时快照第 seq 条 tag 的原文,写回前用它确认 seq 指的还是同一条
   // (同提示词编辑弹窗的纪律)。正文这会儿已经没这条 tag = 期间被删/换 swipe,直接放弃。
-  const slotRawTag = slot ? parseImageTags(rawSource)[slot.seq] : undefined;
+  const slotRawTag = slot ? (rewrite === undefined ? parseImageTags(rawSource)[slot.seq] : previousPanelSlots[rewrite]?.tag) : undefined;
   if (slot && slotRawTag === undefined) {
     abort(
       floor,
       'slot-missing',
       true,
-      `第 ${slot.seq + 1} 张图片的提示词已不存在（可能已换 swipe 或被编辑），本次没有重写`,
+      `第 ${(rewrite ?? slot.seq) + 1} 张图片的提示词已不存在，本次没有重写`,
     );
     return;
   }
   // 探测口径与按钮层同源(imageTagRegex.hasImageTagTrace):两侧漂移过一次——
   // 按钮只认开标签、这里认开也认闭,只剩 `</bbi_image>` 的楼就卡成「点了没反应」。
   // 单槽重写以「本楼已有 tag」为前提,不受此闸门拦截。
-  if (hasImageTagTrace(rawSource) && !opts.replace && !slot) {
+  if ((panel ? previousPanelSlots.length > 0 : hasImageTagTrace(rawSource)) && !opts.replace && !slot) {
     abort(
       floor,
       'already-has-image-tag',
@@ -267,7 +222,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
   }
   // replace / slot:分析都基于剔除旧 tag 后的正文。写回时 replace 让旧 tag 随之消失,
   // slot 按 seq 原位替换——别的 tag 在写回基底里原样保留。
-  const source = opts.replace || slot ? stripImageTags(rawSource) : rawSource;
+  const source = opts.replace || slot || panel ? stripImageTags(rawSource) : rawSource;
   if (!source.trim()) {
     abort(floor, 'empty-source', opts.manual, '本楼正文是空的（或只剩生图 tag），没有可分析的内容');
     return;
@@ -341,7 +296,7 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
       memory,
       preparedTarget,
       anchors.text,
-      slot ? buildSlotTaskNote(rawSource, slot.seq) : '',
+      slot ? buildSlotTaskNote(panel ? previousPanelSlots.map(item => item.tag) : rawSource, rewrite ?? slot.seq) : '',
       profile,
       layoutSelection,
     );
@@ -534,6 +489,24 @@ async function runForFloorNow(floor: number, opts: RunOptions = {}): Promise<voi
       recordAdoptedLayouts();
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '柏宝绘');
       else console.debug(`[柏宝绘] 第 ${floor} 楼无需插图`);
+      return;
+    }
+
+    if (panel) {
+      const result = await storePanelPlan({
+        floor, chatId, swipeId, message, previous: previousPanelSlots, images: plan.images,
+        segments: preparedTarget.segments, customStripTags: settings.excludes.customStripTags, rewrite,
+        extras: slot ? [] : [{ key: BBI_CHAR_EXTRA_KEY, value: makeCharTagFloorDelta(floorOps, swipeId ?? 0) }],
+        autoGenerate: settings.autoTag.autoGenerate,
+      });
+      if (result === 'saved') {
+        recordAdoptedLayouts();
+        if (!slot) recomputeCharTags();
+        if (plan.images.length) toastr.success('已保存到看图面板', '柏宝绘');
+      } else {
+        processed.delete(identity);
+        toastr.warning(ABANDON_REASON[result] ?? '插图计划未保存', '柏宝绘');
+      }
       return;
     }
 

@@ -4,8 +4,11 @@ import PromptEditor from '@/floor/PromptEditor.vue';
 import { cancelFloorTags, requestSlotTag } from '@/autoTag/runner';
 import { markForAutoGenerate, consumeAutoGenerate } from '@/floor/autoGenerate';
 import { hydrateMessage } from '@/floor/hydrate';
+import { generatePanelSlot } from '@/floor/generateSlot';
+import { imagePanel, panelSeq, panelSlotUpdate, readPanelSlots } from '@/floor/panelSlots';
 import { awaitTagPlan, isTagPlanning, runTagPlan } from '@/floor/tagPlanState';
-import { slotKey } from '@/floor/genState';
+import { reconcileGen, slotKey } from '@/floor/genState';
+import { promptHash } from '@/floor/storage';
 import { confirmDialog } from '@/components/confirm';
 import { getContext } from '@/st/context';
 import {
@@ -25,11 +28,7 @@ import { applyMessageText, type ApplyMessageResult } from '@/st/messageEdit';
  * 特意**不**挂进卡片自己的 shadow root:弹窗是 fixed 全屏层,而卡片活在 .mes_text 内部,
  * 那里的层叠上下文与 overflow 会把它裁掉(灯箱同理,见 lightbox.ts)。
  *
- * 【提示词的真源是正文】
- * tag 原文存在 message.mes 里,不在 extra、不在 store。所以「编辑提示词」本质是一次
- * 正文写回:序列化新 tag → 原位替换第 seq 条 → applyMessageText(身份 CAS)→
- * 重水合。新 tag 换出新 promptHash,老图自动落进 stale 桶(卡片已有「旧提示词」角标
- * 与提示行),故「应用」不需要任何额外落地逻辑。
+ * 提示词写回原来所在的正文标签或看图面板记录。提示词改变后，卡片通过 hash 识别旧图。
  */
 
 // 与 index.ts 的 HOST_ID 一致
@@ -74,7 +73,7 @@ function failureReason(result: Exclude<ApplyMessageResult, 'saved'>): string {
     case 'swipe-changed':
       return '已切换到别的 swipe,提示词未保存';
     case 'build-failed':
-      return '正文里的这条 tag 已被改动,请关闭弹窗后重新编辑';
+      return '这条提示词已被改动，请关闭弹窗后重新编辑';
     case 'unavailable':
       return 'SillyTavern 上下文不可用,提示词未保存';
   }
@@ -103,6 +102,29 @@ async function writeBack(
   }
 
   const nextTag = serializeImageTag(content);
+  if (at.seq < 0) {
+    const index = panelSeq(at.seq);
+    try {
+      const result = await applyMessageText(at.messageId, (_text, liveMessage) => {
+        const slots = readPanelSlots(liveMessage);
+        if (slots[index]?.tag !== at.rawTag) return null;
+        slots[index] = { ...slots[index], tag: nextTag };
+        return { extra: [panelSlotUpdate(slots)] };
+      }, at.chatId, Array.isArray(message.swipes) ? at.swipeId : null, message);
+      if (result !== 'saved') {
+        toastr.warning(failureReason(result), '柏宝绘');
+        return false;
+      }
+      reconcileGen(slotKey(at.chatId, at.messageId, at.swipeId, at.seq), promptHash(nextTag));
+      imagePanel.revision++;
+      const slot = readPanelSlots(getContext()?.chat[at.messageId])[index];
+      if (regenerate && slot?.tag === nextTag) generatePanelSlot(at.chatId, at.messageId, at.swipeId, index, slot, true);
+      return true;
+    } catch (error) {
+      toastr.error(error instanceof Error ? error.message : String(error), '柏宝绘');
+      return false;
+    }
+  }
   // 标记必须挂在写回**之前**:写回即触发重水合、卡片挂载时消费标记(同 autoTag/runner.ts)。
   // force 模式无条件开跑 —— 用户点的就是「重新生成」,即便这条提示词以前出过图。
   if (regenerate) {
@@ -235,11 +257,11 @@ export function openPromptEditor(options: PromptEditorOptions): void {
    * 返回 true = 确实换了新提示词(据此给一行「已保存」的说明)。
    */
   const refreshFromMessage = (): boolean => {
-    const next = nextEditorState(
-      getContext()?.chat?.[options.at.messageId]?.mes,
-      options.at.seq,
-      rawTag,
-    );
+    const message = getContext()?.chat[options.at.messageId];
+    const panelTag = options.at.seq < 0 ? readPanelSlots(message)[panelSeq(options.at.seq)]?.tag : undefined;
+    const next = options.at.seq < 0
+      ? (panelTag && panelTag !== rawTag ? { rawTag: panelTag, content: parseImageTagContent(panelTag) } : null)
+      : nextEditorState(message?.mes, options.at.seq, rawTag);
     if (!next) return false;
     rawTag = next.rawTag;
     content = next.content;
@@ -256,7 +278,17 @@ export function openPromptEditor(options: PromptEditorOptions): void {
    */
   const startRewrite = (): void => {
     if (busy || closing || isTagPlanning(planKey)) return;
-    const task = runTagPlan(planKey, () => requestSlotTag(options.at.messageId, options.at.seq));
+    const { seq, chatId, swipeId, messageId } = options.at;
+    if (seq < 0) {
+      const ctx = getContext();
+      const message = ctx?.chat[messageId];
+      if (ctx?.getCurrentChatId() !== chatId || (message?.swipe_id ?? 0) !== swipeId
+        || readPanelSlots(message)[panelSeq(seq)]?.tag !== rawTag) {
+        toastr.warning('插图所在的楼层或重抽版本已变化，请重新打开提示词', '柏宝绘');
+        return;
+      }
+    }
+    const task = runTagPlan(planKey, () => requestSlotTag(messageId, seq));
     paint();
     void task
       .catch(() => {
